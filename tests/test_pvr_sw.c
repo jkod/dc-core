@@ -80,6 +80,17 @@ int main(void) {
     CHECK(dc_pvr_display(rgb, 64, 64, &w, &h) == 0 && w == 64 && h == 64, "display %dx%d", w, h);
     CHECK(rgb[(8 * 64 + 8) * 3] == 255 && rgb[(8 * 64 + 8) * 3 + 2] == 0, "display pixel");
 
+    /* ---- texture cache: rewriting texture memory is picked up by the next frame */
+    {
+        uint32_t eolx[8] = {0};
+        for (int i = 0; i < 64; i++) { dc_wr8(0xA4000000u + 0x100000u + i * 2, 0x1F); dc_wr8(0xA4000000u + 0x100000u + i * 2 + 1, 0x00); }   /* pure blue */
+        pvr(0x144, 0x80000000u);
+        ta(sh); ta(sv); ta(sv + 8); ta(eolx);
+        pvr(0x014, 1);
+        uint32_t t2 = fb_px(53, 50);
+        CHECK((t2 & 0xFF) == 0xFF && ((t2 >> 16) & 0xFF) == 0, "texture rewrite not picked up %06X", t2);
+    }
+
     /* ---- modifier volumes: a red quad (Shadow bit) under one volume triangle in front of it
      * (darkened, cheap shadow 0.5) and one behind it (no effect) */
     uint32_t eol8[8] = {0};

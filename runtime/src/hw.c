@@ -32,6 +32,9 @@ static uint32_t sb[0x800];           /* 0x005F6800..0x005F7FFF, word index */
 static uint32_t pvr[0x800];          /* 0x005F8000..0x005F9FFF */
 #define aram dc_aram                 /* 0x00800000..0x009FFFFF sound RAM (aica.c) */
 uint8_t dc_vram[0x800000];           /* 8 MB, 64-bit layout */
+uint32_t dc_vram_gen[0x800];         /* per 4 KB page of dc_vram: bumped on every write (texture caches) */
+uint32_t dc_pal_gen;                 /* bumped on palette RAM writes */
+#define VRAM_TOUCH(o) (dc_vram_gen[((o) & 0x7FFFFF) >> 12]++)
 static uint32_t p4[32][64];          /* SH-4 on-chip registers, by module */
 static uint32_t sq[2][8];            /* store queues */
 static uint8_t  ocram[0x2000];
@@ -277,6 +280,7 @@ static void yuv_macroblock(void) {
             uint32_t o = base + (my * 16 + y) * pitch + (mx * 16 + x) * 2;
             uint8_t px[4] = {U, Y0, V, Y1};
             for (int k = 0; k < 4; k++) dc_vram[(o + k) & 0x7FFFFF] = px[k];   /* texture memory: 64-bit (linear) layout */
+            VRAM_TOUCH(o);
         }
     if (++yuv.mb >= w_mb * h_mb) { yuv.mb = 0; dc_raise(1u << 6); }
     PVR(0x150) = yuv.mb;                                                 /* TA_YUV_TEX_CNT */
@@ -299,7 +303,7 @@ static void ta_area_write(uint32_t m, const uint8_t *p, uint32_t len) {
     int lm32 = (sub >= 0x03000000u) ? (SBR(0x6888) & 1) : (SBR(0x6884) & 1);           /* LMMODE1 / LMMODE0 */
     for (uint32_t i = 0; i < len; i += 4) {
         uint32_t o = (sub + i) & 0x7FFFFF;
-        if (lm32) memcpy(dc_vram + vram32(o), p + i, 4); else memcpy(dc_vram + o, p + i, 4);
+        if (lm32) { memcpy(dc_vram + vram32(o), p + i, 4); VRAM_TOUCH(vram32(o)); } else { memcpy(dc_vram + o, p + i, 4); VRAM_TOUCH(o); }
     }
 }
 
@@ -492,6 +496,8 @@ static void wr(uint32_t a, uint32_t v, int size) {
         uint32_t o = m - 0x005F8000u;
         PVR(o & 0x1FFC) = v;
         if (dc_hw.on_pvr_write) dc_hw.on_pvr_write(o, v);
+        if (o >= 0x1000 && o < 0x2000) dc_pal_gen++;                       /* palette RAM */
+        if (o == 0x108) dc_pal_gen++;                                      /* palette format */
         if (o == 0x0CC || o == 0x0D8 || o == 0x0DC) dc_next_event = 0;
         if (o == 0x144 && (v >> 31)) dc_ta_reset();                      /* TA_LIST_INIT */
         if (o == 0x148) { yuv.mb = 0; yuv.fill = 0; PVR(0x150) = 0; }   /* TA_YUV_TEX_BASE: new frame */
@@ -503,8 +509,8 @@ static void wr(uint32_t a, uint32_t v, int size) {
     }
     if (m >= 0x00700000u && m < 0x00710000u) { dc_aica_advance(now_cycles()); dc_aica_write(m, v, size); if (dc_hw.on_aica_write) dc_hw.on_aica_write(m, v); dc_next_event = 0; return; }
     if (m >= 0x00800000u && m < 0x00A00000u) { memcpy(aram + (m & 0x1FFFFF), &v, size); if (dc_hw.on_aica_write) dc_hw.on_aica_write(m, v); return; }
-    if ((m >> 24) == 0x04 || (m >> 24) == 0x06) { memcpy(dc_vram + (m & 0x7FFFFF), &v, size); return; }
-    if ((m >> 24) == 0x05 || (m >> 24) == 0x07) { memcpy(dc_vram + (vram32(m) | (m & 3)), &v, size); return; }
+    if ((m >> 24) == 0x04 || (m >> 24) == 0x06) { memcpy(dc_vram + (m & 0x7FFFFF), &v, size); VRAM_TOUCH(m); return; }
+    if ((m >> 24) == 0x05 || (m >> 24) == 0x07) { memcpy(dc_vram + (vram32(m) | (m & 3)), &v, size); VRAM_TOUCH(vram32(m)); return; }
     if ((m >> 26) == 0x04) {                                                                  /* 0x10000000.. TA FIFO */
         static uint32_t blk[8]; static int nb;
         if (dc_hw.on_ta_write) dc_hw.on_ta_write(m, v);

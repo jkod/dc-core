@@ -43,7 +43,11 @@ static uint32_t rd32_area32(uint32_t o) {
     for (int k = 0; k < 4; k++) v |= (uint32_t)dc_vram[vram32_ofs(o + k)] << (8 * k);
     return v;
 }
-static void wr8_area32(uint32_t o, uint8_t v) { dc_vram[vram32_ofs(o)] = v; }
+static void wr8_area32(uint32_t o, uint8_t v) {
+    uint32_t so = vram32_ofs(o);
+    if ((o & 0xFFF) == 0 || (o & 3) == 0) dc_vram_gen[so >> 12]++;    /* framebuffer writes invalidate textures there */
+    dc_vram[so] = v;
+}
 static uint16_t tex16(uint32_t o) { o &= 0x7FFFFE; return (uint16_t)(dc_vram[o] | dc_vram[o + 1] << 8); }
 static uint8_t tex8(uint32_t o) { return dc_vram[o & 0x7FFFFF]; }
 
@@ -216,11 +220,10 @@ static void sink(int kind, int list, const uint32_t *w, int words) {
 }
 
 /* ------------------------------------------------------------------ textures */
-typedef struct { uint32_t tcw, tsp_size, pal_gen; int w, h; uint32_t *px; } tex_t;
+typedef struct { uint32_t tcw, tsp_size, pal_gen, gen, start, end; int w, h; uint32_t *px; uint64_t id; } tex_t;
 #define TEX_CACHE 512
 static tex_t tcache[TEX_CACHE];
 static int ntc;
-static uint32_t pal_gen;                       /* bumped each frame: palettes may change */
 
 static uint32_t argb1555(uint16_t p) { uint32_t a = (p & 0x8000) ? 255 : 0, r = (p >> 10) & 31, g = (p >> 5) & 31, b = p & 31;
     return a << 24 | (r << 3 | r >> 2) << 16 | (g << 3 | g >> 2) << 8 | (b << 3 | b >> 2); }
@@ -248,12 +251,27 @@ static uint32_t twiddle(uint32_t u, uint32_t v, uint32_t w, uint32_t h) {
 static const uint32_t mip16[11] = {0x3, 0x4, 0x8, 0x18, 0x58, 0x158, 0x558, 0x1558, 0x5558, 0x15558, 0x55558};  /* texels */
 static const uint32_t mipvq[11] = {0x0, 0x1, 0x2, 0x6, 0x16, 0x56, 0x156, 0x556, 0x1556, 0x5556, 0x15556};      /* bytes */
 
+/* sum of the write generations of the VRAM pages a texture occupies */
+static uint32_t page_gen(uint32_t start, uint32_t end) {
+    uint32_t g = 0;
+    for (uint32_t p = start >> 12; p <= ((end - 1) >> 12) && p < 0x800; p++) g += dc_vram_gen[p] * (p + 1);
+    return g;
+}
+static uint64_t tex_ids;
+static int tc_next;
 static tex_t *get_tex(uint32_t tcw, uint32_t tsp) {
     uint32_t sz = tsp & 0x3F;
-    for (int i = 0; i < ntc; i++)
-        if (tcache[i].tcw == tcw && tcache[i].tsp_size == sz && tcache[i].pal_gen == pal_gen) return &tcache[i];
-    if (ntc == TEX_CACHE) { for (int i = 0; i < ntc; i++) free(tcache[i].px); ntc = 0; }
-    tex_t *t = &tcache[ntc++];
+    int palfmt = ((tcw >> 27) & 7) == 5 || ((tcw >> 27) & 7) == 6;
+    for (int i = 0; i < ntc; i++) {
+        tex_t *c = &tcache[i];
+        if (c->tcw != tcw || c->tsp_size != sz) continue;
+        if (page_gen(c->start, c->end) == c->gen && (!palfmt || c->pal_gen == dc_pal_gen)) return c;
+        free(c->px); *c = tcache[--ntc];                     /* stale: decode again */
+        break;
+    }
+    tex_t *t;
+    if (ntc < TEX_CACHE) t = &tcache[ntc++];
+    else { t = &tcache[tc_next++ % TEX_CACHE]; free(t->px); }
     int w = 8 << ((tsp >> 3) & 7), h = 8 << (tsp & 7);
     int fmt = (tcw >> 27) & 7, mip = (tcw >> 31) & 1, vq = (tcw >> 30) & 1;
     int linear = (tcw >> 26) & 1, stride = (tcw >> 25) & 1;
@@ -262,7 +280,7 @@ static tex_t *get_tex(uint32_t tcw, uint32_t tsp) {
     int pitch = w;                                           /* texels per row in memory */
     if (linear && stride) { pitch = (int)(REG(0x0E4) & 31) * 32; if (pitch <= 0) pitch = w; }
     if (mip) h = w;                                          /* mip-mapped textures are square */
-    t->tcw = tcw; t->tsp_size = sz; t->pal_gen = pal_gen; t->w = w; t->h = h;
+    t->tcw = tcw; t->tsp_size = sz; t->pal_gen = dc_pal_gen; t->w = w; t->h = h; t->id = ++tex_ids;
     t->px = malloc((size_t)w * h * 4);
     int lw = 0; while ((1 << lw) < w) lw++;
     uint32_t cb = addr;                                      /* VQ codebook: always at the texture address */
@@ -271,6 +289,15 @@ static tex_t *get_tex(uint32_t tcw, uint32_t tsp) {
         else if (fmt == 5) addr += mip16[lw] / 2;             /* 4 bpp */
         else if (fmt == 6) addr += mip16[lw];                 /* 8 bpp */
         else addr += mip16[lw] * 2;
+    }
+    {   /* the bytes this texture reads, for change detection */
+        uint32_t bytes = vq ? 2048 + (uint32_t)(w / 2) * (h / 2) : fmt == 5 ? (uint32_t)w * h / 2 : fmt == 6 ? (uint32_t)w * h
+                       : (uint32_t)pitch * h * 2;
+        t->start = cb & 0x7FFFFF; t->end = ((addr & 0x7FFFFF) + bytes + (vq ? 0 : 0)) ;
+        if (vq) t->end = (addr & 0x7FFFFF) + 2048 + (uint32_t)(w / 2) * (h / 2);
+        if (t->end > 0x800000) t->end = 0x800000;
+        if (t->end <= t->start) t->end = t->start + 1;
+        t->gen = page_gen(t->start, t->end);
     }
     uint32_t pal_base = fmt == 5 ? ((tcw >> 21) & 63) << 4 : ((tcw >> 25) & 3) << 8;
     for (int y = 0; y < h; y++)
@@ -580,7 +607,6 @@ int dc_pvr_sw_render(void) {
         dc_pvr_sw_debug = 0;
     }
     for (int i = 0; i < RW * RH; i++) { memcpy(cbuf + i * 4, bg, 16); zbuf[i] = bz; dbuf[i].pid = -1; }
-    pal_gen++;
     for (int i = 0; i < npl; i++) if (pl[i].list == 0) { cur_pid = i; draw_poly(&pl[i]); }
     for (int i = 0; i < npl; i++) if (pl[i].list == 4) { cur_pid = i; draw_poly(&pl[i]); }
     modifier_volumes();
