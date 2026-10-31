@@ -21,6 +21,7 @@ typedef struct dc_hw_hooks {
 extern dc_hw_hooks dc_hw;
 extern uint8_t dc_vram[0x800000];
 extern int dc_hw_verbose;
+extern void (*dc_unhandled_hook)(const char *kind, uint32_t addr);   /* every unhandled access */
 
 void     dc_raise(uint32_t istnrm_bits);      /* raise Holly normal interrupts (e.g. render done) */
 uint64_t dc_frame_count(void);

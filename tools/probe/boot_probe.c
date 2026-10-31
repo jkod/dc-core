@@ -7,6 +7,7 @@
 #include "dccore/runtime.h"
 #include "dccore/disc.h"
 #include "dccore/bios.h"
+#include "dccore/hw.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <signal.h>
@@ -42,6 +43,13 @@ static void miss(sh4ctx *c, uint32_t a) {
     FILE *f = fopen(b, "wb"); if (f) { fwrite(dc_ram + base, 1, 0x10000, f); fclose(f); printf("dumped %s\n", b); }
     exit(1);
 }
+static void unhandled(const char *k, uint32_t a) {
+    static int n; static uint32_t seen[64]; static int ns;
+    uint32_t key = last[(li - 1) & 15];
+    for (int i = 0; i < ns; i++) if (seen[i] == key) return;
+    if (ns < 64) seen[ns++] = key;
+    if (n++ < 64) printf("unhandled %s %08X in %08X (called from pr=%08X, %lu calls)\n", k, a, key, C.pr, calls);
+}
 static void trap(sh4ctx *c, uint32_t pc, const char *w) { printf("TRAP %s @%08X\n", w, pc); }
 static void alrm(int s) { report("timeout"); _exit(0); }
 
@@ -52,6 +60,7 @@ int main(int argc, char **argv) {
     if (dc_load_binary(argv[2], 0x8C010000u) < 0) { fprintf(stderr, "cannot read %s\n", argv[2]); return 2; }
     dc_bios_trace = 1;
     if (dc_bios_install(&C, argc > 4 ? argv[4][0] : '2')) fprintf(stderr, "warning: IP.BIN not loaded\n");
+    dc_unhandled_hook = unhandled; dc_hw_verbose = 0;
     dc_set_call_hook(hook); dc_set_miss_handler(miss); dc_set_trap_handler(trap);
     signal(SIGALRM, alrm); alarm(argc > 3 ? atoi(argv[3]) : 10);
     C.pr = 0xDEAD0000u;

@@ -220,7 +220,9 @@ void dc_hw_pref(uint32_t a) { if ((a >> 26) == 0x38) sq_flush(a); }   /* 0xE0000
 int dc_hw_verbose = 1;
 extern sh4ctx *dc_current_ctx;
 static int warned_n; static uint32_t warned[256];
+void (*dc_unhandled_hook)(const char *kind, uint32_t addr);
 static void warn(const char *k, uint32_t a) {
+    if (dc_unhandled_hook) dc_unhandled_hook(k, a);
     uint32_t page = a & 0xFFFFFFF0u;
     for (int i = 0; i < warned_n; i++) if (warned[i] == page) return;
     if (warned_n < 256) warned[warned_n++] = page;
