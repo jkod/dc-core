@@ -16,7 +16,9 @@
 #define V_GDROM   0x8C0000BCu
 #define V_GDROM2  0x8C0000C0u
 #define V_MISC    0x8C0000E0u
-#define HLE_BASE  0x8C001000u   /* fake entry points: never executed as code */
+#define HLE_BASE  0x8C00E000u   /* fake entry points: never executed as code */
+#define GD_ENTRY  0x8C0010F0u   /* where the real boot ROM puts the GD-ROM syscall: some games
+                                   (Rush 2049) call it directly as a disc check */
 
 int dc_bios_trace;
 #define TR(...) do { if (dc_bios_trace) fprintf(stderr, __VA_ARGS__); } while (0)
@@ -178,7 +180,7 @@ int dc_bios_install(sh4ctx *c, char region) {
         {V_GDROM, h_gdrom}, {V_GDROM2, h_gdrom}, {V_MISC, h_misc},
     };
     for (unsigned i = 0; i < sizeof v / sizeof v[0]; i++) {
-        uint32_t entry = HLE_BASE + i * 0x10;
+        uint32_t entry = v[i].vec == V_GDROM ? GD_ENTRY : HLE_BASE + i * 0x10;
         dc_wr32(v[i].vec, entry);
         dc_hle_register(entry, v[i].fn);
     }
