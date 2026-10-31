@@ -496,3 +496,16 @@ void dc_pvr_gl_present(int win_w, int win_h, int stretch) {
     p_glBlitFramebuffer(0, 0, fb_w, fb_h, dx, dy, dx + dw, dy + dh, GL_COLOR_BUFFER_BIT, GL_LINEAR);
     p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
+
+/* show an RGB8 image (top row first) instead of a rendered frame: screens the CPU drew directly
+ * into the framebuffer (dc_pvr_display) */
+void dc_pvr_gl_load_rgb(const uint8_t *rgb, int w, int h) {
+    if (!ready || w <= 0 || h <= 0) return;
+    ensure_fbo(w, h);
+    uint8_t *tmp = malloc((size_t)w * h * 3);
+    for (int y = 0; y < h; y++) memcpy(tmp + (size_t)(h - 1 - y) * w * 3, rgb + (size_t)y * w * 3, (size_t)w * 3);
+    p_glBindTexture(GL_TEXTURE_2D, color_tex);
+    p_glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, tmp);
+    free(tmp);
+}

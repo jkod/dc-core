@@ -12,6 +12,19 @@ endif()
 
 set(DCCORE_DIR ${CMAKE_CURRENT_SOURCE_DIR} CACHE INTERNAL "")
 
+# Desktop frontend (window, OpenGL 3.3, audio, input): built when SDL2 is available
+find_package(SDL2 QUIET CONFIG)
+if(SDL2_FOUND)
+  add_library(dccore_front STATIC frontend/dccore_front.c)
+  target_include_directories(dccore_front PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/frontend)
+  if(TARGET SDL2::SDL2)
+    target_link_libraries(dccore_front PUBLIC dccore SDL2::SDL2)
+  else()
+    target_include_directories(dccore_front PUBLIC ${SDL2_INCLUDE_DIRS})
+    target_link_libraries(dccore_front PUBLIC dccore ${SDL2_LIBRARIES})
+  endif()
+endif()
+
 # dccore_add_recomp(<target> BIN <1ST_READ.BIN> FUNCS <funcs.txt> [BASE 0x8C010000] [SETJMP addr...])
 #
 # Recompiles the player's own executable at configure time and builds it as a static

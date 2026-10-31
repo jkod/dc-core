@@ -23,6 +23,7 @@ int  dc_pvr_gl_init(void *(*getproc)(const char *name));
 void dc_pvr_gl_render(int scale);
 void dc_pvr_gl_present(int win_w, int win_h, int stretch);
 void dc_pvr_gl_read(uint8_t *rgb, int *w, int *h);
+void dc_pvr_gl_load_rgb(const uint8_t *rgb, int w, int h);   /* show a CPU-drawn framebuffer instead */
 #ifdef __cplusplus
 }
 #endif
