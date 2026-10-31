@@ -108,6 +108,19 @@ static void schedule_irq(uint32_t bits, uint64_t delay) {
     dc_next_event = 0;
 }
 
+/* ---------------------------------------------------------------- port A (PDTRA) */
+/* Bits 8-9 report the AV cable: 0 VGA, 2 RGB (SCART), 3 composite/S-video. Games pick their video
+ * mode from it (a PAL game runs 50 Hz on a TV cable, 480p/60 Hz on VGA). The low bits answer the
+ * boot-time handshake like the hardware does (as Flycast models it). */
+int dc_cable = 0;
+static uint32_t port_a(void) {
+    uint32_t pctra = *p4reg(0xFF80002Cu) & 0xF, pdtra = *p4reg(0xFF800030u) & 0xF, v;
+    v = (pctra == 0x8 || pctra == 0xB) ? 3 : 0;
+    if (pctra == 0xB && pdtra == 2) v = 0;
+    else if (pctra == 0xC && pdtra == 2) v = 3;
+    return v | ((uint32_t)(dc_cable & 3) << 8);
+}
+
 /* ---------------------------------------------------------------- interrupts */
 static int irq_depth;
 #define DC_IRQ_RET 0xFFFFFFF0u
@@ -383,6 +396,7 @@ static uint32_t rd(uint32_t a, int size) {
         uint64_t now = dc_current_ctx ? dc_current_ctx->cycles : 0;
         if ((a & 0xFFFFFF00u) == 0xFFD80000u) for (int ch = 0; ch < 3; ch++) tmu_sync(ch, now);
         uint32_t v = *p4reg(a);
+        if ((a & 0xFFFFFFFCu) == 0xFF800030u) v = port_a();
         return size == 4 ? v : size == 2 ? (v >> ((a & 2) * 8)) & 0xFFFF : (v >> ((a & 3) * 8)) & 0xFF;
     }
     uint32_t m = a & 0x1FFFFFFFu;

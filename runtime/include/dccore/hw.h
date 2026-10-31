@@ -21,6 +21,7 @@ typedef struct dc_hw_hooks {
 extern dc_hw_hooks dc_hw;
 extern uint8_t dc_vram[0x800000];
 extern int dc_hw_verbose;
+extern int dc_cable;             /* AV cable the game sees: 0 VGA (default), 2 RGB, 3 composite */
 extern void (*dc_hw_read_hook)(uint32_t addr, int size);              /* every hardware read */
 extern void (*dc_unhandled_hook)(const char *kind, uint32_t addr);   /* every unhandled access */
 
