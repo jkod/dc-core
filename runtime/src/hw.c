@@ -188,6 +188,29 @@ static void check_irqs(sh4ctx *c) {
 
 static uint64_t last_vbin_field = ~0ull, last_vbout_field = ~0ull;
 
+/* SPG_HBLANK_INT (0x5F80C8): bits 0-9 line_comp_val, 12-13 mode: 0 = once per field at that line,
+ * 1 = every line_comp_val lines, 2 = every line. Raises ISTNRM bit 5; returns when the next one is
+ * due. Lines are counted from the start of the field. */
+static uint64_t hb_last_line = ~0ull;      /* absolute line number (field * lines + line) last raised */
+static int hblank_line_matches(uint32_t line) {
+    uint32_t r = PVR(0x0C8), comp = r & 0x3FF, mode = (r >> 12) & 3;
+    if (mode == 0) return line == comp;
+    if (mode == 1) return comp ? line % comp == 0 : 0;
+    return mode == 2;
+}
+static uint64_t hblank_events(uint64_t now, uint64_t f, uint32_t lines) {
+    uint32_t r = PVR(0x0C8), mode = (r >> 12) & 3;
+    if (mode == 3) return ~0ull;
+    uint64_t abs_now = now / f * lines + (now % f) * lines / f;          /* current absolute line */
+    if (hb_last_line == ~0ull || abs_now - hb_last_line > lines) hb_last_line = abs_now ? abs_now - 1 : 0;
+    for (uint64_t l = hb_last_line + 1; l <= abs_now; l++)
+        if (hblank_line_matches((uint32_t)(l % lines))) { SBR(ISTNRM) |= 1u << 5; }
+    hb_last_line = abs_now;
+    for (uint64_t l = abs_now + 1; l <= abs_now + lines; l++)            /* next matching line start */
+        if (hblank_line_matches((uint32_t)(l % lines))) return (l / lines) * f + (l % lines) * f / lines;
+    return ~0ull;
+}
+
 void dc_events(sh4ctx *c) {
     uint64_t now = c->cycles, f = field_cycles(), field = now / f;
     uint32_t lines = total_lines();
@@ -200,6 +223,7 @@ void dc_events(sh4ctx *c) {
         if (dc_hw.on_vblank) dc_hw.on_vblank(frame_count);
     }
     if (now >= at_out && last_vbout_field != field) { last_vbout_field = field; SBR(ISTNRM) |= 1u << 4; }
+    uint64_t hb_next = hblank_events(now, f, lines);
     for (int ch = 0; ch < 3; ch++) tmu_sync(ch, now);
     for (int i = 0; i < evn; )
         if (evq[i].at <= now) { SBR(ISTNRM) |= evq[i].bits; evq[i] = evq[--evn]; } else i++;
@@ -209,6 +233,7 @@ void dc_events(sh4ctx *c) {
     uint64_t nx = (last_vbin_field == field) ? (field + 1) * f + (uint64_t)vbin * f / lines : at_in;
     uint64_t no = (last_vbout_field == field) ? (field + 1) * f + (uint64_t)vbout * f / lines : at_out;
     if (no < nx) nx = no;
+    if (hb_next < nx) nx = hb_next;
     for (int ch = 0; ch < 3; ch++) { uint64_t t = tmu_next_underflow(ch, now); if (t < nx) nx = t; }
     for (int i = 0; i < evn; i++) if (evq[i].at < nx) nx = evq[i].at;
     if (dc_aica_arm_running() || (SBR(ISTEXT) & 2)) { uint64_t t = dc_aica_next(); if (t < nx) nx = t; }
