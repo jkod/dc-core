@@ -80,6 +80,62 @@ int main(void) {
     CHECK(dc_pvr_display(rgb, 64, 64, &w, &h) == 0 && w == 64 && h == 64, "display %dx%d", w, h);
     CHECK(rgb[(8 * 64 + 8) * 3] == 255 && rgb[(8 * 64 + 8) * 3 + 2] == 0, "display pixel");
 
+    /* ---- modifier volumes: a red quad (Shadow bit) under one volume triangle in front of it
+     * (darkened, cheap shadow 0.5) and one behind it (no effect) */
+    uint32_t eol8[8] = {0};
+    pvr(0x074, 0x100 | 128);                        /* FPU_SHAD_SCALE: cheap shadow, factor 128/256 */
+    pvr(0x144, 0x80000000u);
+    uint32_t qh[8] = { (4u << 29) | (0u << 24) | (1u << 7), (7u << 29), (1u << 29) | (2u << 22), 0, 0, 0, 0, 0 };   /* Shadow bit, no fog */
+    ta(qh);
+    uint32_t q0[8] = { 7u << 29, fu(0), fu(0), fu(1), 0, 0, 0xFFFF0000u, 0 }, q1[8] = { 7u << 29, fu(64), fu(0), fu(1), 0, 0, 0xFFFF0000u, 0 };
+    uint32_t q2[8] = { 7u << 29, fu(0), fu(64), fu(1), 0, 0, 0xFFFF0000u, 0 }, q3[8] = { (7u << 29) | (1u << 28), fu(64), fu(64), fu(1), 0, 0, 0xFFFF0000u, 0 };
+    ta(q0); ta(q1); ta(q2); ta(q3); ta(eol8);
+    /* opaque modifier volume list: header with "inside last polygon", one triangle each */
+    uint32_t mh[8] = { (4u << 29) | (1u << 24), 1u << 29, 0, 0, 0, 0, 0, 0 };
+    ta(mh);
+    uint32_t mfront[16] = { 7u << 29, fu(2), fu(2), fu(2), fu(30), fu(2), fu(2), fu(2), fu(30), fu(2), 0, 0, 0, 0, 0, 0 };
+    ta(mfront); ta(mfront + 8);
+    ta(mh);
+    uint32_t mback[16] = { 7u << 29, fu(40), fu(40), fu(0.5f), fu(62), fu(40), fu(0.5f), fu(40), fu(62), fu(0.5f), 0, 0, 0, 0, 0, 0 };
+    ta(mback); ta(mback + 8);
+    ta(eol8);
+    pvr(0x014, 1);
+    CHECK(fb_px(5, 5) == 0x800000, "shadowed pixel %06X", fb_px(5, 5));
+    CHECK(fb_px(50, 50) == 0xFF0000, "volume behind the surface %06X", fb_px(50, 50));
+    CHECK(fb_px(50, 5) == 0xFF0000, "outside the volume %06X", fb_px(50, 5));
+
+    /* ---- two volumes, normal mode: inside the volume the polygon uses its second colour (green) */
+    pvr(0x074, 0);
+    pvr(0x144, 0x80000000u);
+    uint32_t th[8] = { (4u << 29) | (0u << 24) | (1u << 6), (7u << 29), (1u << 29) | (2u << 22), 0, (1u << 29) | (2u << 22), 0, 0, 0 };
+    ta(th);
+    uint32_t t0[8] = { 7u << 29, fu(0), fu(0), fu(1), 0xFFFF0000u, 0xFF00FF00u, 0, 0 }, t1[8] = { 7u << 29, fu(64), fu(0), fu(1), 0xFFFF0000u, 0xFF00FF00u, 0, 0 };
+    uint32_t t2[8] = { 7u << 29, fu(0), fu(64), fu(1), 0xFFFF0000u, 0xFF00FF00u, 0, 0 }, t3[8] = { (7u << 29) | (1u << 28), fu(64), fu(64), fu(1), 0xFFFF0000u, 0xFF00FF00u, 0, 0 };
+    ta(t0); ta(t1); ta(t2); ta(t3); ta(eol8);
+    ta(mh); ta(mfront); ta(mfront + 8); ta(eol8);
+    pvr(0x014, 1);
+    CHECK(fb_px(5, 5) == 0x00FF00, "second volume inside %06X", fb_px(5, 5));
+    CHECK(fb_px(50, 5) == 0xFF0000, "first volume outside %06X", fb_px(50, 5));
+
+    /* ---- table fog: full fog entry, green fog colour; fog mode 2 is unaffected */
+    for (int i = 0; i < 128; i++) pvr(0x200 + i * 4, 0xFFFF);
+    pvr(0x0B0, 0x00FF00); pvr(0x0B4, 0x8000);       /* FOG_COL_RAM, FOG_DENSITY 1.0 */
+    pvr(0x144, 0x80000000u);
+    uint32_t fh[8] = { (4u << 29), (7u << 29), (1u << 29) | (0u << 22), 0, 0, 0, 0, 0 };
+    ta(fh);
+    uint32_t f0[8] = { 7u << 29, fu(0), fu(0), fu(1), 0, 0, 0xFFFF0000u, 0 }, f1[8] = { 7u << 29, fu(30), fu(0), fu(1), 0, 0, 0xFFFF0000u, 0 };
+    uint32_t f2[8] = { (7u << 29) | (1u << 28), fu(0), fu(30), fu(1), 0, 0, 0xFFFF0000u, 0 };
+    ta(f0); ta(f1); ta(f2);
+    uint32_t nh[8] = { (4u << 29), (7u << 29), (1u << 29) | (2u << 22), 0, 0, 0, 0, 0 };
+    ta(nh);
+    uint32_t n0[8] = { 7u << 29, fu(34), fu(34), fu(1), 0, 0, 0xFFFF0000u, 0 }, n1[8] = { 7u << 29, fu(64), fu(34), fu(1), 0, 0, 0xFFFF0000u, 0 };
+    uint32_t n2[8] = { (7u << 29) | (1u << 28), fu(34), fu(64), fu(1), 0, 0, 0xFFFF0000u, 0 };
+    ta(n0); ta(n1); ta(n2); ta(eol8);
+    pvr(0x014, 1);
+    { uint32_t fp = fb_px(5, 5);      /* the PVR's blend tops out at 254/255 */
+      CHECK(((fp >> 16) & 255) <= 2 && ((fp >> 8) & 255) >= 0xFD && (fp & 255) == 0, "fogged pixel %06X", fp); }
+    CHECK(fb_px(40, 40) == 0xFF0000, "unfogged pixel %06X", fb_px(40, 40));
+
     printf(fails ? "%d pvr_sw checks failed\n" : "pvr_sw tests passed\n", fails);
     return fails != 0;
 }

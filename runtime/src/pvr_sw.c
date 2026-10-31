@@ -48,15 +48,17 @@ static uint16_t tex16(uint32_t o) { o &= 0x7FFFFE; return (uint16_t)(dc_vram[o] 
 static uint8_t tex8(uint32_t o) { return dc_vram[o & 0x7FFFFF]; }
 
 /* ------------------------------------------------------------------ display list */
-typedef struct { float x, y, z, u, v; float c[4], o[4]; } vtx;          /* colours r,g,b,a 0..1 */
+typedef struct { float x, y, z, u, v; float c[4], o[4]; float u1, v1, c1[4], o1[4]; } vtx;   /* colours r,g,b,a 0..1; *1 = second volume */
 typedef struct {
-    uint32_t isp, tsp, tcw;
+    uint32_t isp, tsp, tcw, tsp1, tcw1;
     int list, first, n, sprite;
+    int twovol, shadow;                            /* PCW Volume (two parameter sets) / Shadow bits */
 } poly;
+typedef struct { float x[3], y[3], z[3]; int inst, list; } modtri;   /* modifier volume triangle */
 
 /* The TA fills one context while the core renders another: contexts are keyed by TA_ISP_BASE at
  * list init and STARTRENDER draws the one whose base equals PARAM_BASE. */
-typedef struct { uint32_t base; int used; vtx *vt; int nvt, cap_vt; poly *pl; int npl, cap_pl; unsigned age; } ctx_t;
+typedef struct { uint32_t base; int used; vtx *vt; int nvt, cap_vt; poly *pl; int npl, cap_pl; modtri *mt; int nmt, cap_mt; unsigned age; } ctx_t;
 #define NCTX 4
 static ctx_t ctxs[NCTX];
 static ctx_t *ta_ctx = &ctxs[0];
@@ -67,6 +69,9 @@ static unsigned ctx_clock;
 #define pl (ta_ctx->pl)
 #define npl (ta_ctx->npl)
 #define cap_pl (ta_ctx->cap_pl)
+#define mt (ta_ctx->mt)
+#define nmt (ta_ctx->nmt)
+#define cap_mt (ta_ctx->cap_mt)
 static void list_init(void) {
     uint32_t base = REG(0x128) & 0xFFFFFF;
     ctx_t *c = NULL, *old = &ctxs[0];
@@ -74,11 +79,12 @@ static void list_init(void) {
     if (!c) c = old;
     c->base = base; c->used = 1; c->age = ++ctx_clock;
     ta_ctx = c;
-    npl = 0; nvt = 0;
+    npl = 0; nvt = 0; nmt = 0;
 }
 static struct {
-    uint32_t pcw, isp, tsp, tcw;
-    float face[4], face_ofs[4];
+    uint32_t pcw, isp, tsp, tcw, tsp1, tcw1;
+    float face[4], face_ofs[4], face1[4];
+    int mod_inst;                                  /* modifier volume instruction of the last header */
     int open;                                      /* index of the strip being filled, -1 none */
     int sprite;                                    /* the last header was a sprite header */
 } cur = { .open = -1 };
@@ -91,7 +97,9 @@ static vtx *new_vtx(void) {
 static poly *new_poly(int list, int sprite) {
     if (npl == cap_pl) { cap_pl = cap_pl ? cap_pl * 2 : 1024; pl = realloc(pl, cap_pl * sizeof *pl); }
     poly *p = &pl[npl++];
-    p->isp = cur.isp; p->tsp = cur.tsp; p->tcw = cur.tcw; p->list = list; p->first = nvt; p->n = 0; p->sprite = sprite;
+    p->isp = cur.isp; p->tsp = cur.tsp; p->tcw = cur.tcw; p->tsp1 = cur.tsp1; p->tcw1 = cur.tcw1;
+    p->list = list; p->first = nvt; p->n = 0; p->sprite = sprite;
+    p->twovol = !sprite && ((cur.pcw >> 6) & 1); p->shadow = (cur.pcw >> 7) & 1;
     return p;
 }
 
@@ -120,24 +128,35 @@ static void sink(int kind, int list, const uint32_t *w, int words) {
     case 4:                                           /* polygon header (or modifier volume) */
         cur.open = -1;
         cur.sprite = 0;
-        if (list == 1 || list == 3) { cur.pcw = 0; return; }   /* modifier volumes: not yet */
+        if (list == 1 || list == 3) { cur.pcw = 0; cur.mod_inst = (int)(w[1] >> 29); return; }
         cur.pcw = w[0]; cur.isp = isp_from_pcw(w[1], w[0]); cur.tsp = w[2]; cur.tcw = w[3];
         {
             int col = (w[0] >> 4) & 3, vol = (w[0] >> 6) & 1, ofs = (w[0] >> 2) & 1;
+            if (vol) { cur.tsp1 = w[4]; cur.tcw1 = w[5]; } else { cur.tsp1 = cur.tsp; cur.tcw1 = cur.tcw; }
             if (col == 2) {
-                if (words == 16 && (vol || ofs)) { float_col(w + 8, cur.face); float_col(w + 12, cur.face_ofs); }
+                if (words == 16 && vol) { float_col(w + 8, cur.face); float_col(w + 12, cur.face1); memset(cur.face_ofs, 0, sizeof cur.face_ofs); }
+                else if (words == 16 && ofs) { float_col(w + 8, cur.face); float_col(w + 12, cur.face_ofs); }
                 else float_col(w + 4, cur.face);
+                if (!vol) memcpy(cur.face1, cur.face, sizeof cur.face1);
             }
         }
         return;
     case 5:                                           /* sprite header */
         cur.open = -1;
         cur.pcw = w[0]; cur.sprite = 1;
-        cur.isp = isp_from_pcw(w[1], w[0]) & ~(1u << 23); cur.tsp = w[2]; cur.tcw = w[3];   /* sprites are flat */
+        cur.isp = isp_from_pcw(w[1], w[0]) & ~(1u << 23); cur.tsp = cur.tsp1 = w[2]; cur.tcw = cur.tcw1 = w[3];   /* sprites are flat */
         unpack(w[4], cur.face); unpack(w[5], cur.face_ofs);
         return;
     case 7: {                                         /* vertex */
-        if (list == 1 || list == 3 || !cur.pcw) return;
+        if (list == 1 || list == 3) {                 /* modifier volume triangle: x,y,z x 3 */
+            if (words < 16) return;
+            if (nmt == cap_mt) { cap_mt = cap_mt ? cap_mt * 2 : 512; mt = realloc(mt, cap_mt * sizeof *mt); }
+            modtri *m = &mt[nmt++];
+            for (int k = 0; k < 3; k++) { m->x[k] = f32(w[1 + 3 * k]); m->y[k] = f32(w[2 + 3 * k]); m->z[k] = f32(w[3 + 3 * k]); }
+            m->inst = cur.mod_inst; m->list = list;
+            return;
+        }
+        if (!cur.pcw) return;
         if (cur.sprite) {                             /* sprite: one quad per parameter */
             poly *p = new_poly(list, 1);
             int tex = (cur.isp >> 25) & 1;
@@ -170,7 +189,8 @@ static void sink(int kind, int list, const uint32_t *w, int words) {
                 else if (col == 1) float_col(w + 4, t->c);
                 else intensity(cur.face, f32(w[6]), t->c);
             } else {
-                if (col == 0) unpack(w[4], t->c); else intensity(cur.face, f32(w[4]), t->c);
+                if (col == 0) { unpack(w[4], t->c); unpack(w[5], t->c1); }
+                else { intensity(cur.face, f32(w[4]), t->c); intensity(cur.face1, f32(w[5]), t->c1); }
             }
         } else {
             if (u16) { t->u = uv16(w[4], 1); t->v = uv16(w[4], 0); } else { t->u = f32(w[4]); t->v = f32(w[5]); }
@@ -178,11 +198,14 @@ static void sink(int kind, int list, const uint32_t *w, int words) {
                 if (col == 0) { unpack(w[6], t->c); unpack(w[7], t->o); }
                 else if (col == 1) { if (words == 16) { float_col(w + 8, t->c); float_col(w + 12, t->o); } }
                 else { intensity(cur.face, f32(w[6]), t->c); intensity(cur.face_ofs, f32(w[7]), t->o); }
-            } else {
-                if (col == 0) { unpack(w[6], t->c); unpack(w[7], t->o); }
-                else { intensity(cur.face, f32(w[6]), t->c); intensity(cur.face_ofs, f32(w[7]), t->o); }
+            } else if (words == 16) {                 /* two volumes: set 1 in the second half */
+                if (u16) { t->u1 = uv16(w[8], 1); t->v1 = uv16(w[8], 0); } else { t->u1 = f32(w[8]); t->v1 = f32(w[9]); }
+                if (col == 0) { unpack(w[6], t->c); unpack(w[7], t->o); unpack(w[10], t->c1); unpack(w[11], t->o1); }
+                else { intensity(cur.face, f32(w[6]), t->c); intensity(cur.face_ofs, f32(w[7]), t->o);
+                       intensity(cur.face1, f32(w[10]), t->c1); intensity(cur.face_ofs, f32(w[11]), t->o1); }
             }
         }
+        if (!vol) { t->u1 = t->u; t->v1 = t->v; memcpy(t->c1, t->c, sizeof t->c1); memcpy(t->o1, t->o, sizeof t->o1); }
         pl[cur.open].n++;
         if ((w[0] >> 28) & 1) cur.open = -1;          /* end of strip */
         return;
@@ -338,6 +361,67 @@ static void blend_factor(int ins, const float *src, const float *dst, int is_src
 
 static int hscale;                     /* SCALER_CTL horizontal: scene is twice as wide */
 
+/* fog table: FOG_DENSITY scales 1/w; the exponent and top mantissa bits of the result pick one of
+ * 128 entries, the next mantissa bits blend its two halves (as the PVR does) */
+static float fog_table(float invw) {
+    uint32_t den = REG(0x0B4);
+    float mant = ((den >> 8) & 255) / 128.f;
+    int ex = (int8_t)(den & 255);
+    float fw = mant * ldexpf(1.f, ex) * invw;
+    if (fw < 1) fw = 1; if (fw > 255.999985f) fw = 255.999985f;
+    uint32_t b; memcpy(&b, &fw, 4);
+    uint32_t e = (b >> 23) & 255, m = b & 0x7FFFFF;
+    uint32_t idx = (((e + 1) & 7) << 4) | ((m >> 19) & 15);
+    uint32_t bl = (m >> 11) & 255, inv = 255 ^ bl;
+    uint32_t ent = REG(0x200 + idx * 4);
+    uint32_t a = ((ent & 255) * bl + ((ent >> 8) & 255) * inv) >> 8;
+    return a / 255.f;
+}
+static void unpack_rgb(uint32_t v, float *c) { c[0] = ((v >> 16) & 255) / 255.f; c[1] = ((v >> 8) & 255) / 255.f; c[2] = (v & 255) / 255.f; }
+
+/* colour of one pixel of polygon p (parameter set `set`) at perspective weights pa, pb, pc */
+static void shade(const poly *p, int set, const vtx *a, const vtx *b, const vtx *c, float pa, float pb, float pc, float z, float *out) {
+    uint32_t tsp = set ? p->tsp1 : p->tsp, tcw = set ? p->tcw1 : p->tcw;
+    int tex = (p->isp >> 25) & 1, ofs = (p->isp >> 24) & 1, gouraud = (p->isp >> 23) & 1;
+    int use_alpha = (tsp >> 20) & 1, ign_ta = (tsp >> 19) & 1, shade_i = (tsp >> 6) & 3, fogm = (tsp >> 22) & 3;
+    const float *ca = set ? a->c1 : a->c, *cb = set ? b->c1 : b->c, *cc = set ? c->c1 : c->c;
+    const float *oa = set ? a->o1 : a->o, *ob = set ? b->o1 : b->o, *oc = set ? c->o1 : c->o;
+    float col[4], off[4];
+    for (int k = 0; k < 4; k++) {
+        col[k] = gouraud ? pa * ca[k] + pb * cb[k] + pc * cc[k] : cc[k];
+        off[k] = gouraud ? pa * oa[k] + pb * ob[k] + pc * oc[k] : oc[k];
+    }
+    if (!use_alpha) col[3] = 1;
+    if (tex) {
+        tex_t *t = get_tex(tcw, tsp);
+        float tc[4];
+        float u = set ? pa * a->u1 + pb * b->u1 + pc * c->u1 : pa * a->u + pb * b->u + pc * c->u;
+        float v = set ? pa * a->v1 + pb * b->v1 + pc * c->v1 : pa * a->v + pb * b->v + pc * c->v;
+        sample(t, tsp, u, v, tc);
+        if (ign_ta) tc[3] = 1;
+        switch (shade_i) {
+        case 0: for (int k = 0; k < 3; k++) out[k] = tc[k]; out[3] = tc[3]; break;
+        case 1: for (int k = 0; k < 3; k++) out[k] = tc[k] * col[k]; out[3] = tc[3]; break;
+        case 2: for (int k = 0; k < 3; k++) out[k] = tc[k] * tc[3] + col[k] * (1 - tc[3]); out[3] = col[3]; break;
+        default: for (int k = 0; k < 3; k++) out[k] = tc[k] * col[k]; out[3] = tc[3] * col[3]; break;
+        }
+        if (dc_pvr_sw_highlight && highlighted(tcw, tsp)) { out[0] = 1; out[1] = 0; out[2] = 1; }
+    } else memcpy(out, col, 4 * sizeof *out);
+    if (ofs) for (int k = 0; k < 3; k++) { out[k] += off[k]; if (out[k] > 1) out[k] = 1; }
+    if (fogm != 2) {                                  /* 0 table, 1 vertex (offset alpha), 3 table mode 2 */
+        float fc[3], f;
+        if (fogm == 1) { unpack_rgb(REG(0x0AC), fc); f = off[3]; }
+        else { unpack_rgb(REG(0x0B0), fc); f = fog_table(z); }
+        if (fogm == 3) { for (int k = 0; k < 3; k++) out[k] = fc[k]; out[3] = f; }
+        else for (int k = 0; k < 3; k++) out[k] = out[k] * (1 - f) + fc[k] * f;
+    }
+}
+
+/* per-pixel record of what produced each opaque / punch-through pixel, for modifier volumes */
+typedef struct { int pid, va, vb, vc; float pa, pb; } dpix;
+static dpix *dbuf;
+static int cur_pid;
+
 static void draw_tri(const poly *p, const vtx *a, const vtx *b, const vtx *c, int flip) {
     float ax = a->x, ay = a->y, bx = b->x, by = b->y, cx = c->x, cy = c->y;
     float area = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
@@ -347,18 +431,18 @@ static void draw_tri(const poly *p, const vtx *a, const vtx *b, const vtx *c, in
     if (cull == 1 && fabsf(area) < f32(REG(0x078))) return;
     if (cull == 2 && sarea < 0) return;
     if (cull == 3 && sarea > 0) return;
-    int list = p->list, tex = (p->isp >> 25) & 1, ofs = (p->isp >> 24) & 1, gouraud = (p->isp >> 23) & 1;
+    int list = p->list;
     int zmode = (p->isp >> 29) & 7, zwrite = !((p->isp >> 26) & 1);
     if (list == 2) zwrite = 0;
     if (list == 4 && zmode == 0) zmode = 6;
     uint32_t tsp = p->tsp;
-    int src_i = (tsp >> 29) & 7, dst_i = (tsp >> 26) & 7, use_alpha = (tsp >> 20) & 1, ign_ta = (tsp >> 19) & 1, shade = (tsp >> 6) & 3;
-    tex_t *t = tex ? get_tex(p->tcw, tsp) : NULL;
+    int src_i = (tsp >> 29) & 7, dst_i = (tsp >> 26) & 7;
     int x0 = (int)floorf(fminf(ax, fminf(bx, cx))), x1 = (int)ceilf(fmaxf(ax, fmaxf(bx, cx)));
     int y0 = (int)floorf(fminf(ay, fminf(by, cy))), y1 = (int)ceilf(fmaxf(ay, fmaxf(by, cy)));
     if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0; if (x1 > RW) x1 = RW; if (y1 > RH) y1 = RH;
     float inv = 1.f / area;
     float pt_ref = (REG(0x11C) & 255) / 255.f;
+    int ia = (int)(a - vt), ib = (int)(b - vt), ic = (int)(c - vt);
     for (int y = y0; y < y1; y++)
         for (int x = x0; x < x1; x++) {
             float px = x + 0.5f, py = y + 0.5f;
@@ -372,35 +456,75 @@ static void draw_tri(const poly *p, const vtx *a, const vtx *b, const vtx *c, in
             /* perspective-correct weights (z = 1/w) */
             float pa = w0 * a->z, pb = w1 * b->z, pc = w2 * c->z, ps = pa + pb + pc;
             if (ps != 0) { pa /= ps; pb /= ps; pc /= ps; } else { pa = w0; pb = w1; pc = w2; }
-            float col[4], off[4];
-            for (int k = 0; k < 4; k++) {
-                col[k] = gouraud ? pa * a->c[k] + pb * b->c[k] + pc * c->c[k] : c->c[k];
-                off[k] = gouraud ? pa * a->o[k] + pb * b->o[k] + pc * c->o[k] : c->o[k];
-            }
-            if (!use_alpha) col[3] = 1;
             float px_[4];
-            if (t) {
-                float tc[4];
-                sample(t, tsp, pa * a->u + pb * b->u + pc * c->u, pa * a->v + pb * b->v + pc * c->v, tc);
-                if (ign_ta) tc[3] = 1;
-                switch (shade) {
-                case 0: for (int k = 0; k < 3; k++) px_[k] = tc[k]; px_[3] = tc[3]; break;
-                case 1: for (int k = 0; k < 3; k++) px_[k] = tc[k] * col[k]; px_[3] = tc[3]; break;
-                case 2: for (int k = 0; k < 3; k++) px_[k] = tc[k] * tc[3] + col[k] * (1 - tc[3]); px_[3] = col[3]; break;
-                default: for (int k = 0; k < 3; k++) px_[k] = tc[k] * col[k]; px_[3] = tc[3] * col[3]; break;
-                }
-            } else memcpy(px_, col, sizeof px_);
-            if (t && dc_pvr_sw_highlight && highlighted(p->tcw, tsp)) { px_[0] = 1; px_[1] = 0; px_[2] = 1; }
-            if (ofs) for (int k = 0; k < 3; k++) { px_[k] += off[k]; if (px_[k] > 1) px_[k] = 1; }
+            shade(p, 0, a, b, c, pa, pb, pc, z, px_);
             if (list == 4 && px_[3] < pt_ref) continue;
             float *d = cbuf + i * 4;
             if (list == 2) {
                 float fs[4], fd[4];
                 blend_factor(src_i, px_, d, 1, fs); blend_factor(dst_i, px_, d, 0, fd);
                 for (int k = 0; k < 4; k++) { float v = px_[k] * fs[k] + d[k] * fd[k]; d[k] = v > 1 ? 1 : v; }
-            } else memcpy(d, px_, sizeof px_);
+            } else {
+                memcpy(d, px_, sizeof px_);
+                dpix *dp = &dbuf[i]; dp->pid = cur_pid; dp->va = ia; dp->vb = ib; dp->vc = ic; dp->pa = pa; dp->pb = pb;
+            }
             if (zwrite) zbuf[i] = z;
         }
+}
+
+/* modifier volumes (opaque list): even/odd count of volume triangles in front of the surface at
+ * each pixel; a volume ends with a triangle whose instruction is 1 (inside last) or 2 (outside).
+ * Affected pixels get the shadow factor (cheap shadow mode) or their polygon's second set. */
+static uint8_t *mvbuf, *mvacc;
+static void mod_tri(const modtri *m) {
+    float ax = m->x[0], ay = m->y[0], bx = m->x[1], by = m->y[1], cx = m->x[2], cy = m->y[2];
+    float area = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+    if (area == 0) return;
+    int x0 = (int)floorf(fminf(ax, fminf(bx, cx))), x1 = (int)ceilf(fmaxf(ax, fmaxf(bx, cx)));
+    int y0 = (int)floorf(fminf(ay, fminf(by, cy))), y1 = (int)ceilf(fmaxf(ay, fmaxf(by, cy)));
+    if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0; if (x1 > RW) x1 = RW; if (y1 > RH) y1 = RH;
+    float inv = 1.f / area;
+    for (int y = y0; y < y1; y++)
+        for (int x = x0; x < x1; x++) {
+            float px = x + 0.5f, py = y + 0.5f;
+            float w0 = ((bx - px) * (cy - py) - (by - py) * (cx - px)) * inv;
+            float w1 = ((cx - px) * (ay - py) - (cy - py) * (ax - px)) * inv;
+            float w2 = 1 - w0 - w1;
+            if (w0 < 0 || w1 < 0 || w2 < 0) continue;
+            float z = w0 * m->z[0] + w1 * m->z[1] + w2 * m->z[2];
+            int i = y * RW + x;
+            if (z >= zbuf[i]) mvbuf[i] ^= 1;          /* volume surface between the eye and the pixel */
+        }
+}
+static void modifier_volumes(void) {
+    int n = RW * RH, any = 0;
+    memset(mvbuf, 0, (size_t)n); memset(mvacc, 0, (size_t)n);
+    for (int k = 0; k < nmt; k++) {
+        const modtri *m = &mt[k];
+        if (m->list != 1) continue;
+        mod_tri(m);
+        if (m->inst == 1 || m->inst == 2) {           /* last triangle of a volume */
+            for (int i = 0; i < n; i++) { if ((mvbuf[i] & 1) == (m->inst == 1)) mvacc[i] = 1; }
+            memset(mvbuf, 0, (size_t)n); any = 1;
+        }
+    }
+    if (!any) return;
+    uint32_t shad = REG(0x074);
+    int cheap = (shad >> 8) & 1;
+    float factor = (shad & 255) / 256.f;
+    for (int i = 0; i < n; i++) {
+        if (!mvacc[i] || dbuf[i].pid < 0) continue;
+        const poly *p = &pl[dbuf[i].pid];
+        float *d = cbuf + i * 4;
+        if (cheap) { if (p->shadow) for (int k = 0; k < 3; k++) d[k] *= factor; }
+        else if (p->twovol) {
+            const dpix *dp = &dbuf[i];
+            float pc = 1 - dp->pa - dp->pb, out[4];
+            const vtx *a = &vt[dp->va], *b = &vt[dp->vb], *c = &vt[dp->vc];
+            shade(p, 1, a, b, c, dp->pa, dp->pb, pc, zbuf[i], out);
+            memcpy(d, out, sizeof out);
+        }
+    }
 }
 
 static void draw_poly(const poly *p) {
@@ -440,7 +564,10 @@ int dc_pvr_sw_render(void) {
     if (W < 16 || W > 1280) W = 640;
     if (H < 16 || H > 1024) H = 480;
     RW = W * (hscale ? 2 : 1); RH = H;
-    if (RW * RH > cap_px) { cap_px = RW * RH; cbuf = realloc(cbuf, (size_t)cap_px * 16); zbuf = realloc(zbuf, (size_t)cap_px * 4); }
+    if (RW * RH > cap_px) {
+        cap_px = RW * RH; cbuf = realloc(cbuf, (size_t)cap_px * 16); zbuf = realloc(zbuf, (size_t)cap_px * 4);
+        dbuf = realloc(dbuf, (size_t)cap_px * sizeof *dbuf); mvbuf = realloc(mvbuf, (size_t)cap_px); mvacc = realloc(mvacc, (size_t)cap_px);
+    }
     float bg[4], bz;
     background(bg, &bz);
     if (dc_pvr_sw_debug) {
@@ -452,10 +579,11 @@ int dc_pvr_sw_render(void) {
                     dc_vram[ta + 1], dc_vram[ta], dc_vram[ta + 3], dc_vram[ta + 2], dc_vram[ta + 0x401], dc_vram[ta + 0x400]); }
         dc_pvr_sw_debug = 0;
     }
-    for (int i = 0; i < RW * RH; i++) { memcpy(cbuf + i * 4, bg, 16); zbuf[i] = bz; }
+    for (int i = 0; i < RW * RH; i++) { memcpy(cbuf + i * 4, bg, 16); zbuf[i] = bz; dbuf[i].pid = -1; }
     pal_gen++;
-    for (int i = 0; i < npl; i++) if (pl[i].list == 0) draw_poly(&pl[i]);
-    for (int i = 0; i < npl; i++) if (pl[i].list == 4) draw_poly(&pl[i]);
+    for (int i = 0; i < npl; i++) if (pl[i].list == 0) { cur_pid = i; draw_poly(&pl[i]); }
+    for (int i = 0; i < npl; i++) if (pl[i].list == 4) { cur_pid = i; draw_poly(&pl[i]); }
+    modifier_volumes();
     /* translucent: ISP_FEED_CFG bit 0 = presort (submission order), else sort back to front */
     int presort = REG(0x098) & 1, nt = 0;
     sort_e *s = malloc(sizeof *s * (npl ? npl : 1));
