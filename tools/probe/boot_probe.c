@@ -30,6 +30,7 @@ static void print_guest_str(uint32_t p) {
     for (; i < 159; i++) { char ch = (char)dc_rd8(p + i); if (!ch) break; b[i] = (ch >= 32 && ch < 127) ? ch : '.'; }
     b[i] = 0; printf("\"%s\"", b);
 }
+static uint64_t cur_frame;          /* vblanks so far */
 static uint32_t trace_from; static int trace_left, trace_armed;
 static void hook(sh4ctx *c, uint32_t a) {
     calls++; last[li++ & 15] = a;
@@ -70,7 +71,6 @@ static void miss(sh4ctx *c, uint32_t a) {
     FILE *f = fopen(b, "wb"); if (f) { fwrite(dc_ram + base, 1, 0x10000, f); fclose(f); printf("dumped %s\n", b); }
     exit(1);
 }
-static uint64_t cur_frame;          /* vblanks so far */
 #ifdef DC_WATCH
 uint32_t dc_watch_lo = 0xFFFFFFFFu, dc_watch_hi = 0, dc_rwatch_lo = 0xFFFFFFFFu, dc_rwatch_hi = 0;
 void dc_rwatch_hit(uint32_t a, int size) {
