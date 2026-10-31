@@ -128,3 +128,56 @@ int dc_disc_read(uint32_t lba, uint32_t count, uint8_t *dst) {
     }
     return 0;
 }
+
+/* ---------------------------------------------------------------- ISO9660 lookup (HD area) */
+static int find_in_dir(uint32_t lba, uint32_t size, const char *name, size_t nlen, uint32_t *elba, uint32_t *esize, int *is_dir) {
+    uint8_t *d = (uint8_t *)malloc(size + 2048);
+    if (!d || dc_disc_read(lba, (size + 2047) / 2048, d)) { free(d); return -1; }
+    for (uint32_t p = 0; p < size; ) {
+        uint8_t ln = d[p];
+        if (!ln) { p = (p / 2048 + 1) * 2048; continue; }
+        const uint8_t *e = d + p;
+        size_t fl = e[32];
+        const char *fn = (const char *)e + 33;
+        size_t n = 0; while (n < fl && fn[n] != ';') n++;
+        if (n == nlen) {
+            size_t k = 0;
+            while (k < n && toupper((unsigned char)fn[k]) == toupper((unsigned char)name[k])) k++;
+            if (k == n) {
+                *elba = e[2] | e[3] << 8 | e[4] << 16 | (uint32_t)e[5] << 24;
+                *esize = e[10] | e[11] << 8 | e[12] << 16 | (uint32_t)e[13] << 24;
+                *is_dir = (e[25] & 2) != 0;
+                free(d); return 0;
+            }
+        }
+        p += ln;
+    }
+    free(d);
+    return -1;
+}
+
+int dc_disc_find(const char *path, uint32_t *lba, uint32_t *size) {
+    uint8_t pvd[2048];
+    if (dc_disc_read(45000 + 16, 1, pvd) || memcmp(pvd + 1, "CD001", 5)) return -1;
+    const uint8_t *r = pvd + 156;
+    uint32_t dl = r[2] | r[3] << 8 | r[4] << 16 | (uint32_t)r[5] << 24, ds = r[10] | r[11] << 8 | r[12] << 16 | (uint32_t)r[13] << 24;
+    while (*path == '/') path++;
+    for (;;) {
+        const char *slash = strchr(path, '/');
+        size_t n = slash ? (size_t)(slash - path) : strlen(path);
+        int is_dir = 0;
+        if (find_in_dir(dl, ds, path, n, &dl, &ds, &is_dir)) return -1;
+        if (!slash) { *lba = dl; *size = ds; return 0; }
+        if (!is_dir) return -1;
+        path = slash + 1;
+    }
+}
+
+int dc_disc_load_file(const char *path, uint8_t *dst, uint32_t max) {
+    uint32_t lba, size;
+    if (dc_disc_find(path, &lba, &size) || size > max) return -1;
+    uint8_t *tmp = (uint8_t *)malloc(((size + 2047) / 2048) * 2048);
+    if (!tmp || dc_disc_read(lba, (size + 2047) / 2048, tmp)) { free(tmp); return -1; }
+    memcpy(dst, tmp, size); free(tmp);
+    return (int)size;
+}

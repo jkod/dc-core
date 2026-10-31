@@ -11,6 +11,9 @@ void dc_disc_close(void);
 int  dc_disc_read(uint32_t lba, uint32_t count, uint8_t *dst);
 int  dc_disc_track_count(void);
 int  dc_disc_track_info(int i, uint32_t *lba, int *is_data, uint32_t *sectors);
+/* ISO9660 file in the high-density area ("1ST_READ.BIN", "DATA/X.BIN"; case-insensitive) */
+int  dc_disc_find(const char *path, uint32_t *lba, uint32_t *size);
+int  dc_disc_load_file(const char *path, uint8_t *dst, uint32_t max);   /* bytes read, -1 on error */
 #ifdef __cplusplus
 }
 #endif
