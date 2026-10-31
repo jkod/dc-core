@@ -19,6 +19,7 @@
 #include <stdio.h>
 
 #define REG(o) dc_pvr_reg(o)
+int dc_pvr_sw_debug;          /* non-zero: describe the next rendered frame on stderr */
 
 /* ------------------------------------------------------------------ VRAM views */
 static uint32_t vram32_ofs(uint32_t o) {           /* 32-bit area offset -> storage offset */
@@ -425,11 +426,14 @@ int dc_pvr_sw_render(void) {
     if (RW * RH > cap_px) { cap_px = RW * RH; cbuf = realloc(cbuf, (size_t)cap_px * 16); zbuf = realloc(zbuf, (size_t)cap_px * 4); }
     float bg[4], bz;
     background(bg, &bz);
-    if (getenv("PVRDBG")) {
+    if (dc_pvr_sw_debug) {
         fprintf(stderr, "pvr: %dx%d bg %.2f %.2f %.2f z %g, %d polys\n", RW, RH, bg[0], bg[1], bg[2], bz, npl);
         for (int i = 0; i < npl; i++) { const vtx *v = vt + pl[i].first;
-            fprintf(stderr, " poly list %d n %d sprite %d isp %08X tsp %08X tcw %08X v0 %.1f,%.1f,%.2f c %.2f %.2f %.2f %.2f\n", pl[i].list, pl[i].n, pl[i].sprite,
-                    pl[i].isp, pl[i].tsp, pl[i].tcw, v->x, v->y, v->z, v->c[0], v->c[1], v->c[2], v->c[3]); }
+            uint32_t ta = (pl[i].tcw & 0x1FFFFF) << 3;
+            fprintf(stderr, " poly list %d n %d sprite %d isp %08X tsp %08X tcw %08X v0 %.1f,%.1f,%.2f uv %.3f,%.3f c %.2f %.2f %.2f %.2f tex@%06X: %02X%02X %02X%02X %02X%02X\n", pl[i].list, pl[i].n, pl[i].sprite,
+                    pl[i].isp, pl[i].tsp, pl[i].tcw, v->x, v->y, v->z, v->u, v->v, v->c[0], v->c[1], v->c[2], v->c[3], ta,
+                    dc_vram[ta + 1], dc_vram[ta], dc_vram[ta + 3], dc_vram[ta + 2], dc_vram[ta + 0x401], dc_vram[ta + 0x400]); }
+        dc_pvr_sw_debug = 0;
     }
     for (int i = 0; i < RW * RH; i++) { memcpy(cbuf + i * 4, bg, 16); zbuf[i] = bz; }
     pal_gen++;

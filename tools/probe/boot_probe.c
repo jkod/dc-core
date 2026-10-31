@@ -188,6 +188,7 @@ static void on_render_sw(void) { renders++; dc_pvr_sw_render(); rendered++; }
 static void on_vblank(uint64_t f) {
     cur_frame = f;
     if (getenv("DC_SHOT")) shot_check(f);
+    if (getenv("DC_PVRDBG") && (uint64_t)atoll(getenv("DC_PVRDBG")) == f) dc_pvr_sw_debug = 1;
     if (getenv("DC_TRACE_FRAME")) {   /* DC_TRACE_FRAME=frame:count: trace calls from that vblank on */
         unsigned fr = 0, n = 200; sscanf(getenv("DC_TRACE_FRAME"), "%u:%u", &fr, &n);
         if (f == fr) { trace_armed = 1; trace_left = (int)n; }
