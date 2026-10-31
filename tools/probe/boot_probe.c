@@ -84,6 +84,15 @@ static void hw_report(void) {
     }
     fflush(stdout);
 }
+/* sound-side trace (DC_AICATRACE=1): AICA register writes and G2 DMA transfers */
+static void aica_wr(uint32_t a, uint32_t v) { static int n; if (n++ < 60) printf("aica wr %08X = %08X (in %08X, %lu calls)\n", a, v, last[(li - 1) & 15], calls); }
+static void sb_wr(uint32_t a, uint32_t v) {
+    if ((a & 0xFFFF) >= 0x7800 && (a & 0xFFFF) < 0x7880 && (a & 0x1F) == 0x18 && (v & 1)) {
+        uint32_t b = (a & 0x1FFFFFFFu) - 0x18;
+        printf("G2 DMA ch%u: g2=%08X sh4=%08X len=%u dir=%u (in %08X)\n", ((a & 0xFFFF) - 0x7818) / 0x20,
+               dc_sb_reg(b), dc_sb_reg(b + 4), dc_sb_reg(b + 8) & 0x7FFFFFFF, dc_sb_reg(b + 12), last[(li - 1) & 15]);
+    }
+}
 static void trap(sh4ctx *c, uint32_t pc, const char *w) { printf("TRAP %s @%08X\n", w, pc); }
 static void alrm(int s) { report("timeout"); if (getenv("DC_HWSTATS")) hw_report(); _exit(0); }
 
@@ -102,6 +111,7 @@ int main(int argc, char **argv) {
     dc_unhandled_hook = unhandled; dc_hw_verbose = 0;
     dc_bios_read_hook = on_read;
     if (getenv("DC_HWSTATS")) dc_hw_read_hook = hw_read;
+    if (getenv("DC_AICATRACE")) { dc_hw.on_aica_write = aica_wr; dc_hw.on_sb_write = sb_wr; }
 #ifdef DC_WATCH
     if (getenv("DC_WATCH")) { unsigned lo, len = 4; sscanf(getenv("DC_WATCH"), "%x:%x", &lo, &len); dc_watch_lo = lo & 0xFFFFFF; dc_watch_hi = dc_watch_lo + len; }
 #endif
