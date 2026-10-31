@@ -125,15 +125,17 @@ static void take_irq(sh4ctx *c, uint32_t code) {
      * resumes returns to the marker. */
     c->spc = DC_IRQ_RET;
     dc_call(c, c->vbr + 0x600);
+    c->pr = saved_pr;
+    irq_depth--;
+    /* if the handler did not rte (unusual), restore SR ourselves */
+    if (sh4_get_sr(c) & SR_BL) sh4_set_sr(c, c->ssr);
+    /* the interrupt is over; redirected code is ordinary code of the interrupted task (it may
+     * switch to another task, which must see interrupts enabled) */
     for (int n = 0; c->spc != DC_IRQ_RET && n < 4; n++) {
         uint32_t to = c->spc;
         c->spc = DC_IRQ_RET;
         dc_call(c, to);
     }
-    c->pr = saved_pr;
-    irq_depth--;
-    /* if the handler did not rte (unusual), restore SR ourselves */
-    if (sh4_get_sr(c) & SR_BL) sh4_set_sr(c, c->ssr);
 }
 
 static int holly_level(void) {
