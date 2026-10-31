@@ -118,6 +118,15 @@ static void sb_wr(uint32_t a, uint32_t v) {
                dc_sb_reg(b), dc_sb_reg(b + 4), dc_sb_reg(b + 8) & 0x7FFFFFFF, dc_sb_reg(b + 12), last[(li - 1) & 15]);
     }
 }
+/* DC_DUMP_FRAMES=a,b,c: dump RAM at these vblank counts (ramdump_f<N>.bin) */
+static void on_vblank(uint64_t f) {
+    const char *p = getenv("DC_DUMP_FRAMES");
+    while (p && *p) {
+        unsigned long v = strtoul(p, (char **)&p, 10);
+        if (v == f) { char b[64]; snprintf(b, sizeof b, "ramdump_f%05lu.bin", v); FILE *o = fopen(b, "wb"); if (o) { fwrite(dc_ram, 1, 0x1000000, o); fclose(o); } }
+        if (*p == ',') p++; else break;
+    }
+}
 static void trap(sh4ctx *c, uint32_t pc, const char *w) { printf("TRAP %s @%08X\n", w, pc); }
 static void alrm(int s) { report("timeout"); if (getenv("DC_HWSTATS")) hw_report(); _exit(0); }
 
@@ -136,6 +145,7 @@ int main(int argc, char **argv) {
     dc_unhandled_hook = unhandled; dc_hw_verbose = 0;
     dc_bios_read_hook = on_read;
     if (getenv("DC_HWSTATS")) dc_hw_read_hook = hw_read;
+    if (getenv("DC_DUMP_FRAMES")) dc_hw.on_vblank = on_vblank;
     if (getenv("DC_LOGFN")) {
         const char *p = getenv("DC_LOGFN");
         while (*p && nlogfn < 8) { unsigned a, r; if (sscanf(p, "%x:%u", &a, &r) != 2) break; logfn[nlogfn].a = a | 0x80000000u; logfn[nlogfn].reg = (int)r; nlogfn++; p = strchr(p, ','); if (!p) break; p++; }
