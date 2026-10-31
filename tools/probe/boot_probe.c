@@ -28,7 +28,10 @@ static void report(const char *why) {
     printf("%s after %lu calls, %u distinct functions\nlast calls:", why, calls, nseen);
     for (int i = 0; i < 16; i++) printf(" %08X", last[(li + i) & 15]);
     printf("\nr0..r7: "); for (int i = 0; i < 8; i++) printf("%08X ", C.r[i]);
-    printf("pr=%08X sr=%08X\n", C.pr, sh4_get_sr(&C));
+    printf("pr=%08X sr=%08X\nr8..r15: ", C.pr, sh4_get_sr(&C));
+    for (int i = 8; i < 16; i++) printf("%08X ", C.r[i]);
+    printf("\n");
+    FILE *f = fopen("ramdump_full.bin", "wb"); if (f) { fwrite(dc_ram, 1, 0x1000000, f); fclose(f); }
     fflush(stdout);
 }
 static void miss(sh4ctx *c, uint32_t a) {
