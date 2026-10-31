@@ -1,0 +1,131 @@
+/* dc-core: guest setjmp/longjmp and cooperative threads on host coroutines (see coro.h). */
+#if defined(__APPLE__) && !defined(_XOPEN_SOURCE)
+#define _XOPEN_SOURCE 600      /* ucontext on macOS */
+#endif
+#include "dccore/coro.h"
+#include "dccore/runtime.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <ucontext.h>
+
+extern sh4ctx *dc_current_ctx;    /* dispatch.c */
+uint32_t dc_coro_setjmp_addr;   /* 0 = feature off: DC_CALL_SETJMP is a plain call */
+int dc_coro_trace;
+
+typedef struct coro {
+    ucontext_t uc;
+    void *stack;
+    struct slot *pending;        /* set by whoever switches here: longjmp to this slot on resume */
+    int refs;                    /* live slots owned by this coroutine */
+    int started, is_main;
+} coro;
+
+typedef struct slot {
+    jmp_buf jb;                  /* first: the address of the slot is the jmp_buf* handed out */
+    uint32_t buf, r15, pr;       /* guest buffer and the state its longjmp returns to */
+    coro *owner;
+    int used;
+} slot;
+
+#define MAX_SLOTS 256
+#define MAX_COROS 64
+static slot slots[MAX_SLOTS];
+static coro coros[MAX_COROS];
+static int ncoros;
+static coro main_coro = { .is_main = 1, .started = 1 };
+static coro *cur = &main_coro;
+static sh4fn orig_longjmp;
+static uint32_t longjmp_addr;
+static size_t stack_bytes = 1u << 20;
+
+int dc_coro_count(void) { return ncoros; }
+
+static slot *find_slot(uint32_t buf) {
+    for (int i = 0; i < MAX_SLOTS; i++) if (slots[i].used && slots[i].buf == buf) return &slots[i];
+    return NULL;
+}
+static void drop_slot(slot *s) { if (s->used) { s->used = 0; s->owner->refs--; } }
+
+jmp_buf *dc_coro_setjmp_slot(sh4ctx *c) {
+    uint32_t buf = (c->r[4] & 0x1FFFFFFFu) | 0x80000000u;
+    slot *s = find_slot(buf);
+    if (s) drop_slot(s);
+    else for (int i = 0; i < MAX_SLOTS && !s; i++) if (!slots[i].used) s = &slots[i];
+    if (!s) { fprintf(stderr, "dc-core: out of setjmp slots\n"); return NULL; }
+    s->buf = buf;
+    return &s->jb;
+}
+
+void dc_coro_setjmp_done(sh4ctx *c, jmp_buf *jb) {
+    if (!jb) return;
+    slot *s = (slot *)jb;
+    s->r15 = c->r[15]; s->pr = c->pr; s->owner = cur; s->used = 1; cur->refs++;
+}
+
+static void switch_to(coro *to) {
+    coro *from = cur;
+    cur = to;
+    swapcontext(&from->uc, &to->uc);
+    /* resumed: someone longjmp'd into one of our setjmps */
+    cur = from;
+    slot *s = from->pending; from->pending = NULL;
+    if (s) DC_LONGJMP(s->jb, 1);
+}
+
+/* a thread started by longjmp into a hand-made context: the restore ended with rts, so run from pr;
+ * a guest function returning goes on at its pr, like rts */
+static void coro_main(void) {
+    sh4ctx *c = dc_current_ctx;
+    for (;;) dc_call(c, c->pr);
+}
+
+static coro *new_coro(void) {
+    coro *k = NULL;
+    for (int i = 0; i < ncoros && !k; i++)              /* reuse one nothing can resume any more */
+        if (coros[i].refs == 0 && &coros[i] != cur) k = &coros[i];
+    if (!k) {
+        if (ncoros == MAX_COROS) { fprintf(stderr, "dc-core: out of coroutines\n"); abort(); }
+        k = &coros[ncoros++];
+        k->stack = malloc(stack_bytes);
+    }
+    getcontext(&k->uc);
+    k->uc.uc_stack.ss_sp = k->stack; k->uc.uc_stack.ss_size = stack_bytes; k->uc.uc_link = NULL;
+    makecontext(&k->uc, coro_main, 0);
+    k->pending = NULL; k->refs = 0; k->started = 1;
+    return k;
+}
+
+static uint32_t h_longjmp(sh4ctx *c) {
+    uint32_t buf = (c->r[4] & 0x1FFFFFFFu) | 0x80000000u;
+    /* the game's own restore: registers, r15, pr, r0 = val (ends with rts) */
+    c->entry = longjmp_addr;
+    uint32_t next = orig_longjmp(c);
+    if (next) dc_call(c, next);
+    slot *s = find_slot(buf);
+    if (s && s->r15 == c->r[15] && s->pr == c->pr) {
+        if (dc_coro_trace) fprintf(stderr, "coro: longjmp %08X -> setjmp of %s%ld (pr %08X)\n", buf,
+                                   s->owner->is_main ? "main" : "coro ", s->owner->is_main ? 0L : (long)(s->owner - coros), s->pr);
+        if (s->owner == cur) DC_LONGJMP(s->jb, 1);
+        s->owner->pending = s;
+        switch_to(s->owner);
+        return 0;   /* not reached: switch_to longjmps when we are resumed */
+    }
+    /* a context the game made itself (new thread, or a thread sent to its exit routine) */
+    if (s) drop_slot(s);
+    coro *k = new_coro();
+    if (dc_coro_trace) fprintf(stderr, "coro: longjmp %08X starts coro %ld at %08X (r15 %08X)\n",
+                               buf, (long)(k - coros), c->pr, c->r[15]);
+    switch_to(k);
+    return 0;
+}
+
+void dc_coro_install(uint32_t setjmp_addr, uint32_t lj_addr, size_t host_stack) {
+    setjmp_addr = (setjmp_addr & 0x1FFFFFFFu) | 0x80000000u;
+    lj_addr = (lj_addr & 0x1FFFFFFFu) | 0x80000000u;
+    if (host_stack) stack_bytes = host_stack;
+    orig_longjmp = dc_lookup(lj_addr);
+    if (!orig_longjmp) { fprintf(stderr, "dc-core: no recompiled longjmp at %08X\n", lj_addr); return; }
+    longjmp_addr = lj_addr;
+    dc_coro_setjmp_addr = setjmp_addr;
+    dc_hle_register(lj_addr, h_longjmp);
+}

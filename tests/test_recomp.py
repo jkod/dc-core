@@ -129,6 +129,26 @@ t("mid_function_entry", {0: [0xD101, 0x412B, 0x0009, 0x0009, (BASE + 0x24) & 0xF
 t("literal_slot_written_at_runtime", {0: [0xC702, 0x2042, 0xD001, 0x000B, 0x0009, 0x0009, 0x0000, 0x0000]},
   "c.r[4] = 0x1234ABCDu;", "c.r[0] == 0x1234ABCDu")
 
+# cooperative threads through a game's own setjmp (S) / longjmp (L), dccore/coro.h:
+#   main: 3 x { if (!setjmp(bufM)) longjmp(bufT, 1); }  -> r0 = counter
+#   thread (context built by hand: stack 8C0F0000, entry T): for (;;) { counter++; if (!setjmp(bufT)) longjmp(bufM, 1); }
+#   S: save r15, pr, r14, r8 to @r4; r0 = 0      L: restore them from @r4; r0 = r5 (rts -> saved pr)
+S, L, T = BASE + 0x100, BASE + 0x140, BASE + 0x80
+lw = lambda v: [v & 0xFFFF, v >> 16]
+t("coro_setjmp_threads", {
+    0x00: [0x4F22, 0xE903, 0xD408, 0xD109, 0x410B, 0x0009, 0x2008, 0x8B03,
+           0xD407, 0xD108, 0x410B, 0xE501, 0x4910, 0x8BF3, 0xD106, 0x6012,
+           0x4F26, 0x000B, 0x0009, 0x0009] + lw(0x8C100000) + lw(S) + lw(0x8C100100) + lw(L) + lw(0x8C100200),
+    0x80: [0xD107, 0x6012, 0x7001, 0x2102, 0xD406, 0xD107, 0x410B, 0x0009,
+           0x2008, 0x8BF5, 0xD405, 0xD106, 0x410B, 0xE501, 0x0009, 0x0009]
+          + lw(0x8C100200) + lw(0x8C100100) + lw(S) + lw(0x8C100000) + lw(L),
+    0x100: [0x24F2, 0x002A, 0x1401, 0x14E2, 0x1483, 0x000B, 0xE000],
+    0x140: [0x6F42, 0x5041, 0x402A, 0x5E42, 0x5843, 0x000B, 0x6053]},
+  "dc_wr32(0x8C100100u, 0x8C0F0000u); dc_wr32(0x8C100104u, %du); dc_wr32(0x8C100200u, 0);"
+  "dc_coro_install(%du, %du, 0);" % (T, S, L),
+  "c.r[0] == 3 && dc_coro_count() == 1")
+EXTRA = {"coro_setjmp_threads": ["--setjmp", hex(S)]}
+
 def build_bin(prog):
     size = max(off + 2 * len(w) for off, w in prog.items())
     size = (size + 0x40) & ~3
@@ -149,9 +169,10 @@ def main():
         open(os.path.join(d, "funcs.txt"), "w").write("\n".join("%08x" % s for s in starts))
         subprocess.check_call([sys.executable, os.path.join(ROOT, "tools/recomp/sh4recomp.py"),
                                os.path.join(d, "t.bin"), "--funcs", os.path.join(d, "funcs.txt"),
-                               "--out", os.path.join(d, "gen")], stdout=subprocess.DEVNULL)
+                               "--out", os.path.join(d, "gen")] + EXTRA.get(name, []), stdout=subprocess.DEVNULL)
         main_c = """
 #include "dccore/runtime.h"
+#include "dccore/coro.h"
 #include <stdio.h>
 #include <string.h>
 extern int dc_alias_verbose;

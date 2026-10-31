@@ -4,7 +4,7 @@ project(dc_core C)
 set(CMAKE_C_STANDARD 11)
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
-add_library(dccore STATIC runtime/src/dispatch.c runtime/src/disc.c runtime/src/bios_hle.c runtime/src/hw.c runtime/src/ta.c runtime/src/arm7.c runtime/src/aica.c)
+add_library(dccore STATIC runtime/src/dispatch.c runtime/src/disc.c runtime/src/bios_hle.c runtime/src/hw.c runtime/src/ta.c runtime/src/arm7.c runtime/src/aica.c runtime/src/coro.c)
 target_include_directories(dccore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/runtime/include)
 if(NOT MSVC)
   target_link_libraries(dccore PUBLIC m)
@@ -12,12 +12,12 @@ endif()
 
 set(DCCORE_DIR ${CMAKE_CURRENT_SOURCE_DIR} CACHE INTERNAL "")
 
-# dccore_add_recomp(<target> BIN <1ST_READ.BIN> FUNCS <funcs.txt> [BASE 0x8C010000])
+# dccore_add_recomp(<target> BIN <1ST_READ.BIN> FUNCS <funcs.txt> [BASE 0x8C010000] [SETJMP addr...])
 #
 # Recompiles the player's own executable at configure time and builds it as a static
 # library. The generated C is derived from the game and stays in the build directory.
 function(dccore_add_recomp target)
-  cmake_parse_arguments(A "" "BIN;FUNCS;BASE" "" ${ARGN})
+  cmake_parse_arguments(A "" "BIN;FUNCS;BASE" "SETJMP" ${ARGN})
   if(NOT A_BASE)
     set(A_BASE 0x8C010000)
   endif()
@@ -25,9 +25,13 @@ function(dccore_add_recomp target)
   if(NOT EXISTS ${A_BIN})
     message(FATAL_ERROR "${A_BIN} not found - run the setup step that extracts it from your GDI first")
   endif()
+  set(sj)
+  foreach(a ${A_SETJMP})
+    list(APPEND sj --setjmp ${a})
+  endforeach()
   execute_process(
     COMMAND ${Python3_EXECUTABLE} ${DCCORE_DIR}/tools/recomp/sh4recomp.py ${A_BIN}
-            --base ${A_BASE} --funcs ${A_FUNCS} --out ${out}
+            --base ${A_BASE} --funcs ${A_FUNCS} --out ${out} ${sj}
     RESULT_VARIABLE rc)
   if(NOT rc EQUAL 0)
     message(FATAL_ERROR "sh4recomp failed")

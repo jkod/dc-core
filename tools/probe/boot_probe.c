@@ -5,6 +5,7 @@
  *   ./boot_probe game.cue|game.gdi 1ST_READ.BIN [seconds] [region 0/1/2]
  */
 #include "dccore/runtime.h"
+#include "dccore/coro.h"
 #include "dccore/disc.h"
 #include "dccore/bios.h"
 #include "dccore/hw.h"
@@ -156,6 +157,10 @@ int main(int argc, char **argv) {
     if (dc_bios_install(&C, argc > 4 ? argv[4][0] : '2')) fprintf(stderr, "warning: IP.BIN not loaded\n");
     dc_unhandled_hook = unhandled; dc_hw_verbose = 0;
     dc_bios_read_hook = on_read;
+    if (getenv("DC_CORO")) {   /* the game's setjmp,longjmp (recompile with --setjmp too) */
+        unsigned sj = 0, lj = 0; sscanf(getenv("DC_CORO"), "%x,%x", &sj, &lj);
+        dc_coro_install(sj, lj, 0); dc_coro_trace = getenv("DC_CORO_TRACE") != NULL;
+    }
     if (getenv("DC_HWSTATS")) dc_hw_read_hook = hw_read;
     if (getenv("DC_DUMP_FRAMES")) dc_hw.on_vblank = on_vblank;
     if (getenv("DC_TRACE_FROM")) { unsigned a, n = 200; sscanf(getenv("DC_TRACE_FROM"), "%x:%u", &a, &n); trace_from = a | 0x80000000u; trace_left = (int)n; }

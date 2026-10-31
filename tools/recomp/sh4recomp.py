@@ -47,6 +47,7 @@ class Translator:
     def __init__(self, data, base):
         self.data = data; self.base = base; self.end = base + len(data)
         self.volatile = self._volatile_literals()
+        self.setjmp = set()          # the game's setjmp routine(s): calls get DC_CALL_SETJMP
 
     def _volatile_literals(self):
         """Literal-pool words that code can write: some routines keep variables in their own pool
@@ -419,9 +420,11 @@ class Translator:
         if k == "bra":
             return "{ %s %s }" % (slot, self.goto_or_call(i.target, start, end, a))
         if k == "bsr":
-            return "{ c->pr = %s; %s dc_call(c, %s); %s }" % (h(nxt), slot, h(i.target), self._after_call(nxt, end))
+            call = "DC_CALL_SETJMP" if i.target in self.setjmp else "dc_call"
+            return "{ c->pr = %s; %s %s(c, %s); %s }" % (h(nxt), slot, call, h(i.target), self._after_call(nxt, end))
         if k == "jsr":
-            return "{ uint32_t t_ = %s; c->pr = %s; %s dc_call(c, t_); %s }" % (R(i.reg), h(nxt), slot, self._after_call(nxt, end))
+            call = "DC_CALL_SETJMP" if self.setjmp and self._reg_const(insns, a, i.reg, start) in self.setjmp else "dc_call"
+            return "{ uint32_t t_ = %s; c->pr = %s; %s %s(c, t_); %s }" % (R(i.reg), h(nxt), slot, call, self._after_call(nxt, end))
         if k == "bsrf":
             return "{ uint32_t t_ = %s + %s; c->pr = %s; %s dc_call(c, t_); %s }" % (R(i.reg), h(nxt), h(nxt), slot, self._after_call(nxt, end))
         if k == "rts":
@@ -434,6 +437,21 @@ class Translator:
         if k == "braf":
             return "{ jt = %s + %s; %s goto local_jump; }" % (R(i.reg), h(nxt), slot)
         raise ValueError(k)
+
+    def _reg_const(self, insns, a, reg, start):
+        """Value of reg at a if one of the 8 preceding instructions loads it from the literal pool
+        (and nothing in between names it as a destination)."""
+        b = a - 2
+        while b >= max(start, a - 16):
+            op = self.u16(b)
+            if op is None: return None
+            if (op >> 8) & 0xF == reg:
+                if op >> 12 == 0xD:
+                    v = self.u32(((b + 4) & ~3) + (op & 0xFF) * 4)
+                    return None if v is None else (v & 0x1FFFFFFF) | 0x80000000
+                return None
+            b -= 2
+        return None
 
     def _after_call(self, nxt, end):
         return "goto L_%08X;" % nxt if nxt < end else "return %s;" % h(nxt)
@@ -567,10 +585,13 @@ def main():
     ap.add_argument("--max-func-bytes", type=lambda x: int(x, 0), default=0x40000,
                     help="cap a function's range (protects against huge data gaps)")
     ap.add_argument("--no-discover", action="store_true")
+    ap.add_argument("--setjmp", action="append", default=[], type=lambda x: int(x, 0),
+                    help="address of the game's setjmp (cooperative threads; see dccore/coro.h)")
     args = ap.parse_args()
     data = open(args.bin, "rb").read()
     base = int(args.base, 0)
     tr = Translator(data, base)
+    tr.setjmp = {(a & 0x1FFFFFFF) | 0x80000000 for a in args.setjmp}
     funcs = read_funcs(args.funcs, base, base + len(data)) if args.funcs else scan_functions(tr)
     if not args.funcs:
         print("scan: %d function starts" % len(funcs))

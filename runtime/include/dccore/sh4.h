@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <math.h>
+#include <setjmp.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -79,6 +80,23 @@ typedef uint32_t (*sh4fn)(sh4ctx *c);
 void dc_call(sh4ctx *c, uint32_t addr);
 /* Called for things the recompiler cannot do statically (trapa, sleep, rte, unknown opcodes). */
 void dc_trap(sh4ctx *c, uint32_t pc, const char *what);
+
+/* Calls to a game's setjmp (recompiler --setjmp, runtime in coro.c): after the guest routine
+ * has saved its registers, a host setjmp in this frame lets the guest longjmp come back here. */
+#if defined(__APPLE__)
+#define DC_SETJMP(b) _setjmp(b)
+#define DC_LONGJMP(b, v) _longjmp(b, v)
+#else
+#define DC_SETJMP(b) setjmp(b)
+#define DC_LONGJMP(b, v) longjmp(b, v)
+#endif
+extern uint32_t dc_coro_setjmp_addr;
+jmp_buf *dc_coro_setjmp_slot(sh4ctx *c);              /* before the call: slot for buffer r4 */
+void dc_coro_setjmp_done(sh4ctx *c, jmp_buf *slot);   /* after it: remember r15/pr/coroutine */
+#define DC_CALL_SETJMP(c, t) do { uint32_t sjt_ = (t); \
+    if (sjt_ == dc_coro_setjmp_addr) { jmp_buf *sjb_ = dc_coro_setjmp_slot(c); dc_call(c, sjt_); \
+        dc_coro_setjmp_done(c, sjb_); if (sjb_) (void)DC_SETJMP(*sjb_); } \
+    else dc_call(c, sjt_); } while (0)
 
 /* ---------------- SR / FPSCR ---------------- */
 static inline uint32_t sh4_get_sr(const sh4ctx *c) {
