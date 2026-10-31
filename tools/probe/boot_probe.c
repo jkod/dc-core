@@ -43,6 +43,15 @@ static void miss(sh4ctx *c, uint32_t a) {
     FILE *f = fopen(b, "wb"); if (f) { fwrite(dc_ram + base, 1, 0x10000, f); fclose(f); printf("dumped %s\n", b); }
     exit(1);
 }
+#ifdef DC_WATCH
+uint32_t dc_watch_lo = 0xFFFFFFFFu, dc_watch_hi = 0;
+static int nwatch;
+void dc_watch_hit(uint32_t a, uint32_t v, int size) {
+    if (nwatch++ > 200) return;
+    printf("watch: wr%d %08X = %08X in %08X pr=%08X r4..r7 %08X %08X %08X %08X (%lu calls)\n", size * 8, a, v,
+           last[(li - 1) & 15], C.pr, C.r[4], C.r[5], C.r[6], C.r[7], calls);
+}
+#endif
 static void unhandled(const char *k, uint32_t a) {
     static int n; static uint32_t seen[64]; static int ns;
     uint32_t key = last[(li - 1) & 15];
@@ -61,6 +70,9 @@ int main(int argc, char **argv) {
     dc_bios_trace = 1;
     if (dc_bios_install(&C, argc > 4 ? argv[4][0] : '2')) fprintf(stderr, "warning: IP.BIN not loaded\n");
     dc_unhandled_hook = unhandled; dc_hw_verbose = 0;
+#ifdef DC_WATCH
+    if (getenv("DC_WATCH")) { unsigned lo, len = 4; sscanf(getenv("DC_WATCH"), "%x:%x", &lo, &len); dc_watch_lo = lo & 0xFFFFFF; dc_watch_hi = dc_watch_lo + len; }
+#endif
     dc_set_call_hook(hook); dc_set_miss_handler(miss); dc_set_trap_handler(trap);
     signal(SIGALRM, alrm); alarm(argc > 3 ? atoi(argv[3]) : 10);
     C.pr = 0xDEAD0000u;

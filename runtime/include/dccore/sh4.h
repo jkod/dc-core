@@ -49,9 +49,17 @@ void     dc_hw_pref(uint32_t a);          /* store-queue flush etc. */
 static inline uint8_t  dc_rd8 (uint32_t a) { if (DC_IS_RAM(a)) return dc_ram[DC_RAM_OFS(a)]; return dc_hw_rd8(a); }
 static inline uint16_t dc_rd16(uint32_t a) { if (DC_IS_RAM(a)) { uint16_t v; memcpy(&v, dc_ram + DC_RAM_OFS(a), 2); return v; } return dc_hw_rd16(a); }
 static inline uint32_t dc_rd32(uint32_t a) { if (DC_IS_RAM(a)) { uint32_t v; memcpy(&v, dc_ram + DC_RAM_OFS(a), 4); return v; } return dc_hw_rd32(a); }
-static inline void dc_wr8 (uint32_t a, uint8_t v)  { if (DC_IS_RAM(a)) { dc_ram[DC_RAM_OFS(a)] = v; return; } dc_hw_wr8(a, v); }
-static inline void dc_wr16(uint32_t a, uint16_t v) { if (DC_IS_RAM(a)) { memcpy(dc_ram + DC_RAM_OFS(a), &v, 2); return; } dc_hw_wr16(a, v); }
-static inline void dc_wr32(uint32_t a, uint32_t v) { if (DC_IS_RAM(a)) { memcpy(dc_ram + DC_RAM_OFS(a), &v, 4); return; } dc_hw_wr32(a, v); }
+#ifdef DC_WATCH
+/* debug builds (-DDC_WATCH): every RAM write inside [dc_watch_lo, dc_watch_hi) is reported */
+extern uint32_t dc_watch_lo, dc_watch_hi;
+void dc_watch_hit(uint32_t a, uint32_t v, int size);
+#define DC_WATCHED(a, v, n) do { uint32_t o_ = DC_RAM_OFS(a); if (o_ + (n) > dc_watch_lo && o_ < dc_watch_hi) dc_watch_hit(a, v, n); } while (0)
+#else
+#define DC_WATCHED(a, v, n) ((void)0)
+#endif
+static inline void dc_wr8 (uint32_t a, uint8_t v)  { if (DC_IS_RAM(a)) { DC_WATCHED(a, v, 1); dc_ram[DC_RAM_OFS(a)] = v; return; } dc_hw_wr8(a, v); }
+static inline void dc_wr16(uint32_t a, uint16_t v) { if (DC_IS_RAM(a)) { DC_WATCHED(a, v, 2); memcpy(dc_ram + DC_RAM_OFS(a), &v, 2); return; } dc_hw_wr16(a, v); }
+static inline void dc_wr32(uint32_t a, uint32_t v) { if (DC_IS_RAM(a)) { DC_WATCHED(a, v, 4); memcpy(dc_ram + DC_RAM_OFS(a), &v, 4); return; } dc_hw_wr32(a, v); }
 
 static inline float dc_rdf(uint32_t a) { uint32_t u = dc_rd32(a); float f; memcpy(&f, &u, 4); return f; }
 static inline void  dc_wrf(uint32_t a, float f) { uint32_t u; memcpy(&u, &f, 4); dc_wr32(a, u); }
