@@ -469,6 +469,23 @@ def discover(tr, funcs, rounds=4):
 PROLOGUE = {0x4F22, 0x2FE6, 0x2FD6, 0x2FC6, 0x2FB6, 0x2FA6, 0x2F96, 0x2F86, 0x4F12, 0x4F02}
 
 
+def bra_tables(tr):
+    """Switch tables made of `bra case ; slot` pairs (entered with braf/jmp): every entry is a
+    jump target. Runs of 3+ consecutive pairs whose slot is a nop or simple op qualify."""
+    out = []
+    a = tr.base
+    end = tr.end
+    while a < end - 4:
+        run = 0
+        while a + run * 4 < end - 2 and (tr.u16(a + run * 4) >> 12) == 0xA and (tr.u16(a + run * 4 + 2) == 0x0009):
+            run += 1
+        if run >= 3:
+            out.extend(a + k * 4 for k in range(run)); a += run * 4
+        else:
+            a += 2
+    return out
+
+
 def scan_functions(tr):
     """Seed function starts without a disassembler project: the entry point, plus every
     bsr / `mov.l @(pc),Rn ; jsr @Rn` target and every pointer in the image that lands on a
@@ -527,6 +544,10 @@ def main():
     funcs = read_funcs(args.funcs, base, base + len(data)) if args.funcs else scan_functions(tr)
     if not args.funcs:
         print("scan: %d function starts" % len(funcs))
+    tabs = set(bra_tables(tr)) - set(funcs)
+    if tabs:
+        funcs = sorted(set(funcs) | tabs)
+        print("switch tables: %d bra entries" % len(tabs))
     if not args.no_discover:
         n0 = len(funcs); funcs = discover(tr, funcs)
         print("discovered %d extra call targets" % (len(funcs) - n0))
