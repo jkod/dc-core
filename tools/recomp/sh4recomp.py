@@ -473,7 +473,12 @@ def scan_functions(tr):
     def ok(x): return tr.base <= x < end and x % 2 == 0
     def looks_like_start(x):
         op = tr.u16(x)
-        return op is not None and (op in PROLOGUE or (op & 0xFF00) == 0x7F00 and (op & 0x80))
+        if op is None: return False
+        if op in PROLOGUE or ((op & 0xFF00) == 0x7F00 and (op & 0x80)): return True
+        # right after the end of another function: rts ; slot [; nop padding...]
+        k = x - 2
+        while k >= x - 16 and tr.u16(k) == 0x0009: k -= 2
+        return tr.u16(k - 2) == 0x000B or tr.u16(k) == 0x000B
     lit = {}
     a = tr.base
     while a < end - 1:
@@ -527,13 +532,27 @@ def main():
         e = funcs[k + 1] if k + 1 < len(funcs) else base + len(data)
         e = min(e, s + args.max_func_bytes)
         ranges.append((s, e))
+    # one file per 16 KB of address space: adding a function only changes its own file,
+    # and files whose text is unchanged are not rewritten (incremental builds stay fast)
     files = []
-    for ci in range(0, len(ranges), args.chunk):
+    groups = {}
+    for s_, e_ in ranges:
+        groups.setdefault(s_ >> 14, []).append((s_, e_))
+    keep = set()
+    for g, rs in sorted(groups.items()):
         out = ['#include "dccore/sh4.h"', ""]
-        for s, e in ranges[ci:ci + args.chunk]:
-            tr.emit_function(s, e, funcs, out); out.append("")
-        fn = os.path.join(args.out, "recomp_%03d.c" % (ci // args.chunk))
-        open(fn, "w").write("\n".join(out)); files.append(fn)
+        for s_, e_ in rs:
+            tr.emit_function(s_, e_, funcs, out); out.append("")
+        fn = os.path.join(args.out, "recomp_%08X.c" % (g << 14))
+        text = "\n".join(out)
+        if not (os.path.exists(fn) and open(fn).read() == text):
+            open(fn, "w").write(text)
+        files.append(fn); keep.add(os.path.basename(fn))
+    for f in os.listdir(args.out):
+        if f.startswith("recomp_") and f.endswith(".c") and f != "recomp_table.c" and f not in keep:
+            os.remove(os.path.join(args.out, f))
+            o = os.path.join(args.out, f[:-2] + ".o")
+            if os.path.exists(o): os.remove(o)
     # dispatch table
     tab = ['#include "dccore/sh4.h"', "#include <stddef.h>", ""]
     for s, _ in ranges: tab.append("void f_%08X(sh4ctx *c);" % s)
@@ -543,7 +562,9 @@ def main():
     for s, _ in ranges: tab.append("  { %s, f_%08X }," % (h(s), s))
     tab.append("};")
     tab.append("const size_t dc_fn_count = %d;" % len(ranges))
-    open(os.path.join(args.out, "recomp_table.c"), "w").write("\n".join(tab) + "\n")
+    tp = os.path.join(args.out, "recomp_table.c"); text = "\n".join(tab) + "\n"
+    if not (os.path.exists(tp) and open(tp).read() == text):
+        open(tp, "w").write(text)
     print("%d functions, %d files -> %s" % (len(ranges), len(files) + 1, args.out))
 
 
