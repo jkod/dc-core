@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <signal.h>
 #include <unistd.h>
+#include <string.h>
 
 static sh4ctx C;
 static unsigned long calls;
@@ -19,8 +20,21 @@ static uint32_t last[16]; static int li;
 #define NU 65536
 static uint32_t seen[NU]; static unsigned nseen;
 
+/* DC_LOGFN=addr:reg[,addr:reg...]: print the C string in that register whenever addr is called
+ * (a game's own debug/error printer) */
+static struct { uint32_t a; int reg; } logfn[8]; static int nlogfn;
+static void print_guest_str(uint32_t p) {
+    char b[160]; int i = 0;
+    if (!DC_IS_RAM(p)) { printf("(%08X)", p); return; }
+    for (; i < 159; i++) { char ch = (char)dc_rd8(p + i); if (!ch) break; b[i] = (ch >= 32 && ch < 127) ? ch : '.'; }
+    b[i] = 0; printf("\"%s\"", b);
+}
 static void hook(sh4ctx *c, uint32_t a) {
     calls++; last[li++ & 15] = a;
+    for (int i = 0; i < nlogfn; i++) if (logfn[i].a == ((a & 0x1FFFFFFFu) | 0x80000000u)) {
+        printf("log %08X r4=%08X r5=%08X r6=%08X: ", a, c->r[4], c->r[5], c->r[6]);
+        print_guest_str(c->r[logfn[i].reg]); printf(" (pr=%08X)\n", c->pr);
+    }
     uint32_t h = (a * 2654435761u) % NU;
     while (seen[h] && seen[h] != a) h = (h + 1) % NU;
     if (!seen[h] && nseen < NU - 1) { seen[h] = a; nseen++; }
@@ -118,6 +132,10 @@ int main(int argc, char **argv) {
     dc_unhandled_hook = unhandled; dc_hw_verbose = 0;
     dc_bios_read_hook = on_read;
     if (getenv("DC_HWSTATS")) dc_hw_read_hook = hw_read;
+    if (getenv("DC_LOGFN")) {
+        const char *p = getenv("DC_LOGFN");
+        while (*p && nlogfn < 8) { unsigned a, r; if (sscanf(p, "%x:%u", &a, &r) != 2) break; logfn[nlogfn].a = a | 0x80000000u; logfn[nlogfn].reg = (int)r; nlogfn++; p = strchr(p, ','); if (!p) break; p++; }
+    }
     if (getenv("DC_AICATRACE")) { dc_hw.on_aica_write = aica_wr; dc_hw.on_sb_write = sb_wr; }
 #ifdef DC_WATCH
     if (getenv("DC_WATCH")) { unsigned lo, len = 4; sscanf(getenv("DC_WATCH"), "%x:%x", &lo, &len); dc_watch_lo = lo & 0xFFFFFF; dc_watch_hi = dc_watch_lo + len; }
