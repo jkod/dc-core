@@ -10,7 +10,7 @@ typedef struct dc_hw_hooks {
     void (*on_irq)(uint32_t intevt);
     void (*on_pvr_write)(uint32_t ofs, uint32_t v);        /* ofs from 0x005F8000 */
     void (*on_sb_write)(uint32_t addr, uint32_t v);        /* 0x005F6800.. */
-    void (*on_aica_write)(uint32_t addr, uint32_t v);
+    void (*on_aica_write)(uint32_t addr, uint32_t v);      /* AICA registers and sound RAM */
     void (*on_ta_write)(uint32_t addr, uint32_t v);        /* direct 32-bit writes to the TA FIFO */
     int  (*on_sq)(uint32_t dst, const uint32_t data[8]);   /* store-queue burst; return 1 if consumed */
     void (*on_render)(void);                               /* STARTRENDER: draw the lists received so far */

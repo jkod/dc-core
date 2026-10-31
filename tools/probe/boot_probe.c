@@ -106,7 +106,11 @@ static void hw_report(void) {
     fflush(stdout);
 }
 /* sound-side trace (DC_AICATRACE=1): AICA register writes and G2 DMA transfers */
-static void aica_wr(uint32_t a, uint32_t v) { static int n; if (n++ < 60) printf("aica wr %08X = %08X (in %08X, %lu calls)\n", a, v, last[(li - 1) & 15], calls); }
+static unsigned long aram_writes, aica_reg_writes;
+static void aica_wr(uint32_t a, uint32_t v) {
+    if (a >= 0x00800000u) { aram_writes++; return; }
+    if (aica_reg_writes++ < 80) printf("aica reg wr %08X = %08X (in %08X, %lu calls, %lu sound-RAM writes so far)\n", a, v, last[(li - 1) & 15], calls, aram_writes);
+}
 static void sb_wr(uint32_t a, uint32_t v) {
     if ((a & 0xFFFF) >= 0x7800 && (a & 0xFFFF) < 0x7880 && (a & 0x1F) == 0x18 && (v & 1)) {
         uint32_t b = (a & 0x1FFFFFFFu) - 0x18;
