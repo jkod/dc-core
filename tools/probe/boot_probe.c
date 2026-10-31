@@ -31,7 +31,14 @@ static void report(const char *why) {
     printf("pr=%08X sr=%08X\n", C.pr, sh4_get_sr(&C));
     fflush(stdout);
 }
-static void miss(sh4ctx *c, uint32_t a) { char b[64]; snprintf(b, sizeof b, "MISS %08X", a); report(b); exit(1); }
+static void miss(sh4ctx *c, uint32_t a) {
+    char b[64]; snprintf(b, sizeof b, "MISS %08X", a); report(b);
+    /* code outside the executable (copied to RAM at runtime): dump the 64 KB around it */
+    uint32_t base = (a & 0x00FFFFFFu) & ~0xFFFFu;
+    snprintf(b, sizeof b, "ramdump_%08X.bin", 0x8C000000u | base);
+    FILE *f = fopen(b, "wb"); if (f) { fwrite(dc_ram + base, 1, 0x10000, f); fclose(f); printf("dumped %s\n", b); }
+    exit(1);
+}
 static void trap(sh4ctx *c, uint32_t pc, const char *w) { printf("TRAP %s @%08X\n", w, pc); }
 static void alrm(int s) { report("timeout"); _exit(0); }
 
