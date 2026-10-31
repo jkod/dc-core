@@ -76,11 +76,13 @@ static void hw_read(uint32_t a, int size) {
         if (hs[h].a == a || !hs[h].n) { hs[h].a = a; hs[h].n++; hs[h].fn = last[(li - 1) & 15]; return; }
 }
 static void hw_report(void) {
+    fflush(stdout);
     for (int top = 0; top < 25; top++) {
         int b = -1; for (int i = 0; i < HS; i++) if (hs[i].n && (b < 0 || hs[i].n > hs[b].n)) b = i;
         if (b < 0 || !hs[b].n) break;
         printf("hwread %08X x%lu (last in %08X)\n", hs[b].a, hs[b].n, hs[b].fn); hs[b].n = 0;
     }
+    fflush(stdout);
 }
 static void trap(sh4ctx *c, uint32_t pc, const char *w) { printf("TRAP %s @%08X\n", w, pc); }
 static void alrm(int s) { report("timeout"); if (getenv("DC_HWSTATS")) hw_report(); _exit(0); }
