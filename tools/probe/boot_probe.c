@@ -45,7 +45,7 @@ static void hook(sh4ctx *c, uint32_t a) {
         printf("trace %08X r4=%08X r5=%08X r6=%08X r0=%08X pr=%08X\n", a, c->r[4], c->r[5], c->r[6], c->r[0], c->pr);
     }
     for (int i = 0; i < nlogfn; i++) if (logfn[i].a == ((a & 0x1FFFFFFFu) | 0x80000000u)) {
-        printf("log %08X r4=%08X r5=%08X r6=%08X: ", a, c->r[4], c->r[5], c->r[6]);
+        printf("log %08X r4=%08X r5=%08X r6=%08X f=%llu: ", a, c->r[4], c->r[5], c->r[6], (unsigned long long)cur_frame);
         print_guest_str(c->r[logfn[i].reg]); printf(" (pr=%08X)\n", c->pr);
     }
     uint32_t h = (a * 2654435761u) % NU;
@@ -132,7 +132,9 @@ static void sb_wr(uint32_t a, uint32_t v) {
     }
 }
 /* DC_DUMP_FRAMES=a,b,c: dump RAM at these vblank counts (ramdump_f<N>.bin) */
+static uint64_t cur_frame;
 static void on_vblank(uint64_t f) {
+    cur_frame = f;
     const char *p = getenv("DC_DUMP_FRAMES");
     while (p && *p) {
         unsigned long v = strtoul(p, (char **)&p, 10);
@@ -167,7 +169,7 @@ int main(int argc, char **argv) {
         dc_coro_trace = getenv("DC_CORO_TRACE") != NULL;
     }
     if (getenv("DC_HWSTATS")) dc_hw_read_hook = hw_read;
-    if (getenv("DC_DUMP_FRAMES")) dc_hw.on_vblank = on_vblank;
+    dc_hw.on_vblank = on_vblank;   /* frame count for logs; DC_DUMP_FRAMES dumps */
     if (getenv("DC_TRACE_FROM")) { unsigned a, n = 200; sscanf(getenv("DC_TRACE_FROM"), "%x:%u", &a, &n); trace_from = a | 0x80000000u; trace_left = (int)n; }
     if (getenv("DC_LOGFN")) {
         const char *p = getenv("DC_LOGFN");
