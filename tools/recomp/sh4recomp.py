@@ -363,8 +363,10 @@ class Translator:
             return 'dc_trap(c, %s, "branch in delay slot");' % h(s.addr)
         return s.code
 
-    def goto_or_call(self, t, start, end):
+    def goto_or_call(self, t, start, end, here=None):
         if start <= t < end and (t & 1) == 0:
+            if here is not None and t <= here:          # loop: let time pass / interrupts in
+                return "{ DC_TICK(c, 16); goto L_%08X; }" % t
             return "goto L_%08X;" % t
         return "{ dc_call(c, %s); return; }" % h(t)
 
@@ -376,15 +378,15 @@ class Translator:
         nxt = a + 4
         if k == "cbr":
             if not i.delayed:
-                return "if (%s) %s" % (i.cond, self.goto_or_call(i.target, start, end))
+                return "if (%s) %s" % (i.cond, self.goto_or_call(i.target, start, end, a))
             slot = self.slot_code(i, insns)
             return "{ int cc = %s; %s if (cc) %s goto L_%08X; }" % (
-                i.cond, slot, self.goto_or_call(i.target, start, end),
+                i.cond, slot, self.goto_or_call(i.target, start, end, a),
                 nxt) if nxt < end else "{ int cc = %s; %s if (cc) %s dc_call(c, %s); return; }" % (
                 i.cond, slot, self.goto_or_call(i.target, start, end), h(nxt))
         slot = self.slot_code(i, insns)
         if k == "bra":
-            return "{ %s %s }" % (slot, self.goto_or_call(i.target, start, end))
+            return "{ %s %s }" % (slot, self.goto_or_call(i.target, start, end, a))
         if k == "bsr":
             return "{ c->pr = %s; %s dc_call(c, %s); %s }" % (h(nxt), slot, h(i.target), self._after_call(nxt, end))
         if k == "jsr":
@@ -394,7 +396,8 @@ class Translator:
         if k == "rts":
             return "{ %s return; }" % slot
         if k == "rte":
-            return '{ %s dc_trap(c, %s, "rte"); return; }' % (slot, h(a))
+            # interrupts/exceptions are entered as calls from dc_events, so rte = restore SR + return
+            return "{ sh4_set_sr(c, c->ssr); %s return; }" % slot
         if k == "jmp":
             return "{ jt = %s; %s goto local_jump; }" % (R(i.reg), slot)
         if k == "braf":

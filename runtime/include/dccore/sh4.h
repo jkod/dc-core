@@ -66,10 +66,25 @@ void dc_trap(sh4ctx *c, uint32_t pc, const char *what);
 static inline uint32_t sh4_get_sr(const sh4ctx *c) {
     return c->sr_rest | (c->t & 1) | ((c->s & 1) << 1) | ((c->q & 1) << 8) | ((c->m & 1) << 9);
 }
+#define SR_MD (1u << 30)
+#define SR_RB (1u << 29)
+#define SR_BL (1u << 28)
 static inline void sh4_set_sr(sh4ctx *c, uint32_t v) {
+    /* R0..R7 bank 1 is active when MD and RB are both set: swap on a change */
+    int was = (c->sr_rest & (SR_MD | SR_RB)) == (SR_MD | SR_RB), now = (v & (SR_MD | SR_RB)) == (SR_MD | SR_RB);
+    if (was != now)
+        for (int i = 0; i < 8; i++) { uint32_t t_ = c->r[i]; c->r[i] = c->rbank[i]; c->rbank[i] = t_; }
     c->t = v & 1; c->s = (v >> 1) & 1; c->q = (v >> 8) & 1; c->m = (v >> 9) & 1;
     c->sr_rest = v & ~0x303u;
 }
+
+/* ---------------- time / events ----------------
+ * c->cycles is a rough SH-4 cycle count (200 MHz) advanced at every call and backward branch.
+ * When it passes dc_next_event the hardware model runs (video timing, timers) and may take an
+ * interrupt by calling the game's handler at VBR+0x600. */
+extern uint64_t dc_next_event;
+void dc_events(struct sh4ctx *c);
+#define DC_TICK(c, n) do { (c)->cycles += (n); if ((c)->cycles >= dc_next_event) dc_events(c); } while (0)
 static inline void sh4_swap_fbank(sh4ctx *c) {
     uint32_t tmp[16];
     memcpy(tmp, &c->fr.u[0], 64); memcpy(&c->fr.u[0], &c->fr.u[16], 64); memcpy(&c->fr.u[16], tmp, 64);

@@ -9,6 +9,7 @@ extern const dc_fn_entry dc_fn_table[];
 extern const size_t dc_fn_count;
 
 uint8_t *dc_ram;
+sh4ctx *dc_current_ctx;
 const float *dc_fsca_table;
 
 #define MAX_HLE 256
@@ -40,6 +41,7 @@ sh4fn dc_lookup(uint32_t addr) {
 }
 
 void dc_call(sh4ctx *c, uint32_t addr) {
+    DC_TICK(c, 40);
     sh4fn f = dc_lookup(addr);
     if (call_hook) call_hook(c, addr);
     if (f) { f(c); return; }
@@ -53,36 +55,6 @@ void dc_trap(sh4ctx *c, uint32_t pc, const char *what) {
     fprintf(stderr, "dc-core: trap '%s' at %08X\n", what, pc);
 }
 
-/* ---- default hardware: a flat 64 KB scratch for the SH-4 on-chip RAM (0x7C000000),
- * everything else reads 0 and is logged once per address page. Platform layers
- * replace these with real PowerVR/AICA/Maple handling via dc_set_hw(). */
-static dc_hw_ops hw;
-static uint8_t oc_ram[0x2000];
-
-void dc_set_hw(const dc_hw_ops *ops) { if (ops) hw = *ops; else memset(&hw, 0, sizeof hw); }
-
-static int is_ocram(uint32_t a) { return (a & 0xFC000000u) == 0x7C000000u; }
-static uint32_t warned[64]; static int nwarned;
-static void warn(const char *k, uint32_t a) {
-    uint32_t page = a & 0xFFFFF000u;
-    for (int i = 0; i < nwarned; i++) if (warned[i] == page) return;
-    if (nwarned < 64) warned[nwarned++] = page;
-    fprintf(stderr, "dc-core: unhandled %s %08X\n", k, a);
-}
-
-#define HW_RD(bits, T) \
-    T dc_hw_rd##bits(uint32_t a) { \
-        if (is_ocram(a)) { T v; memcpy(&v, oc_ram + (a & 0x1FFF), sizeof v); return v; } \
-        if (hw.rd##bits) return hw.rd##bits(a); warn("read" #bits, a); return 0; }
-#define HW_WR(bits, T) \
-    void dc_hw_wr##bits(uint32_t a, T v) { \
-        if (is_ocram(a)) { memcpy(oc_ram + (a & 0x1FFF), &v, sizeof v); return; } \
-        if (hw.wr##bits) { hw.wr##bits(a, v); return; } warn("write" #bits, a); }
-HW_RD(8, uint8_t) HW_RD(16, uint16_t) HW_RD(32, uint32_t)
-HW_WR(8, uint8_t) HW_WR(16, uint16_t) HW_WR(32, uint32_t)
-
-void dc_hw_pref(uint32_t a) { if (hw.pref) hw.pref(a); }
-
 /* ---- convenience ---- */
 int dc_load_binary(const char *path, uint32_t addr) {
     FILE *f = fopen(path, "rb");
@@ -95,6 +67,7 @@ int dc_load_binary(const char *path, uint32_t addr) {
 void dc_init(sh4ctx *c) {
     if (!dc_ram) dc_ram = (uint8_t *)calloc(1, 0x1000000);
     memset(c, 0, sizeof *c);
+    dc_current_ctx = c;
     c->r[15] = 0x8D000000u - 0x10;      /* top of RAM, like the boot ROM leaves it */
     c->sr_rest = 0x700000F0u;           /* MD=1 RB=1 BL=1 IMASK=15 */
     c->fpscr = 0x00040001u;             /* DN=1, RM=nearest, PR=0 SZ=0 FR=0 */

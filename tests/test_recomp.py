@@ -95,6 +95,17 @@ t("fmac_fused", {0: [0xF21E, 0x000B, 0x0009]},
   "c.fr.f[0] = 1.0f + 0x1p-12f; c.fr.f[1] = 1.0f + 0x1p-12f; c.fr.f[2] = -1.0f;",
   "c.fr.f[2] == fmaf(1.0f + 0x1p-12f, 1.0f + 0x1p-12f, -1.0f) && c.fr.f[2] != (float)((1.0f + 0x1p-12f) * (1.0f + 0x1p-12f)) - 1.0f")
 
+# 15. vblank interrupt: guest polls a counter that only its VBR+0x600 handler increments.
+#   main:  mov.l @r4,r0 ; cmp/eq #2,r0 ; bf main ; rts ; nop
+#   0x600: mov.l @r4,r0 ; add #1,r0 ; mov.l r0,@r4 ; mov.l @(lit),r1 ; mov #8,r2 ; mov.l r2,@r1 (ack ISTNRM) ; rte ; nop
+#   handler runs on register bank 1, so main's r1 must survive
+t("vblank_irq_bank_rte", {0: [0x6042, 0x8802, 0x8BFC, 0x000B, 0x0009],
+                          0x600: [0x6042, 0x7001, 0x2402, 0xD103, 0xE208, 0x2122, 0x002B, 0x0009, 0x0009, 0x0009,
+                                  0x6900, 0xA05F]},
+  "c.vbr = 0x8C010000u; sh4_set_sr(&c, 0x40000000u); dc_wr32(0xA05F6930u, 8); dc_wr32(0x8C100000u, 0);"
+  "c.r[4] = c.rbank[4] = 0x8C100000u; c.r[1] = 0x1234;",
+  "dc_rd32(0x8C100000u) == 2 && c.r[1] == 0x1234 && !(sh4_get_sr(&c) & SR_BL) && (dc_rd32(0xA05F6900u) & 8) == 0")
+
 
 def build_bin(prog):
     size = max(off + 2 * len(w) for off, w in prog.items())
@@ -131,7 +142,7 @@ int main(void) {
 }
 """ % (os.path.join(d, "t.bin"), setup, check)
         open(os.path.join(d, "main.c"), "w").write(main_c)
-        srcs = [os.path.join(d, "main.c"), os.path.join(ROOT, "runtime/src/dispatch.c")] + \
+        srcs = [os.path.join(d, "main.c")] + [os.path.join(ROOT, "runtime/src", f) for f in os.listdir(os.path.join(ROOT, "runtime/src"))] + \
                [os.path.join(d, "gen", f) for f in os.listdir(os.path.join(d, "gen"))]
         exe = os.path.join(d, "t")
         subprocess.check_call(["cc", "-O1", "-w", "-I" + os.path.join(ROOT, "runtime/include"), "-o", exe] + srcs + ["-lm"])
