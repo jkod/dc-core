@@ -68,6 +68,11 @@ int main(int argc, char **argv) {
     if (dc_disc_open(argv[1])) { fprintf(stderr, "cannot open disc %s\n", argv[1]); return 2; }
     if (dc_load_binary(argv[2], 0x8C010000u) < 0) { fprintf(stderr, "cannot read %s\n", argv[2]); return 2; }
     dc_bios_trace = 1;
+    if (getenv("DC_BIOS")) {   /* directory with dc_boot.bin / dc_flash.bin */
+        char b[1024], fl[1024];
+        snprintf(b, sizeof b, "%s/dc_boot.bin", getenv("DC_BIOS")); snprintf(fl, sizeof fl, "%s/dc_flash.bin", getenv("DC_BIOS"));
+        printf("BIOS: %s\n", dc_bios_load(b, fl) ? "load failed" : "loaded");
+    }
     if (dc_bios_install(&C, argc > 4 ? argv[4][0] : '2')) fprintf(stderr, "warning: IP.BIN not loaded\n");
     dc_unhandled_hook = unhandled; dc_hw_verbose = 0;
 #ifdef DC_WATCH

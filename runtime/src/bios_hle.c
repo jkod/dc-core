@@ -9,6 +9,7 @@
 #include "dccore/bios.h"
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 #define V_SYSINFO 0x8C0000B0u
 #define V_ROMFONT 0x8C0000B4u
@@ -24,7 +25,25 @@ int dc_bios_trace;
 #define TR(...) do { if (dc_bios_trace) fprintf(stderr, __VA_ARGS__); } while (0)
 
 /* ---------------------------------------------------------------- flash */
-static uint8_t flash[0x20000];
+uint8_t dc_flash[0x20000];          /* shared with hw.c (readable at 0x00200000) */
+#define flash dc_flash
+uint8_t *dc_bios_rom;                /* 2 MB boot ROM if the player supplied one (0x00000000) */
+static int flash_loaded;
+
+static int load_file(const char *path, uint8_t *dst, size_t n) {
+    FILE *f = fopen(path, "rb"); if (!f) return -1;
+    size_t r = fread(dst, 1, n, f); fclose(f);
+    return r == n ? 0 : -1;
+}
+int dc_bios_load(const char *boot, const char *flashp) {
+    int ok = 0;
+    if (boot) {
+        if (!dc_bios_rom) dc_bios_rom = (uint8_t *)malloc(0x200000);
+        if (load_file(boot, dc_bios_rom, 0x200000)) { free(dc_bios_rom); dc_bios_rom = NULL; ok = -1; }
+    }
+    if (flashp) { if (load_file(flashp, flash, sizeof flash)) ok = -1; else flash_loaded = 1; }
+    return ok;
+}
 
 static void flash_init(char region) {
     memset(flash, 0xFF, sizeof flash);
@@ -98,7 +117,7 @@ static uint32_t h_sysinfo(sh4ctx *c) {
 static uint32_t h_romfont(sh4ctx *c) {
     TR("bios: romfont r1=%u\n", c->r[1]);
     switch (c->r[1]) {
-    case 0: c->r[0] = 0x8C0F0000u - 0x10000u; break;  /* font: blank area (TODO: built-in font) */
+    case 0: c->r[0] = dc_bios_rom ? 0xA0100020u : 0x8CFF0000u; break;  /* ROM font (blank without a BIOS) */
     default: c->r[0] = 0;
     }
     return 0;
@@ -174,7 +193,7 @@ static uint32_t h_misc(sh4ctx *c) {
 
 int dc_bios_install(sh4ctx *c, char region) {
     (void)c;
-    flash_init(region);
+    if (!flash_loaded) flash_init(region);
     struct { uint32_t vec; sh4fn fn; } v[] = {
         {V_SYSINFO, h_sysinfo}, {V_ROMFONT, h_romfont}, {V_FLASH, h_flash},
         {V_GDROM, h_gdrom}, {V_GDROM2, h_gdrom}, {V_MISC, h_misc},

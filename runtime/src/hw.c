@@ -11,6 +11,7 @@
 #include "dccore/runtime.h"
 #include "dccore/hw.h"
 #include "dccore/ta.h"
+#include "dccore/bios.h"
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -343,6 +344,8 @@ static uint32_t rd(uint32_t a, int size) {
     if (m >= 0x00800000u && m < 0x00A00000u) { uint32_t v = 0; memcpy(&v, aram + (m & 0x1FFFFF), size); return v; }
     if ((m >> 24) == 0x04 || (m >> 24) == 0x06) { uint32_t v = 0; memcpy(&v, dc_vram + (m & 0x7FFFFF), size); return v; }
     if ((m >> 24) == 0x05 || (m >> 24) == 0x07) { uint32_t v = 0; memcpy(&v, dc_vram + vram32(m), size); return v; }
+    if (m < 0x00200000u && dc_bios_rom) { uint32_t v = 0; memcpy(&v, dc_bios_rom + m, size); return v; }   /* boot ROM */
+    if (m >= 0x00200000u && m < 0x00220000u) { uint32_t v = 0; memcpy(&v, dc_flash + (m & 0x1FFFF), size); return v; }
     warn(size == 4 ? "read32" : size == 2 ? "read16" : "read8", a);
     return 0;
 }
