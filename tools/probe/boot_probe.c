@@ -137,6 +137,10 @@ static uint64_t renders;
 static void on_render_count(void) { renders++; }
 static void on_vblank(uint64_t f) {
     cur_frame = f;
+    if (getenv("DC_TRACE_FRAME")) {   /* DC_TRACE_FRAME=frame:count: trace calls from that vblank on */
+        unsigned fr = 0, n = 200; sscanf(getenv("DC_TRACE_FRAME"), "%u:%u", &fr, &n);
+        if (f == fr) { trace_armed = 1; trace_left = (int)n; }
+    }
     if (getenv("DC_FPS") && f % 500 == 0) { static uint64_t last; static uint32_t lt; uint32_t t0 = dc_rd32(0xFFD8000Cu);
         printf("fps f=%llu renders/vblank=%.2f TCR0=%04X TOCR=%02X tmu0 ticks/vblank=%.1f\n", (unsigned long long)f, (renders - last) / 500.0,
                dc_rd16(0xFFD80010u), dc_rd8(0xFFD80000u), (double)(uint32_t)(lt - t0) / 500.0); last = renders; lt = t0; }
