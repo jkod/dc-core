@@ -13,6 +13,7 @@
 #include "dccore/pvr.h"
 #include "dccore/hw.h"
 #include "dccore/ta.h"
+#include "pvr_int.h"
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
@@ -52,13 +53,9 @@ static uint16_t tex16(uint32_t o) { o &= 0x7FFFFE; return (uint16_t)(dc_vram[o] 
 static uint8_t tex8(uint32_t o) { return dc_vram[o & 0x7FFFFF]; }
 
 /* ------------------------------------------------------------------ display list */
-typedef struct { float x, y, z, u, v; float c[4], o[4]; float u1, v1, c1[4], o1[4]; } vtx;   /* colours r,g,b,a 0..1; *1 = second volume */
-typedef struct {
-    uint32_t isp, tsp, tcw, tsp1, tcw1;
-    int list, first, n, sprite;
-    int twovol, shadow;                            /* PCW Volume (two parameter sets) / Shadow bits */
-} poly;
-typedef struct { float x[3], y[3], z[3]; int inst, list; } modtri;   /* modifier volume triangle */
+typedef pvr_vtx vtx;
+typedef pvr_poly poly;
+typedef pvr_modtri modtri;
 
 /* The TA fills one context while the core renders another: contexts are keyed by TA_ISP_BASE at
  * list init and STARTRENDER draws the one whose base equals PARAM_BASE. */
@@ -578,11 +575,32 @@ static void background(float *col, float *depth) {
     *depth = f32(REG(0x088));
 }
 
-int dc_pvr_sw_render(void) {
-    ctx_t *saved = ta_ctx, *rc = NULL;
+static ctx_t *render_ctx(void) {
     uint32_t pbase = REG(0x020) & 0xFFFFFF;
+    ctx_t *rc = NULL;
     for (int i = 0; i < NCTX; i++) if (ctxs[i].used && ctxs[i].base == pbase) rc = &ctxs[i];
-    if (!rc) rc = saved;                         /* no match: the list being built */
+    return rc ? rc : ta_ctx;                     /* no match: the list being built */
+}
+void pvr_get_frame(pvr_frame *f) {
+    ctx_t *saved = ta_ctx;
+    ta_ctx = render_ctx();
+    f->verts = vt; f->nverts = nvt; f->polys = pl; f->npolys = npl; f->mods = mt; f->nmods = nmt;
+    ta_ctx = saved;
+    uint32_t xc = REG(0x068), yc = REG(0x06C);
+    f->hscale = (REG(0x0F4) >> 16) & 1;
+    f->width = (int)((xc >> 16) & 0x7FF) + 1; f->height = (int)((yc >> 16) & 0x3FF) + 1;
+    if (f->width < 16 || f->width > 1280) f->width = 640;
+    if (f->height < 16 || f->height > 1024) f->height = 480;
+    background(f->bg, &f->bgz);
+}
+void pvr_get_texture(uint32_t tcw, uint32_t tsp, pvr_texinfo *ti) {
+    tex_t *t = get_tex(tcw, tsp);
+    ti->w = t->w; ti->h = t->h; ti->px = t->px; ti->id = t->id;
+}
+float pvr_fog_alpha(float invw) { return fog_table(invw); }
+
+int dc_pvr_sw_render(void) {
+    ctx_t *saved = ta_ctx, *rc = render_ctx();
     ta_ctx = rc;
     /* render target: FB_X_CLIP / FB_Y_CLIP maxima, doubled horizontally when the scaler halves it */
     uint32_t xc = REG(0x068), yc = REG(0x06C), sc = REG(0x0F4);
