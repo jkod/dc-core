@@ -438,6 +438,15 @@ def discover(tr, funcs, rounds=4):
                 elif top == 0xB:
                     d = op & 0xFFF; d = d - 0x1000 if d & 0x800 else d
                     new.add(a + 4 + d * 2)
+                elif top == 0xA or (top == 0x8 and ((op >> 8) & 0xF) in (0x9, 0xB, 0xD, 0xF)):
+                    # a branch that leaves its function must land on a function start
+                    if top == 0xA:
+                        d = op & 0xFFF; d = d - 0x1000 if d & 0x800 else d
+                    else:
+                        d = op & 0xFF; d = d - 0x100 if d & 0x80 else d
+                    tgt = a + 4 + d * 2
+                    if not (s <= tgt < e):
+                        new.add(tgt)
                 elif (op & 0xF0FF) == 0x400B:          # jsr @Rn
                     r = (op >> 8) & 0xF
                     if r in lit and a - lit[r][1] <= 16 and lit[r][0] is not None:
@@ -451,10 +460,51 @@ def discover(tr, funcs, rounds=4):
     return sorted(funcs)
 
 
+PROLOGUE = {0x4F22, 0x2FE6, 0x2FD6, 0x2FC6, 0x2FB6, 0x2FA6, 0x2F96, 0x2F86, 0x4F12, 0x4F02}
+
+
+def scan_functions(tr):
+    """Seed function starts without a disassembler project: the entry point, plus every
+    bsr / `mov.l @(pc),Rn ; jsr @Rn` target and every pointer in the image that lands on a
+    typical SHC prologue (sts.l pr,@-r15 / mov.l rN,@-r15 / add #-n,r15). Targets found
+    only once that do not look like a prologue are dropped (data decoded as code)."""
+    from collections import Counter
+    hits = Counter(); end = tr.end
+    def ok(x): return tr.base <= x < end and x % 2 == 0
+    def looks_like_start(x):
+        op = tr.u16(x)
+        return op is not None and (op in PROLOGUE or (op & 0xFF00) == 0x7F00 and (op & 0x80))
+    lit = {}
+    a = tr.base
+    while a < end - 1:
+        op = tr.u16(a); top = op >> 12
+        if top == 0xD:
+            lit[(op >> 8) & 0xF] = (tr.u32(((a + 4) & ~3) + (op & 0xFF) * 4), a)
+        elif top == 0xB:
+            d = op & 0xFFF; d = d - 0x1000 if d & 0x800 else d
+            hits[a + 4 + d * 2] += 1
+        elif (op & 0xF0FF) == 0x400B:
+            r = (op >> 8) & 0xF
+            if r in lit and lit[r][0] is not None and a - lit[r][1] <= 16:
+                hits[lit[r][0]] += 2          # literal + jsr is strong evidence
+        a += 2
+    for o in range(0, len(tr.data) - 3, 4):   # function pointer tables
+        v = struct.unpack_from("<I", tr.data, o)[0]
+        if ok(v) and looks_like_start(v):
+            hits[v] += 1
+    funcs = {tr.base}
+    for x, n in hits.items():
+        if ok(x) and (n >= 2 or looks_like_start(x)):
+            funcs.add(x)
+    return sorted(funcs)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("bin"); ap.add_argument("--base", default="0x8C010000")
-    ap.add_argument("--funcs", required=True); ap.add_argument("--out", required=True)
+    ap.add_argument("--funcs", help="function start list; omit to scan the image (--scan)")
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--write-funcs", help="save the final function list here")
     ap.add_argument("--chunk", type=int, default=150, help="functions per .c file")
     ap.add_argument("--max-func-bytes", type=lambda x: int(x, 0), default=0x4000,
                     help="cap a function's range (protects against huge data gaps)")
@@ -463,11 +513,15 @@ def main():
     data = open(args.bin, "rb").read()
     base = int(args.base, 0)
     tr = Translator(data, base)
-    funcs = read_funcs(args.funcs, base, base + len(data))
+    funcs = read_funcs(args.funcs, base, base + len(data)) if args.funcs else scan_functions(tr)
+    if not args.funcs:
+        print("scan: %d function starts" % len(funcs))
     if not args.no_discover:
         n0 = len(funcs); funcs = discover(tr, funcs)
         print("discovered %d extra call targets" % (len(funcs) - n0))
     os.makedirs(args.out, exist_ok=True)
+    if args.write_funcs:
+        open(args.write_funcs, "w").write("".join("%08x\n" % f for f in funcs))
     ranges = []
     for k, s in enumerate(funcs):
         e = funcs[k + 1] if k + 1 < len(funcs) else base + len(data)
