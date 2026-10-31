@@ -21,6 +21,7 @@ static uint32_t last[16]; static int li;
 #define NU 65536
 static uint32_t seen[NU]; static unsigned nseen;
 
+static uint64_t cur_frame;          /* vblanks so far */
 /* DC_LOGFN=addr:reg[,addr:reg...]: print the C string in that register whenever addr is called
  * (a game's own debug/error printer) */
 static struct { uint32_t a; int reg; } logfn[8]; static int nlogfn;
@@ -132,7 +133,6 @@ static void sb_wr(uint32_t a, uint32_t v) {
     }
 }
 /* DC_DUMP_FRAMES=a,b,c: dump RAM at these vblank counts (ramdump_f<N>.bin) */
-static uint64_t cur_frame;
 static void on_vblank(uint64_t f) {
     cur_frame = f;
     const char *p = getenv("DC_DUMP_FRAMES");
