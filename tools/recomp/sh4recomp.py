@@ -477,7 +477,9 @@ def bra_tables(tr):
     end = tr.end
     while a < end - 4:
         run = 0
-        while a + run * 4 < end - 2 and (tr.u16(a + run * 4) >> 12) == 0xA and (tr.u16(a + run * 4 + 2) == 0x0009):
+        def slot_ok(op):     # anything but another branch / rts
+            return op is not None and (op >> 12) not in (0x8, 0xA, 0xB) and op not in (0x000B, 0x002B) and (op & 0xF0DF) not in (0x400B, 0x0003)
+        while a + run * 4 < end - 2 and (tr.u16(a + run * 4) >> 12) == 0xA and slot_ok(tr.u16(a + run * 4 + 2)):
             run += 1
         if run >= 3:
             out.extend(a + k * 4 for k in range(run)); a += run * 4
