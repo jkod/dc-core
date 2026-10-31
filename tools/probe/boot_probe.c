@@ -21,7 +21,6 @@ static uint32_t last[16]; static int li;
 #define NU 65536
 static uint32_t seen[NU]; static unsigned nseen;
 
-static uint64_t cur_frame;          /* vblanks so far */
 /* DC_LOGFN=addr:reg[,addr:reg...]: print the C string in that register whenever addr is called
  * (a game's own debug/error printer) */
 static struct { uint32_t a; int reg; } logfn[8]; static int nlogfn;
@@ -71,6 +70,7 @@ static void miss(sh4ctx *c, uint32_t a) {
     FILE *f = fopen(b, "wb"); if (f) { fwrite(dc_ram + base, 1, 0x10000, f); fclose(f); printf("dumped %s\n", b); }
     exit(1);
 }
+static uint64_t cur_frame;          /* vblanks so far */
 #ifdef DC_WATCH
 uint32_t dc_watch_lo = 0xFFFFFFFFu, dc_watch_hi = 0, dc_rwatch_lo = 0xFFFFFFFFu, dc_rwatch_hi = 0;
 void dc_rwatch_hit(uint32_t a, int size) {
@@ -83,8 +83,9 @@ void dc_rwatch_hit(uint32_t a, int size) {
 static int nwatch;
 void dc_watch_hit(uint32_t a, uint32_t v, int size) {
     if (nwatch++ > 200) return;
-    printf("watch: wr%d %08X = %08X in %08X pr=%08X r4..r7 %08X %08X %08X %08X (%lu calls)\n", size * 8, a, v,
-           last[(li - 1) & 15], C.pr, C.r[4], C.r[5], C.r[6], C.r[7], calls);
+    printf("watch: wr%d %08X = %08X in %08X pr=%08X r4..r7 %08X %08X %08X %08X (%lu calls) f=%llu ISTNRM=%08X ISTEXT=%08X INTEVT=%03X\n", size * 8, a, v,
+           last[(li - 1) & 15], C.pr, C.r[4], C.r[5], C.r[6], C.r[7], calls, (unsigned long long)cur_frame,
+           dc_sb_reg(0x005F6900u), dc_sb_reg(0x005F6904u), dc_rd32(0xFF000028u));
 }
 #endif
 static void unhandled(const char *k, uint32_t a) {
