@@ -106,6 +106,12 @@ t("vblank_irq_bank_rte", {0: [0x6042, 0x8802, 0x8BFC, 0x000B, 0x0009],
   "c.r[4] = c.rbank[4] = 0x8C100000u; c.r[1] = 0x1234;",
   "dc_rd32(0x8C100000u) == 2 && c.r[1] == 0x1234 && !(sh4_get_sr(&c) & SR_BL) && (dc_rd32(0xA05F6900u) & 8) == 0")
 
+# 16. a loop split across two functions (A -> B -> A ...) must not grow the C stack
+#   A@0: dt r1 ; bt 8 ; bra B ; nop ; 8: rts ; nop        B@0x10: add #1,r0 ; bra A ; nop
+t("cross_function_loop_1M", {0: [0x4110, 0x8901, 0xA004, 0x0009, 0x000B, 0x0009],
+                             0x10: [0x7001, 0xAFF5, 0x0009]},
+  "c.r[1] = 1000000; c.r[0] = 0;", "c.r[0] == 999999")
+
 
 def build_bin(prog):
     size = max(off + 2 * len(w) for off, w in prog.items())

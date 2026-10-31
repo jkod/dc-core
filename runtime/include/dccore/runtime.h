@@ -5,7 +5,7 @@
 extern "C" {
 #endif
 
-typedef void (*dc_miss_fn)(sh4ctx *c, uint32_t addr);
+typedef void (*dc_miss_fn)(sh4ctx *c, uint32_t addr);   /* unknown address: handle it, or abort */
 typedef void (*dc_trap_fn)(sh4ctx *c, uint32_t pc, const char *what);
 typedef void (*dc_call_hook)(sh4ctx *c, uint32_t addr);
 

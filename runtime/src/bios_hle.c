@@ -82,7 +82,7 @@ static int gd_exec(int cmd, uint32_t *p) {
 }
 
 /* ---------------------------------------------------------------- handlers */
-static void h_sysinfo(sh4ctx *c) {
+static uint32_t h_sysinfo(sh4ctx *c) {
     TR("bios: sysinfo r7=%u\n", c->r[7]);
     switch (c->r[7]) {
     case 0: memcpy(dc_ram + 0x68, flash + 0x1A056, 8); c->r[0] = 0; break;
@@ -90,22 +90,24 @@ static void h_sysinfo(sh4ctx *c) {
     case 3: c->r[0] = 0x8C000068u; break;            /* pointer to machine id */
     default: c->r[0] = 0;
     }
+    return 0;
 }
 
-static void h_romfont(sh4ctx *c) {
+static uint32_t h_romfont(sh4ctx *c) {
     TR("bios: romfont r1=%u\n", c->r[1]);
     switch (c->r[1]) {
     case 0: c->r[0] = 0x8C0F0000u - 0x10000u; break;  /* font: blank area (TODO: built-in font) */
     default: c->r[0] = 0;
     }
+    return 0;
 }
 
-static void h_flash(sh4ctx *c) {
+static uint32_t h_flash(sh4ctx *c) {
     uint32_t f = c->r[7];
     TR("bios: flash r7=%u r4=%08X r5=%08X r6=%08X\n", f, c->r[4], c->r[5], c->r[6]);
     if (f == 0) {                                     /* info(part, out[2]) */
         uint32_t part = c->r[4];
-        if (part > 4) { c->r[0] = (uint32_t)-1; return; }
+        if (part > 4) { c->r[0] = (uint32_t)-1; return 0; }
         dc_wr32(c->r[5], part_ofs[part]); dc_wr32(c->r[5] + 4, part_len[part]); c->r[0] = 0;
     } else if (f == 1) {                              /* read(ofs, dst, len) */
         uint32_t o = c->r[4], d = c->r[5], n = c->r[6];
@@ -119,9 +121,10 @@ static void h_flash(sh4ctx *c) {
         for (int p = 0; p < 5; p++) if (c->r[4] == part_ofs[p]) memset(flash + part_ofs[p], 0xFF, part_len[p]);
         c->r[0] = 0;
     } else c->r[0] = (uint32_t)-1;
+    return 0;
 }
 
-static void h_gdrom(sh4ctx *c) {
+static uint32_t h_gdrom(sh4ctx *c) {
     uint32_t f = c->r[7];
     switch (f) {
     case 0: {                                         /* req_cmd(cmd, params) -> id */
@@ -156,12 +159,14 @@ static void h_gdrom(sh4ctx *c) {
         TR("bios: gd func %u\n", f);
         c->r[0] = 0;
     }
+    return 0;
 }
 
-static void h_misc(sh4ctx *c) {
+static uint32_t h_misc(sh4ctx *c) {
     TR("bios: misc r4=%d\n", (int)c->r[4]);
     if ((int)c->r[4] == 1) dc_trap(c, 0, "exit to BIOS menu");
     c->r[0] = 0;
+    return 0;
 }
 
 int dc_bios_install(sh4ctx *c, char region) {

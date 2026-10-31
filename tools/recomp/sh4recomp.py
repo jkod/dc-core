@@ -7,7 +7,10 @@ that run against the runtime in runtime/include/dccore/sh4.h.
     sh4recomp.py BIN --base 0x8C010000 --funcs funcs.txt --out gen/
 
 funcs.txt: one function start address per line (hex, `fn_8c0xxxxx` names are accepted).
-Every function is translated from its start up to the next start. Each 16-bit slot gets a
+Every function is translated from its start up to the next start. A function returns 0 when the
+guest returns (rts/rte) or the address to continue at for a jump that leaves it (tail calls,
+fall-through into the next function); dc_call() runs that chain as a trampoline, so only real
+calls (bsr/jsr) use the C stack. Each 16-bit slot gets a
 label, so any in-function branch target is reachable; branches that leave the function
 become tail calls through dc_call(). Generated code never contains game data except
 literal-pool constants folded into instructions, and it is meant to be produced on the
@@ -326,7 +329,7 @@ class Translator:
     def emit_function(self, start, end, known, out):
         """known: sorted list of function starts (for direct calls)."""
         name = "f_%08X" % start
-        out.append("void %s(sh4ctx *c) {" % name)
+        out.append("uint32_t %s(sh4ctx *c) {" % name)
         insns = {}
         a = start
         while a < end:
@@ -337,21 +340,21 @@ class Translator:
             out.append("L_%08X:" % a)
             out.append("  " + self.emit_insn(i, insns, start, end) )
         # falling off the end continues in the next function
-        out.append("  dc_call(c, %s); return;" % h(end))
+        out.append("  return %s;" % h(end))
         if needs_local_jump:
             out.append("local_jump:")
             out.append("  switch (jt) {")
             for a in range(start, end, 2):
                 out.append("    case %s: goto L_%08X;" % (h(a), a))
             out.append("  }")
-            out.append("  dc_call(c, jt); return;")
+            out.append("  return jt;")
         out.append("}")
         # declare jt at top if needed
         if needs_local_jump:
             idx = len(out) - 1
             # insert after function header
             for k in range(idx, -1, -1):
-                if out[k].startswith("void %s(" % name):
+                if out[k].startswith("uint32_t %s(" % name):
                     out.insert(k + 1, "  uint32_t jt = 0;")
                     break
 
@@ -368,7 +371,7 @@ class Translator:
             if here is not None and t <= here:          # loop: let time pass / interrupts in
                 return "{ DC_TICK(c, 16); goto L_%08X; }" % t
             return "goto L_%08X;" % t
-        return "{ dc_call(c, %s); return; }" % h(t)
+        return "return %s;" % h(t)
 
     def emit_insn(self, i, insns, start, end):
         k = i.kind
@@ -382,7 +385,7 @@ class Translator:
             slot = self.slot_code(i, insns)
             return "{ int cc = %s; %s if (cc) %s goto L_%08X; }" % (
                 i.cond, slot, self.goto_or_call(i.target, start, end, a),
-                nxt) if nxt < end else "{ int cc = %s; %s if (cc) %s dc_call(c, %s); return; }" % (
+                nxt) if nxt < end else "{ int cc = %s; %s if (cc) %s return %s; }" % (
                 i.cond, slot, self.goto_or_call(i.target, start, end), h(nxt))
         slot = self.slot_code(i, insns)
         if k == "bra":
@@ -394,10 +397,10 @@ class Translator:
         if k == "bsrf":
             return "{ uint32_t t_ = %s + %s; c->pr = %s; %s dc_call(c, t_); %s }" % (R(i.reg), h(nxt), h(nxt), slot, self._after_call(nxt, end))
         if k == "rts":
-            return "{ %s return; }" % slot
+            return "{ %s return 0; }" % slot
         if k == "rte":
             # interrupts/exceptions are entered as calls from dc_events, so rte = restore SR + return
-            return "{ sh4_set_sr(c, c->ssr); %s return; }" % slot
+            return "{ sh4_set_sr(c, c->ssr); %s return 0; }" % slot
         if k == "jmp":
             return "{ jt = %s; %s goto local_jump; }" % (R(i.reg), slot)
         if k == "braf":
@@ -405,7 +408,7 @@ class Translator:
         raise ValueError(k)
 
     def _after_call(self, nxt, end):
-        return "goto L_%08X;" % nxt if nxt < end else "dc_call(c, %s); return;" % h(nxt)
+        return "goto L_%08X;" % nxt if nxt < end else "return %s;" % h(nxt)
 
 
 def read_funcs(path, base, end):
@@ -558,7 +561,7 @@ def main():
             if os.path.exists(o): os.remove(o)
     # dispatch table
     tab = ['#include "dccore/sh4.h"', "#include <stddef.h>", ""]
-    for s, _ in ranges: tab.append("void f_%08X(sh4ctx *c);" % s)
+    for s, _ in ranges: tab.append("uint32_t f_%08X(sh4ctx *c);" % s)
     tab.append("")
     tab.append("typedef struct { uint32_t addr; sh4fn fn; } dc_fn_entry;")
     tab.append("const dc_fn_entry dc_fn_table[] = {")

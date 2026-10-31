@@ -56,8 +56,10 @@ static inline float dc_rdf(uint32_t a) { uint32_t u = dc_rd32(a); float f; memcp
 static inline void  dc_wrf(uint32_t a, float f) { uint32_t u; memcpy(&u, &f, 4); dc_wr32(a, u); }
 
 /* ---------------- dispatch ---------------- */
-typedef void (*sh4fn)(sh4ctx *c);
-/* Call guest code at `addr`. Implemented by the generated dispatch table (+ HLE overrides). */
+/* A recompiled (or HLE) function: returns 0 when the guest returns, or the next address to run
+ * for a tail jump. HLE replacements normally return 0. */
+typedef uint32_t (*sh4fn)(sh4ctx *c);
+/* Call guest code at `addr` and run until it returns. */
 void dc_call(sh4ctx *c, uint32_t addr);
 /* Called for things the recompiler cannot do statically (trapa, sleep, rte, unknown opcodes). */
 void dc_trap(sh4ctx *c, uint32_t pc, const char *what);

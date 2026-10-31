@@ -41,13 +41,17 @@ sh4fn dc_lookup(uint32_t addr) {
 }
 
 void dc_call(sh4ctx *c, uint32_t addr) {
-    DC_TICK(c, 40);
-    sh4fn f = dc_lookup(addr);
-    if (call_hook) call_hook(c, addr);
-    if (f) { f(c); return; }
-    if (miss_handler) { miss_handler(c, addr); return; }
-    fprintf(stderr, "dc-core: no recompiled function at %08X (pr=%08X)\n", addr, c->pr);
-    abort();
+    while (addr) {
+        DC_TICK(c, 40);
+        if (call_hook) call_hook(c, addr);
+        sh4fn f = dc_lookup(addr);
+        if (!f) {
+            if (miss_handler) { miss_handler(c, addr); return; }
+            fprintf(stderr, "dc-core: no recompiled function at %08X (pr=%08X)\n", addr, c->pr);
+            abort();
+        }
+        addr = f(c);
+    }
 }
 
 void dc_trap(sh4ctx *c, uint32_t pc, const char *what) {
