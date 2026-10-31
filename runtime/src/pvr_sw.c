@@ -242,6 +242,7 @@ static tex_t *get_tex(uint32_t tcw, uint32_t tsp) {
     t->tcw = tcw; t->tsp_size = sz; t->pal_gen = pal_gen; t->w = w; t->h = h;
     t->px = malloc((size_t)w * h * 4);
     int lw = 0; while ((1 << lw) < w) lw++;
+    uint32_t cb = addr;                                      /* VQ codebook: always at the texture address */
     if (mip) {
         if (vq) addr += mipvq[lw];
         else if (fmt == 5) addr += mip16[lw] / 2;             /* 4 bpp */
@@ -255,7 +256,7 @@ static tex_t *get_tex(uint32_t tcw, uint32_t tsp) {
             if (vq) {                                       /* 2x2 blocks of 16-bit texels from a 256-entry codebook */
                 uint32_t idx = tex8(addr + 2048 + twiddle(x >> 1, y >> 1, w >> 1, h >> 1));
                 uint32_t sub = ((x & 1) << 1) | (y & 1);
-                uint16_t p = tex16(addr + idx * 8 + sub * 2);
+                uint16_t p = tex16(cb + idx * 8 + sub * 2);
                 c = fmt == 3 ? 0xFF808080u : conv16(fmt, p);
             } else if (fmt == 5) {
                 uint32_t i = twiddle(x, y, w, h);
