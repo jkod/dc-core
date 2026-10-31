@@ -33,6 +33,12 @@ static uint32_t trace_from; static int trace_left, trace_armed;
 static void hook(sh4ctx *c, uint32_t a) {
     calls++; last[li++ & 15] = a;
     if (trace_from && ((a & 0x1FFFFFFFu) | 0x80000000u) == trace_from && !trace_armed) trace_armed = 1;
+    static uint32_t dump_at_call; static int dumped_call;
+    if (!dump_at_call && getenv("DC_DUMP_AT_CALL")) dump_at_call = (uint32_t)strtoul(getenv("DC_DUMP_AT_CALL"), 0, 16) | 0x80000000u;
+    if (dump_at_call && !dumped_call && ((a & 0x1FFFFFFFu) | 0x80000000u) == dump_at_call) {
+        dumped_call = 1; FILE *f = fopen("ramdump_at_call.bin", "wb"); if (f) { fwrite(dc_ram, 1, 0x1000000, f); fclose(f); }
+        printf("RAM dumped at first call of %08X (%lu calls)\n", dump_at_call, calls);
+    }
     if (trace_armed && trace_left > 0) {
         trace_left--;
         printf("trace %08X r4=%08X r5=%08X r6=%08X r0=%08X pr=%08X\n", a, c->r[4], c->r[5], c->r[6], c->r[0], c->pr);

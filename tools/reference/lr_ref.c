@@ -114,6 +114,7 @@ int main(int argc, char **argv) {
     }
     frames += first - 1;
     for (int f = first; f <= frames; f++) {
+        if (getenv("LR_FRAMELOG")) fprintf(stderr, "FRAME %d\n", f);
         retro_run();
         if (ram && every && f % every == 0) {
             char p[1024]; snprintf(p, sizeof p, "%s/ram_%05d.bin", argv[4], f);
