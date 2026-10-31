@@ -17,6 +17,8 @@ typedef struct coro {
     void *stack;
     struct slot *pending;        /* set by whoever switches here: longjmp to this slot on resume */
     int refs;                    /* live slots owned by this coroutine */
+    uint32_t sp_key;             /* suspended in a stack switch: resumed when a task with this r15 is loaded */
+    int sp_waiting;
     int started, is_main;
 } coro;
 
@@ -37,6 +39,7 @@ static coro *cur = &main_coro;
 static sh4fn orig_longjmp;
 static uint32_t longjmp_addr;
 static size_t stack_bytes = 1u << 20;
+static uint32_t start_pc;        /* where a new coroutine starts */
 
 int dc_coro_count(void) { return ncoros; }
 
@@ -76,13 +79,14 @@ static void switch_to(coro *to) {
  * a guest function returning goes on at its pr, like rts */
 static void coro_main(void) {
     sh4ctx *c = dc_current_ctx;
-    for (;;) dc_call(c, c->pr);
+    uint32_t pc = start_pc;
+    for (;;) { dc_call(c, pc); pc = c->pr; }
 }
 
 static coro *new_coro(void) {
     coro *k = NULL;
     for (int i = 0; i < ncoros && !k; i++)              /* reuse one nothing can resume any more */
-        if (coros[i].refs == 0 && &coros[i] != cur) k = &coros[i];
+        if (coros[i].refs == 0 && !coros[i].sp_waiting && &coros[i] != cur) k = &coros[i];
     if (!k) {
         if (ncoros == MAX_COROS) { fprintf(stderr, "dc-core: out of coroutines\n"); abort(); }
         k = &coros[ncoros++];
@@ -91,7 +95,7 @@ static coro *new_coro(void) {
     getcontext(&k->uc);
     k->uc.uc_stack.ss_sp = k->stack; k->uc.uc_stack.ss_size = stack_bytes; k->uc.uc_link = NULL;
     makecontext(&k->uc, coro_main, 0);
-    k->pending = NULL; k->refs = 0; k->started = 1;
+    k->pending = NULL; k->refs = 0; k->started = 1; k->sp_waiting = 0;
     return k;
 }
 
@@ -112,6 +116,7 @@ static uint32_t h_longjmp(sh4ctx *c) {
     }
     /* a context the game made itself (new thread, or a thread sent to its exit routine) */
     if (s) drop_slot(s);
+    start_pc = c->pr;
     coro *k = new_coro();
     if (dc_coro_trace) fprintf(stderr, "coro: longjmp %08X starts coro %ld at %08X (r15 %08X)\n",
                                buf, (long)(k - coros), c->pr, c->r[15]);
@@ -128,4 +133,48 @@ void dc_coro_install(uint32_t setjmp_addr, uint32_t lj_addr, size_t host_stack) 
     longjmp_addr = lj_addr;
     dc_coro_setjmp_addr = setjmp_addr;
     dc_hle_register(lj_addr, h_longjmp);
+}
+
+/* ---- task switches that swap stacks and end with rte (dc_coro_add_switch) ----
+ * The routine saves the running task's registers on its stack, stores that stack pointer, loads
+ * another task's and returns into it with rte (PC = spc). A task calls it like a function, so it
+ * is resumed with the r15 it called with; that r15 identifies its suspended host coroutine. */
+#define MAX_SW 8
+static struct { uint32_t addr; sh4fn orig; } sw[MAX_SW];
+static int nsw;
+
+static coro *waiting_on(uint32_t r15) {
+    if (main_coro.sp_waiting && main_coro.sp_key == r15) return &main_coro;
+    for (int i = 0; i < ncoros; i++) if (coros[i].sp_waiting && coros[i].sp_key == r15) return &coros[i];
+    return NULL;
+}
+
+static uint32_t h_switch(sh4ctx *c) {
+    uint32_t at = c->entry, r15 = c->r[15], ret = c->pr;
+    sh4fn orig = NULL;
+    for (int i = 0; i < nsw; i++) if (sw[i].addr == at) orig = sw[i].orig;
+    uint32_t next = orig(c);                 /* the game's switch; its rte returns here */
+    if (next) dc_call(c, next);
+    if (c->r[15] == r15 && c->spc == ret) return 0;          /* switched back to ourselves */
+    coro *to = waiting_on(c->r[15]);
+    cur->sp_key = r15; cur->sp_waiting = 1;
+    if (!to) {
+        start_pc = c->spc;
+        to = new_coro();
+        if (dc_coro_trace) fprintf(stderr, "coro: switch %08X starts coro %ld at %08X (r15 %08X)\n",
+                                   at, (long)(to - coros), c->spc, c->r[15]);
+    } else if (dc_coro_trace) fprintf(stderr, "coro: switch %08X resumes %s (r15 %08X pc %08X)\n",
+                                      at, to->is_main ? "main" : "coro", c->r[15], c->spc);
+    to->sp_waiting = 0;
+    switch_to(to);
+    /* resumed: the task that switched to us has loaded our registers */
+    return 0;
+}
+
+void dc_coro_add_switch(uint32_t addr) {
+    addr = (addr & 0x1FFFFFFFu) | 0x80000000u;
+    sh4fn f = dc_lookup(addr);
+    if (!f || nsw == MAX_SW) { fprintf(stderr, "dc-core: cannot hook task switch at %08X\n", addr); return; }
+    sw[nsw].addr = addr; sw[nsw].orig = f; nsw++;
+    dc_hle_register(addr, h_switch);
 }

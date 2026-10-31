@@ -24,6 +24,9 @@ extern "C" {
 /* setjmp_addr / longjmp_addr: the game's routines (setjmp returns 0 in r0, longjmp(buf=r4, val=r5)
  * returns val, or 1 for 0, at the setjmp). host_stack: bytes per coroutine (0: 1 MB). */
 void dc_coro_install(uint32_t setjmp_addr, uint32_t longjmp_addr, size_t host_stack);
+/* A routine that switches tasks by swapping stacks and ending with rte into the other task (a
+ * middleware/OS task switch). Each entry point is hooked separately. */
+void dc_coro_add_switch(uint32_t addr);
 extern int dc_coro_trace;           /* non-zero: log switches to stderr */
 int dc_coro_count(void);            /* coroutines created so far (tests/diagnostics) */
 

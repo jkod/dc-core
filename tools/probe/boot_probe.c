@@ -161,6 +161,11 @@ int main(int argc, char **argv) {
         unsigned sj = 0, lj = 0; sscanf(getenv("DC_CORO"), "%x,%x", &sj, &lj);
         dc_coro_install(sj, lj, 0); dc_coro_trace = getenv("DC_CORO_TRACE") != NULL;
     }
+    if (getenv("DC_SWITCH")) {   /* task-switch entry points: addr,addr,... */
+        const char *p = getenv("DC_SWITCH");
+        while (*p) { dc_coro_add_switch((uint32_t)strtoul(p, (char **)&p, 16)); while (*p == ',') p++; }
+        dc_coro_trace = getenv("DC_CORO_TRACE") != NULL;
+    }
     if (getenv("DC_HWSTATS")) dc_hw_read_hook = hw_read;
     if (getenv("DC_DUMP_FRAMES")) dc_hw.on_vblank = on_vblank;
     if (getenv("DC_TRACE_FROM")) { unsigned a, n = 200; sscanf(getenv("DC_TRACE_FROM"), "%x:%u", &a, &n); trace_from = a | 0x80000000u; trace_left = (int)n; }
