@@ -133,6 +133,9 @@ def cmd_check(g):
     for t in g.tracks:
         kind = "data " if t.is_data else "audio"
         state = "ok" if t.exists else "MISSING"
+        if t.exists and os.path.getsize(t.path) % t.sector:
+            state = "TRUNCATED (size is not a whole number of %d-byte sectors)" % t.sector
+            ok = False
         print("track %02d  LBA %6d  %s  %4d  %-14s %s" % (t.num, t.lba, kind, t.sector, os.path.basename(t.path), state))
         ok &= t.exists
     try:
@@ -145,13 +148,14 @@ def cmd_check(g):
     for path, lba, size, isdir in g.walk():
         if isdir or size == 0:
             continue
-        t = g.track_for(lba + (size - 1) // 2048)
+        last = lba + (size - 1) // 2048
+        t = g.track_for(last)
         t0 = g.track_for(lba)
-        if not t0.exists or not t.exists:
+        if not t0.exists or not t.exists or last >= t.lba + t.sectors:
             bad.append((path, t0.num))
     if bad:
         tr = sorted({b[1] for b in bad})
-        print("\n%d files live in missing track(s) %s, e.g. %s" % (len(bad), ", ".join("%02d" % x for x in tr),
+        print("\n%d files lie in missing or cut-off track(s) %s, e.g. %s" % (len(bad), ", ".join("%02d" % x for x in tr),
                                                                 ", ".join(b[0] for b in bad[:5])))
         ok = False
     print("\nimage is COMPLETE" if ok else "\nimage is INCOMPLETE")
