@@ -44,7 +44,14 @@ static void miss(sh4ctx *c, uint32_t a) {
     exit(1);
 }
 #ifdef DC_WATCH
-uint32_t dc_watch_lo = 0xFFFFFFFFu, dc_watch_hi = 0;
+uint32_t dc_watch_lo = 0xFFFFFFFFu, dc_watch_hi = 0, dc_rwatch_lo = 0xFFFFFFFFu, dc_rwatch_hi = 0;
+void dc_rwatch_hit(uint32_t a, int size) {
+    static uint32_t seen[64]; static int ns;
+    uint32_t fn = last[(li - 1) & 15];
+    for (int i = 0; i < ns; i++) if (seen[i] == fn) return;
+    if (ns < 64) seen[ns++] = fn;
+    printf("rwatch: rd%d %08X in %08X pr=%08X (%lu calls)\n", size * 8, a, fn, C.pr, calls);
+}
 static int nwatch;
 void dc_watch_hit(uint32_t a, uint32_t v, int size) {
     if (nwatch++ > 200) return;
@@ -114,6 +121,7 @@ int main(int argc, char **argv) {
     if (getenv("DC_AICATRACE")) { dc_hw.on_aica_write = aica_wr; dc_hw.on_sb_write = sb_wr; }
 #ifdef DC_WATCH
     if (getenv("DC_WATCH")) { unsigned lo, len = 4; sscanf(getenv("DC_WATCH"), "%x:%x", &lo, &len); dc_watch_lo = lo & 0xFFFFFF; dc_watch_hi = dc_watch_lo + len; }
+    if (getenv("DC_RWATCH")) { unsigned lo, len = 4; sscanf(getenv("DC_RWATCH"), "%x:%x", &lo, &len); dc_rwatch_lo = lo & 0xFFFFFF; dc_rwatch_hi = dc_rwatch_lo + len; }
 #endif
     dc_set_call_hook(hook); dc_set_miss_handler(miss); dc_set_trap_handler(trap);
     signal(SIGALRM, alrm); alarm(argc > 3 ? atoi(argv[3]) : 10);
