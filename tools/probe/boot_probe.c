@@ -7,6 +7,7 @@
 #include "dccore/runtime.h"
 #include "dccore/coro.h"
 #include "dccore/pvr.h"
+#include "dccore/maple.h"
 #include "dccore/disc.h"
 #include "dccore/bios.h"
 #include "dccore/hw.h"
@@ -236,6 +237,7 @@ int main(int argc, char **argv) {
     if (getenv("DC_HWSTATS")) dc_hw_read_hook = hw_read;
     dc_hw.on_vblank = on_vblank;
     if (getenv("DC_CABLE")) dc_cable = atoi(getenv("DC_CABLE"));
+    if (!getenv("DC_NOPAD")) dc_maple_install();   /* a standard controller on port A */
     if (getenv("DC_CALLCOST")) dc_call_cost = (uint32_t)atoi(getenv("DC_CALLCOST"));
     if (getenv("DC_FPS")) dc_hw.on_render = on_render_count;
     if (getenv("DC_SHOT")) { dc_pvr_sw_install(); dc_hw.on_render = on_render_sw; }   /* frame count for logs; DC_DUMP_FRAMES dumps */

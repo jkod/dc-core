@@ -4,7 +4,7 @@ project(dc_core C)
 set(CMAKE_C_STANDARD 11)
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
-add_library(dccore STATIC runtime/src/dispatch.c runtime/src/disc.c runtime/src/bios_hle.c runtime/src/hw.c runtime/src/ta.c runtime/src/arm7.c runtime/src/aica.c runtime/src/coro.c runtime/src/pvr_sw.c)
+add_library(dccore STATIC runtime/src/dispatch.c runtime/src/disc.c runtime/src/bios_hle.c runtime/src/hw.c runtime/src/ta.c runtime/src/arm7.c runtime/src/aica.c runtime/src/coro.c runtime/src/pvr_sw.c runtime/src/maple.c)
 target_include_directories(dccore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/runtime/include)
 if(NOT MSVC)
   target_link_libraries(dccore PUBLIC m)

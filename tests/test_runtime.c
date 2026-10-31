@@ -4,6 +4,7 @@
 #include "dccore/hw.h"
 #include "dccore/ta.h"
 #include "dccore/aica.h"
+#include "dccore/maple.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -103,6 +104,22 @@ int main(void) {
     dc_wr32(0xFFA00020u, 0x8C500000u); dc_wr32(0xA05F6800u, 0x10800000u); dc_wr32(0xA05F6804u, 384); dc_wr32(0xA05F6808u, 1);
     CHECK(dc_rd32(IST) & (1u << 6));
     CHECK(dc_rd32(0xA4100000u) == 0x80C08040u);       /* U Y V Y, in texture memory (64-bit area) */
+
+    /* 8. maple controller: device info + condition on port A, nothing on port B */
+    dc_maple_install();
+    dc_pad[0].buttons = DC_BTN_START | DC_BTN_A; dc_pad[0].rt = 200; dc_pad[0].jx = 10;
+    uint32_t ml = 0x8C320000u, ra = 0x8C330000u, rb = 0x8C330200u, rc = 0x8C330400u;
+    dc_wr32(ml + 0, (0u << 16) | 0); dc_wr32(ml + 4, ra); dc_wr32(ml + 8, 0x00002001u);              /* DEVINFO to A */
+    dc_wr32(ml + 12, (0u << 16) | 1); dc_wr32(ml + 16, rb); dc_wr32(ml + 20, 0x01002009u);           /* GETCOND to A */
+    dc_wr32(ml + 24, 0x01000000u);
+    dc_wr32(ml + 28, 0x80000000u | (1u << 16) | 0); dc_wr32(ml + 32, rc); dc_wr32(ml + 36, 0x00006001u);   /* DEVINFO to B */
+    dc_wr32(0xA05F6C04u, ml); dc_wr32(0xA05F6C18u, 1);
+    CHECK((dc_rd32(ra) & 0xFF) == 5 && (dc_rd32(ra) >> 24) == 28 && dc_rd32(ra + 4) == 0x01000000u);
+    CHECK(dc_rd8(ra + 4 + 18) == 'D' && ((dc_rd32(ra) >> 16) & 0xFF) == 0x20);
+    CHECK((dc_rd32(rb) & 0xFF) == 8 && (dc_rd32(rb) >> 24) == 3 && dc_rd32(rb + 4) == 0x01000000u);
+    CHECK((dc_rd32(rb + 8) & 0xFFFF) == (uint16_t)~(DC_BTN_START | DC_BTN_A) && ((dc_rd32(rb + 8) >> 16) & 0xFF) == 200);
+    CHECK((dc_rd32(rb + 12) & 0xFF) == 10 && ((dc_rd32(rb + 12) >> 8) & 0xFF) == 128);
+    CHECK(dc_rd32(rc) == 0xFFFFFFFFu);
 
     printf(fails ? "%d runtime test(s) FAILED\n" : "runtime tests passed\n", fails);
     return fails != 0;
