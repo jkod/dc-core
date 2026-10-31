@@ -121,7 +121,7 @@ void dc_init(sh4ctx *c) {
     if (!dc_ram) dc_ram = (uint8_t *)calloc(1, 0x1000000);
     memset(c, 0, sizeof *c);
     dc_current_ctx = c;
-    c->r[15] = 0x8D000000u - 0x10;      /* top of RAM, like the boot ROM leaves it */
+    c->r[15] = 0x8C00F400u;             /* where the boot ROM leaves the stack (games keep data at the top of RAM) */
     c->sr_rest = 0x700000F0u;           /* MD=1 RB=1 BL=1 IMASK=15 */
     c->fpscr = 0x00040001u;             /* DN=1, RM=nearest, PR=0 SZ=0 FR=0 */
     c->vbr = 0x8C00F400u;
