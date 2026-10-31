@@ -20,6 +20,17 @@
 
 #define REG(o) dc_pvr_reg(o)
 int dc_pvr_sw_debug;          /* non-zero: describe the next rendered frame on stderr */
+int dc_pvr_sw_highlight;      /* debug: paint one texture class magenta (1 VQ+mip, 2 non-square twiddled, 3 ARGB4444 VQ, 4 other) */
+static int highlighted(uint32_t tcw, uint32_t tsp) {
+    int vq = (tcw >> 30) & 1, mip = tcw >> 31, fmt = (tcw >> 27) & 7, sq = ((tsp >> 3) & 7) == (tsp & 7), lin = (tcw >> 26) & 1;
+    switch (dc_pvr_sw_highlight) {
+    case 1: return vq && mip;
+    case 2: return !vq && !lin && !sq;
+    case 3: return vq && fmt == 2;
+    case 4: return !(vq && mip) && !(!vq && !lin && !sq) && !(vq && fmt == 2);
+    default: return 0;
+    }
+}
 
 /* ------------------------------------------------------------------ VRAM views */
 static uint32_t vram32_ofs(uint32_t o) {           /* 32-bit area offset -> storage offset */
@@ -378,6 +389,7 @@ static void draw_tri(const poly *p, const vtx *a, const vtx *b, const vtx *c, in
                 default: for (int k = 0; k < 3; k++) px_[k] = tc[k] * col[k]; px_[3] = tc[3] * col[3]; break;
                 }
             } else memcpy(px_, col, sizeof px_);
+            if (t && dc_pvr_sw_highlight && highlighted(p->tcw, tsp)) { px_[0] = 1; px_[1] = 0; px_[2] = 1; }
             if (ofs) for (int k = 0; k < 3; k++) { px_[k] += off[k]; if (px_[k] > 1) px_[k] = 1; }
             if (list == 4 && px_[3] < pt_ref) continue;
             float *d = cbuf + i * 4;
