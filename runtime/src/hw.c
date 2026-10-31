@@ -313,7 +313,9 @@ static void sb_dma(uint32_t o, uint32_t v) {
     if (o == 0x6C18 && (v & 1) && (SBR(0x6C14) & 1)) maple_dma();        /* Maple DMA */
 }
 
+void (*dc_hw_read_hook)(uint32_t addr, int size);
 static uint32_t rd(uint32_t a, int size) {
+    if (dc_hw_read_hook) dc_hw_read_hook(a, size);
     if ((a >> 26) == 0x38) { uint32_t v = sq[(a >> 5) & 1][(a >> 2) & 7]; return v; }
     if ((a & 0xFC000000u) == 0x7C000000u) { uint32_t v = 0; memcpy(&v, ocram + (a & 0x1FFF), size); return v; }
     if (a >= 0xF0000000u && a < 0xF8000000u) return 0;                 /* cache arrays */
