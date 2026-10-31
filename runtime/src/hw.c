@@ -48,6 +48,7 @@ static uint8_t  ocram[0x2000];
 
 /* p4 module index for an 0xFFxxxxxx address */
 static uint32_t *p4reg(uint32_t a) { return &p4[(a >> 19) & 31][(a & 0xFC) >> 2]; }
+static void dmac_check(void);
 #define INTEVT (*p4reg(0xFF000028u))
 #define QACR0  (*p4reg(0xFF000038u))
 #define QACR1  (*p4reg(0xFF00003Cu))
@@ -144,6 +145,11 @@ static void check_irqs(sh4ctx *c) {
         int pri = (IPRA >> (12 - ch * 4)) & 15;
         if ((tcr & 0x120) == 0x120 && pri > imask) { take_irq(c, 0x400 + ch * 0x20); return; }
     }
+    int dpri = (*p4reg(0xFFD0000Cu) >> 8) & 15;                 /* IPRC: DMAC */
+    for (int ch = 0; ch < 4; ch++) {
+        uint32_t chcr = *p4reg(0xFFA0000Cu + ch * 0x10);
+        if ((chcr & 6) == 6 && ch != 2 && dpri > imask) { take_irq(c, 0x640 + ch * 0x20); return; }
+    }
     int lvl = holly_level();
     if (lvl && lvl > imask) take_irq(c, 0x200 + (15 - lvl) * 0x20);
 }
@@ -220,6 +226,36 @@ static void warn(const char *k, uint32_t a) {
     if (warned_n < 256) warned[warned_n++] = page;
     if (dc_hw_verbose) fprintf(stderr, "dc-core: unhandled %s %08X\n", k, a);
 }
+/* ---------------------------------------------------------------- SH-4 DMAC (auto-request) */
+int dc_dmac_log = 1;
+static void dmac_check(void) {
+    uint32_t dmaor = *p4reg(0xFFA00040u);
+    if (!(dmaor & 1) || (dmaor & 6)) return;                    /* DME off, or NMI/address error */
+    for (int ch = 0; ch < 4; ch++) {
+        uint32_t base = 0xFFA00000u + ch * 0x10;
+        uint32_t chcr = *p4reg(base + 0x0C);
+        if (!(chcr & 1) || (chcr & 2)) continue;                 /* DE off or TE already set */
+        if (((chcr >> 8) & 15) != 4) continue;                   /* only auto-request; CH2 is driven by SB_C2DST */
+        static const int tsz[8] = {8, 1, 2, 4, 32, 4, 4, 4};
+        int ts = tsz[(chcr >> 4) & 7], sm = (chcr >> 12) & 3, dm = (chcr >> 14) & 3;
+        uint32_t sar = *p4reg(base), dar = *p4reg(base + 4), n = *p4reg(base + 8) & 0xFFFFFF;
+        if (!n) n = 0x1000000;
+        if (dc_dmac_log) { fprintf(stderr, "dc-core: DMAC ch%d %08X -> %08X, %u x %d bytes\n", ch, sar, dar, n, ts); }
+        for (uint32_t i = 0; i < n; i++) {
+            for (int b = 0; b < ts; b += 4 > ts ? ts : 4) {
+                if (ts == 1) dc_wr8(dar + b, dc_rd8(sar + b));
+                else if (ts == 2) dc_wr16(dar + b, dc_rd16(sar + b));
+                else dc_wr32(dar + b, dc_rd32(sar + b));
+            }
+            if (sm == 1) sar += ts; else if (sm == 2) sar -= ts;
+            if (dm == 1) dar += ts; else if (dm == 2) dar -= ts;
+        }
+        *p4reg(base) = sar; *p4reg(base + 4) = dar; *p4reg(base + 8) = 0;
+        *p4reg(base + 0x0C) = chcr | 2;                          /* TE */
+        if (chcr & 4) dc_next_event = 0;                         /* IE: DMTE interrupt, see check_irqs */
+    }
+}
+
 /* ---------------------------------------------------------------- DMA engines */
 static void copy_words(uint32_t dst, uint32_t src, uint32_t len) {
     for (uint32_t i = 0; i < len; i += 4) dc_wr32(dst + i, dc_rd32(src + i));
@@ -333,6 +369,7 @@ static void wr(uint32_t a, uint32_t v, int size) {
         }
         if (size == 4) *r = v; else if (size == 2) { int sh = (a & 2) * 8; *r = (*r & ~(0xFFFFu << sh)) | ((v & 0xFFFF) << sh); }
         else { int sh = (a & 3) * 8; *r = (*r & ~(0xFFu << sh)) | ((v & 0xFF) << sh); }
+        if ((a & 0xFFFFFF00u) == 0xFFA00000u) dmac_check();
         return;
     }
     uint32_t m = a & 0x1FFFFFFFu;
