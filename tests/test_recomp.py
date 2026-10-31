@@ -124,6 +124,11 @@ t("mid_function_entry", {0: [0xD101, 0x412B, 0x0009, 0x0009, (BASE + 0x24) & 0xF
   "c.r[0] = 7;", "c.r[0] == 7 && c.r[2] == 0 && c.r[3] == 3")
 
 
+# literal-pool slot used as a variable: mova @(slot),r0 ; mov.l r4,@r0 ; mov.l @(slot),r0 ; rts ; nop
+#   the load must see the stored value, not the 0 assembled into the pool (Rush 2049 IRQ stub)
+t("literal_slot_written_at_runtime", {0: [0xC702, 0x2042, 0xD001, 0x000B, 0x0009, 0x0009, 0x0000, 0x0000]},
+  "c.r[4] = 0x1234ABCDu;", "c.r[0] == 0x1234ABCDu")
+
 def build_bin(prog):
     size = max(off + 2 * len(w) for off, w in prog.items())
     size = (size + 0x40) & ~3

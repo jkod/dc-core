@@ -48,10 +48,13 @@ int dc_bios_load(const char *boot, const char *flashp) {
 
 static void flash_init(char region) {
     memset(flash, 0xFF, sizeof flash);
-    /* factory partition 0x1A000: region / broadcast / language, then "Dreamcast  " */
-    uint8_t *p = flash + 0x1A000;
-    p[0] = (uint8_t)region; p[1] = (uint8_t)region; p[2] = '0'; p[3] = '0'; p[4] = '0';
-    memcpy(p + 5, "Dreamcast  ", 11);
+    /* factory partition 0x1A000 (mirrored at 0x1A0A0): "00" region language broadcast, then
+     * "Dreamcast  "; region/broadcast are set by set_region() */
+    for (int m = 0; m < 2; m++) {
+        uint8_t *p = flash + 0x1A000 + m * 0xA0;
+        memcpy(p, "00011Dreamcast  ", 16);
+    }
+    (void)region;
     memset(flash + 0x1A056, 0x00, 8);  /* machine id */
     memset(flash + 0x1C000, 0xFF, 0x4000); /* user/system blocks: blank (no saved settings) */
 }
@@ -108,7 +111,10 @@ static int gd_exec(int cmd, uint32_t *p) {
 static uint32_t h_sysinfo(sh4ctx *c) {
     TR("bios: sysinfo r7=%u\n", c->r[7]);
     switch (c->r[7]) {
-    case 0: memcpy(dc_ram + 0x68, flash + 0x1A056, 8); c->r[0] = 0; break;
+    case 0:                                          /* INIT: machine ID + factory region bytes */
+        memcpy(dc_ram + 0x68, flash + 0x1A056, 8);
+        memcpy(dc_ram + 0x70, flash + 0x1A000, 5);
+        c->r[0] = 0; break;
     case 2: c->r[0] = (uint32_t)-1; break;           /* icon: none */
     case 3: c->r[0] = 0x8C000068u; break;            /* pointer to machine id */
     default: c->r[0] = 0;
@@ -193,9 +199,21 @@ static uint32_t h_misc(sh4ctx *c) {
     return 0;
 }
 
+/* The console's region has to match the disc: games read it back through SYSINFO (PAL games
+ * check for a European, 50 Hz machine). Like other emulators, a supplied flash keeps its ID and
+ * settings but gets the disc's region and broadcast standard. */
+static void set_region(char region) {
+    char bc = region == '2' ? '1' : '0';                     /* EU: PAL, JP/US: NTSC */
+    for (int m = 0; m < 2; m++) {
+        flash[0x1A002 + m * 0xA0] = (uint8_t)region;
+        flash[0x1A004 + m * 0xA0] = (uint8_t)bc;
+    }
+}
+
 int dc_bios_install(sh4ctx *c, char region) {
     (void)c;
     if (!flash_loaded) flash_init(region);
+    set_region(region);
     struct { uint32_t vec; sh4fn fn; } v[] = {
         {V_SYSINFO, h_sysinfo}, {V_ROMFONT, h_romfont}, {V_FLASH, h_flash},
         {V_GDROM, h_gdrom}, {V_GDROM2, h_gdrom}, {V_MISC, h_misc},

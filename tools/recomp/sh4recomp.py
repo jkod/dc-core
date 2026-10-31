@@ -46,6 +46,31 @@ class Insn:
 class Translator:
     def __init__(self, data, base):
         self.data = data; self.base = base; self.end = base + len(data)
+        self.volatile = self._volatile_literals()
+
+    def _volatile_literals(self):
+        """Literal-pool words that code can write: some routines keep variables in their own pool
+        (Rush 2049's interrupt stub saves r0 with mova + mov.l and reloads it from the same slot).
+        A pool slot counts as writable when an address pointing at it can be produced -- a mova
+        target, or a pool constant that holds the address of another pool slot. Loads from those
+        slots are read at run time instead of folded. The scan covers every halfword, so data that
+        happens to decode as mova only costs a runtime read of a constant."""
+        n = len(self.data) // 2
+        ops = struct.unpack_from("<%dH" % n, self.data, 0)
+        slots, vol = set(), set()
+        for k, op in enumerate(ops):
+            a = self.base + k * 2
+            top = op >> 12
+            if top == 0xC and (op >> 8) & 0xF == 7:          # mova @(disp,PC),r0
+                vol.add(((a + 4) & ~3) + (op & 0xFF) * 4)
+            elif top == 0xD:                                   # mov.l @(disp,PC),Rn
+                slots.add(((a + 4) & ~3) + (op & 0xFF) * 4)
+        for pa in slots:
+            v = self.u32(pa)
+            if v is not None:
+                v = (v & 0x1FFFFFFF) | (self.base & 0xE0000000)
+                if v in slots: vol.add(v)
+        return vol
 
     def u16(self, a):
         o = a - self.base
@@ -226,6 +251,8 @@ class Translator:
         elif top == 0x9:
             v = self.u16(a + 4 + lb * 2)
             if v is None: return e('dc_trap(c, %s, "pc-rel out of image");' % h(a))
+            if (a + 4 + lb * 2) & ~3 in self.volatile:
+                return e("%s = (uint32_t)(int16_t)dc_rd16(%s);" % (R(n), h(a + 4 + lb * 2)))
             return e("%s = %s; /* @%08X */" % (R(n), h(v - 0x10000 if v & 0x8000 else v), a + 4 + lb * 2))
         elif top == 0xA:
             i.kind = "bra"; i.target = a + 4 + s12(op & 0xFFF) * 2; i.delayed = True; return i
@@ -255,7 +282,7 @@ class Translator:
         elif top == 0xD:
             pa = ((a + 4) & ~3) + lb * 4
             v = self.u32(pa)
-            if v is None: return e("%s = dc_rd32(%s);" % (R(n), h(pa)))
+            if v is None or pa in self.volatile: return e("%s = dc_rd32(%s);" % (R(n), h(pa)))
             return e("%s = %s; /* @%08X */" % (R(n), h(v), pa))
         elif top == 0xE:
             return e("%s = %s;" % (R(n), h(s8(lb))))
