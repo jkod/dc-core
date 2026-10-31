@@ -99,6 +99,10 @@ static void intensity(const float *face, float i, float *c) {
 }
 static float uv16(uint32_t w, int hi) { return f32(hi ? (w & 0xFFFF0000u) : (w << 16)); }
 
+/* the TA takes Texture / Offset / Gouraud / 16-bit UV from the parameter control word and puts them
+ * into the ISP/TSP instruction word (bits 25..22); what the game wrote there is ignored */
+static uint32_t isp_from_pcw(uint32_t isp, uint32_t pcw) { return (isp & ~(0xFu << 22)) | ((pcw & 0xF) << 22); }
+
 static void sink(int kind, int list, const uint32_t *w, int words) {
     switch (kind) {
     case -1: list_init(); cur.open = -1; cur.pcw = 0; cur.sprite = 0; return;
@@ -106,7 +110,7 @@ static void sink(int kind, int list, const uint32_t *w, int words) {
         cur.open = -1;
         cur.sprite = 0;
         if (list == 1 || list == 3) { cur.pcw = 0; return; }   /* modifier volumes: not yet */
-        cur.pcw = w[0]; cur.isp = w[1]; cur.tsp = w[2]; cur.tcw = w[3];
+        cur.pcw = w[0]; cur.isp = isp_from_pcw(w[1], w[0]); cur.tsp = w[2]; cur.tcw = w[3];
         {
             int col = (w[0] >> 4) & 3, vol = (w[0] >> 6) & 1, ofs = (w[0] >> 2) & 1;
             if (col == 2) {
@@ -118,7 +122,7 @@ static void sink(int kind, int list, const uint32_t *w, int words) {
     case 5:                                           /* sprite header */
         cur.open = -1;
         cur.pcw = w[0]; cur.sprite = 1;
-        cur.isp = w[1]; cur.tsp = w[2]; cur.tcw = w[3];
+        cur.isp = isp_from_pcw(w[1], w[0]) & ~(1u << 23); cur.tsp = w[2]; cur.tcw = w[3];   /* sprites are flat */
         unpack(w[4], cur.face); unpack(w[5], cur.face_ofs);
         return;
     case 7: {                                         /* vertex */
@@ -221,9 +225,9 @@ static tex_t *get_tex(uint32_t tcw, uint32_t tsp) {
     int linear = (tcw >> 26) & 1, stride = (tcw >> 25) & 1;
     uint32_t addr = (tcw & 0x1FFFFF) << 3;
     if (fmt == 5 || fmt == 6) linear = 0, stride = 0;       /* palette formats are always twiddled */
-    if (linear && stride) w = (REG(0x0E4) & 31) * 32;
+    int pitch = w;                                           /* texels per row in memory */
+    if (linear && stride) { pitch = (int)(REG(0x0E4) & 31) * 32; if (pitch <= 0) pitch = w; }
     if (mip) h = w;                                          /* mip-mapped textures are square */
-    if (w <= 0) w = 8;
     t->tcw = tcw; t->tsp_size = sz; t->pal_gen = pal_gen; t->w = w; t->h = h;
     t->px = malloc((size_t)w * h * 4);
     int lw = 0; while ((1 << lw) < w) lw++;
@@ -249,13 +253,13 @@ static tex_t *get_tex(uint32_t tcw, uint32_t tsp) {
             } else if (fmt == 6) {
                 c = palette(pal_base + tex8(addr + twiddle(x, y, w, h)));
             } else if (fmt == 3) {                          /* YUV422: pairs of texels share U/V */
-                uint32_t i0 = linear ? (uint32_t)(y * w + (x & ~1)) : twiddle(x & ~1, y, w, h);
+                uint32_t i0 = linear ? (uint32_t)(y * pitch + (x & ~1)) : twiddle(x & ~1, y, w, h);
                 uint32_t i1 = linear ? i0 + 1 : twiddle(x | 1, y, w, h);
                 uint16_t p0 = tex16(addr + i0 * 2), p1 = tex16(addr + i1 * 2);
                 int U = p0 & 255, V = p1 & 255, Y = (x & 1) ? p1 >> 8 : p0 >> 8;
                 c = yuv_px(Y, U, V);
             } else {
-                uint32_t i = linear ? (uint32_t)(y * w + x) : twiddle(x, y, w, h);
+                uint32_t i = linear ? (uint32_t)(y * pitch + x) : twiddle(x, y, w, h);
                 c = conv16(fmt == 4 ? 1 : fmt == 7 ? 0 : fmt, tex16(addr + i * 2));
             }
             t->px[y * w + x] = c;
