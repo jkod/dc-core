@@ -74,6 +74,9 @@ typedef void (*fn_void)(void);
 typedef bool (*fn_load)(const struct retro_game_info *);
 typedef void *(*fn_mem)(unsigned);
 typedef size_t (*fn_memsize)(unsigned);
+typedef size_t (*fn_ssize)(void);
+typedef bool (*fn_ser)(void *, size_t);
+typedef bool (*fn_unser)(const void *, size_t);
 #define SYM(T, n) T n = (T)dlsym(core, #n); if (!n) { fprintf(stderr, "missing %s\n", #n); return 2; }
 
 int main(int argc, char **argv) {
@@ -87,6 +90,7 @@ int main(int argc, char **argv) {
     SYM(fn_poll, retro_set_input_poll); SYM(fn_state, retro_set_input_state);
     SYM(fn_void, retro_init); SYM(fn_load, retro_load_game); SYM(fn_void, retro_run);
     SYM(fn_mem, retro_get_memory_data); SYM(fn_memsize, retro_get_memory_size);
+    SYM(fn_ssize, retro_serialize_size); SYM(fn_ser, retro_serialize); SYM(fn_unser, retro_unserialize);
     retro_set_environment(env); retro_set_video_refresh(video); retro_set_audio_sample(audio);
     retro_set_audio_sample_batch(audio_batch); retro_set_input_poll(input_poll); retro_set_input_state(input_state);
     retro_init();
@@ -95,14 +99,32 @@ int main(int argc, char **argv) {
     uint8_t *ram = retro_get_memory_data(RETRO_MEMORY_SYSTEM_RAM);
     size_t rs = retro_get_memory_size(RETRO_MEMORY_SYSTEM_RAM);
     fprintf(stderr, "running, ram=%p size=%zu\n", (void *)ram, rs);
-    int frames = atoi(argv[5]), every = atoi(argv[6]);
-    for (int f = 1; f <= frames; f++) {
+    int frames = atoi(argv[5]), every = atoi(argv[6]), first = 1;
+    /* LR_LOAD_STATE=file (+ LR_FIRST_FRAME=n) continues a previous run; LR_SAVE_STATE=file saves at the end */
+    if (getenv("LR_LOAD_STATE")) {
+        FILE *sf = fopen(getenv("LR_LOAD_STATE"), "rb");
+        if (sf) {
+            fseek(sf, 0, SEEK_END); long n = ftell(sf); fseek(sf, 0, SEEK_SET);
+            void *buf = malloc((size_t)n);
+            if (fread(buf, 1, (size_t)n, sf) == (size_t)n && retro_unserialize(buf, (size_t)n)) fprintf(stderr, "state loaded\n");
+            else fprintf(stderr, "state load FAILED\n");
+            free(buf); fclose(sf);
+        }
+        if (getenv("LR_FIRST_FRAME")) first = atoi(getenv("LR_FIRST_FRAME"));
+    }
+    frames += first - 1;
+    for (int f = first; f <= frames; f++) {
         retro_run();
         if (ram && every && f % every == 0) {
             char p[1024]; snprintf(p, sizeof p, "%s/ram_%05d.bin", argv[4], f);
             FILE *o = fopen(p, "wb"); if (o) { fwrite(ram, 1, rs, o); fclose(o); }
             fprintf(stderr, "frame %d dumped\n", f);
         }
+    }
+    if (getenv("LR_SAVE_STATE")) {
+        size_t n = retro_serialize_size(); void *buf = malloc(n);
+        if (buf && retro_serialize(buf, n)) { FILE *sf = fopen(getenv("LR_SAVE_STATE"), "wb"); if (sf) { fwrite(buf, 1, n, sf); fclose(sf); fprintf(stderr, "state saved at frame %d\n", frames); } }
+        free(buf);
     }
     return 0;
 }
