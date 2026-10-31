@@ -21,8 +21,9 @@ while [ $i -lt "$ROUNDS" ]; do
   echo "$OUT" | tail -6 > "$W/last_probe.txt"
   A=$(echo "$OUT" | grep -o 'MISS [0-9A-F]*' | head -1 | cut -d' ' -f2)
   if [ -z "$A" ] || [ "$A" = "00000000" ]; then echo "$OUT" | tail -25; exit 0; fi
+  A=$(printf '%08x' $(( (0x$A & 0x1FFFFFFF) | 0x80000000 )))   # P0/P2 mirrors -> P1
   echo "round $i: new function $A"
-  echo "$A" | tr 'A-F' 'a-f' >> "$W/funcs.txt"
+  echo "$A" >> "$W/funcs.txt"
   i=$((i + 1))
 done
 cat "$W/last_probe.txt"
