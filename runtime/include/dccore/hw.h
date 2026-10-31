@@ -13,6 +13,10 @@ typedef struct dc_hw_hooks {
     void (*on_aica_write)(uint32_t addr, uint32_t v);
     void (*on_ta_write)(uint32_t addr, uint32_t v);        /* direct 32-bit writes to the TA FIFO */
     int  (*on_sq)(uint32_t dst, const uint32_t data[8]);   /* store-queue burst; return 1 if consumed */
+    void (*on_render)(void);                               /* STARTRENDER: draw the lists received so far */
+    /* Maple bus: a frame for `port`; write the reply to recv (P1 address) and return 1, or return 0
+     * for "no device". send = address of the frame's data words. */
+    int  (*on_maple)(int port, uint32_t frame, uint32_t send, int words, uint32_t recv);
 } dc_hw_hooks;
 extern dc_hw_hooks dc_hw;
 extern uint8_t dc_vram[0x800000];

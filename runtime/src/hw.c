@@ -10,6 +10,7 @@
  */
 #include "dccore/runtime.h"
 #include "dccore/hw.h"
+#include "dccore/ta.h"
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -19,6 +20,7 @@
 
 uint64_t dc_next_event = ~0ull;
 dc_hw_hooks dc_hw;                   /* optional observers (renderer, sound, input) */
+extern sh4ctx *dc_current_ctx;
 
 static dc_hw_ops user_ops;
 void dc_set_hw(const dc_hw_ops *ops) { if (ops) user_ops = *ops; else memset(&user_ops, 0, sizeof user_ops); }
@@ -91,6 +93,19 @@ static uint64_t tmu_next_underflow(int ch, uint64_t now) {
     return tmu[ch].start + ((uint64_t)tmu[ch].cnt0 + 1) * tmu_div(ch);
 }
 
+/* ---------------------------------------------------------------- delayed completions */
+#define MAXQ 32
+static struct { uint64_t at; uint32_t bits; } evq[MAXQ];
+static int evn;
+static uint64_t now_cycles(void) { return dc_current_ctx ? dc_current_ctx->cycles : 0; }
+/* raise ISTNRM bits after `delay` cycles (hardware never completes a transfer instantly, and
+ * games set their "busy" flags after starting one) */
+static void schedule_irq(uint32_t bits, uint64_t delay) {
+    if (evn < MAXQ) { evq[evn].at = now_cycles() + delay; evq[evn].bits = bits; evn++; }
+    else SBR(ISTNRM) |= bits;
+    dc_next_event = 0;
+}
+
 /* ---------------------------------------------------------------- interrupts */
 static int irq_depth;
 static void take_irq(sh4ctx *c, uint32_t code) {
@@ -148,12 +163,15 @@ void dc_events(sh4ctx *c) {
     }
     if (now >= at_out && last_vbout_field != field) { last_vbout_field = field; SBR(ISTNRM) |= 1u << 4; }
     for (int ch = 0; ch < 3; ch++) tmu_sync(ch, now);
+    for (int i = 0; i < evn; )
+        if (evq[i].at <= now) { SBR(ISTNRM) |= evq[i].bits; evq[i] = evq[--evn]; } else i++;
     check_irqs(c);
     /* next event: the next vblank in/out edge or TMU underflow */
     uint64_t nx = (last_vbin_field == field) ? (field + 1) * f + (uint64_t)vbin * f / lines : at_in;
     uint64_t no = (last_vbout_field == field) ? (field + 1) * f + (uint64_t)vbout * f / lines : at_out;
     if (no < nx) nx = no;
     for (int ch = 0; ch < 3; ch++) { uint64_t t = tmu_next_underflow(ch, now); if (t < nx) nx = t; }
+    for (int i = 0; i < evn; i++) if (evq[i].at < nx) nx = evq[i].at;
     /* while an interrupt is still pending (masked), look again soon */
     if (holly_level() || ((*tmu_reg(0, 2) | *tmu_reg(1, 2) | *tmu_reg(2, 2)) & 0x100)) { uint64_t t = now + 2000; if (t < nx) nx = t; }
     dc_next_event = nx;
@@ -167,12 +185,27 @@ static uint32_t vram32(uint32_t o) {
     return rv & 0x7FFFFF;
 }
 
+/* ---------------------------------------------------------------- TA FIFO / texture path */
+/* m = address & 0x1FFFFFFF in 0x10000000..0x13FFFFFF */
+static void ta_area_write(uint32_t m, const uint8_t *p, uint32_t len) {
+    uint32_t sub = m & 0x03FFFFFFu;
+    if (sub < 0x00800000u || (sub >= 0x02000000u && sub < 0x02800000u)) { dc_ta_write(p, len); return; }
+    if (sub < 0x01000000u || (sub >= 0x02800000u && sub < 0x03000000u)) return;          /* YUV converter: TODO */
+    int lm32 = (sub >= 0x03000000u) ? (SBR(0x6888) & 1) : (SBR(0x6884) & 1);           /* LMMODE1 / LMMODE0 */
+    for (uint32_t i = 0; i < len; i += 4) {
+        uint32_t o = (sub + i) & 0x7FFFFF;
+        if (lm32) memcpy(dc_vram + vram32(o), p + i, 4); else memcpy(dc_vram + o, p + i, 4);
+    }
+}
+
 /* ---------------------------------------------------------------- store queues */
 static void sq_flush(uint32_t a) {
     int n = (a >> 5) & 1;
     uint32_t qacr = n ? QACR1 : QACR0;
     uint32_t dst = ((qacr & 0x1C) << 24) | (a & 0x03FFFFE0);
-    if (dc_hw.on_sq && dc_hw.on_sq(dst, sq[n])) return;          /* TA FIFO etc. */
+    if (dc_hw.on_sq && dc_hw.on_sq(dst, sq[n])) return;
+    uint32_t m = dst & 0x1FFFFFFFu;
+    if (m >= 0x10000000u && m < 0x14000000u) { ta_area_write(m, (const uint8_t *)sq[n], 32); return; }
     for (int i = 0; i < 8; i++) dc_wr32(dst + i * 4, sq[n][i]);
 }
 void dc_hw_pref(uint32_t a) { if ((a >> 26) == 0x38) sq_flush(a); }   /* 0xE0000000..0xE3FFFFFF */
@@ -187,6 +220,60 @@ static void warn(const char *k, uint32_t a) {
     if (warned_n < 256) warned[warned_n++] = page;
     if (dc_hw_verbose) fprintf(stderr, "dc-core: unhandled %s %08X\n", k, a);
 }
+/* ---------------------------------------------------------------- DMA engines */
+static void copy_words(uint32_t dst, uint32_t src, uint32_t len) {
+    for (uint32_t i = 0; i < len; i += 4) dc_wr32(dst + i, dc_rd32(src + i));
+}
+
+static void maple_dma(void) {
+    uint32_t p = (SBR(0x6C04) & 0x1FFFFFE0u) | 0x80000000u;
+    for (int guard = 0; guard < 64; guard++) {
+        uint32_t hdr = dc_rd32(p), recv = dc_rd32(p + 4);
+        int words = hdr & 0xFF, port = (hdr >> 16) & 3, pattern = (hdr >> 8) & 7;
+        if (pattern == 0) {
+            uint32_t frame = dc_rd32(p + 8);
+            int handled = dc_hw.on_maple && dc_hw.on_maple(port, frame, p + 12, words, recv | 0x80000000u);
+            if (!handled) dc_wr32(recv | 0x80000000u, 0xFFFFFFFFu);        /* no device on this port */
+            p += 12 + (uint32_t)words * 4;
+        } else p += 8;
+        if (hdr >> 31) break;
+    }
+    SBR(0x6C18) = 0;
+    schedule_irq(1u << 12, 20000);                                       /* maple DMA end */
+}
+
+static void sb_dma(uint32_t o, uint32_t v) {
+    if (o == 0x6808 && (v & 1)) {                                        /* CH2 DMA -> TA / texture memory */
+        uint32_t src = *p4reg(0xFFA00020u), len = SBR(0x6804), dst = SBR(0x6800);
+        uint32_t so = DC_RAM_OFS(src);
+        if (DC_IS_RAM(src) && so + len <= 0x1000000u) {
+            uint32_t m = dst & 0x1FFFFFFFu;
+            if (m >= 0x10000000u && m < 0x14000000u) ta_area_write(m, dc_ram + so, len);
+            else copy_words(dst, src, len);
+        }
+        SBR(0x6800) = dst + len; SBR(0x6804) = 0; SBR(0x6808) = 0;
+        *p4reg(0xFFA00028u) = 0; *p4reg(0xFFA0002Cu) |= 2;               /* DMATCR2 = 0, CHCR2.TE */
+        schedule_irq(1u << 19, 2000 + len / 4);
+        return;
+    }
+    if (o >= 0x7800 && o < 0x7880 && (o & 0x1F) == 0x18 && (v & 1)) {   /* G2 DMA (AICA, ext1, ext2, dev) */
+        uint32_t b = o - 0x18, k = (b - 0x7800) / 0x20;
+        uint32_t g2 = SBR(b), sh = SBR(b + 4), len = SBR(b + 8) & 0x7FFFFFFFu, dir = SBR(b + 0xC);
+        if (dir) copy_words(sh, g2, len); else copy_words(g2, sh, len);
+        SBR(b + 0x18) = 0;
+        schedule_irq(1u << (15 + k), 2000 + len / 2);
+        return;
+    }
+    if (o == 0x7C18 && (v & 1)) {                                        /* PVR DMA */
+        uint32_t pv = SBR(0x7C00), sh = SBR(0x7C04), len = SBR(0x7C08), dir = SBR(0x7C0C);
+        if (dir) copy_words(sh, pv, len); else copy_words(pv, sh, len);
+        SBR(0x7C18) = 0;
+        schedule_irq(1u << 11, 2000 + len / 4);
+        return;
+    }
+    if (o == 0x6C18 && (v & 1) && (SBR(0x6C14) & 1)) maple_dma();        /* Maple DMA */
+}
+
 static uint32_t rd(uint32_t a, int size) {
     if ((a >> 26) == 0x38) { uint32_t v = sq[(a >> 5) & 1][(a >> 2) & 7]; return v; }
     if ((a & 0xFC000000u) == 0x7C000000u) { uint32_t v = 0; memcpy(&v, ocram + (a & 0x1FFF), size); return v; }
@@ -255,6 +342,7 @@ static void wr(uint32_t a, uint32_t v, int size) {
         if (o >= IML2NRM && o <= IML6NRM + 8) dc_next_event = 0;
         SBR(o) = v;
         if (dc_hw.on_sb_write) dc_hw.on_sb_write(o + 0x005F0000u, v);
+        sb_dma(o, v);
         return;
     }
     if (m >= 0x005F8000u && m < 0x005FA000u) {
@@ -262,13 +350,24 @@ static void wr(uint32_t a, uint32_t v, int size) {
         PVR(o & 0x1FFC) = v;
         if (dc_hw.on_pvr_write) dc_hw.on_pvr_write(o, v);
         if (o == 0x0CC || o == 0x0D8 || o == 0x0DC) dc_next_event = 0;
+        if (o == 0x144 && (v >> 31)) dc_ta_reset();                      /* TA_LIST_INIT */
+        if (o == 0x014) {                                                 /* STARTRENDER */
+            if (dc_hw.on_render) dc_hw.on_render();
+            schedule_irq(7u, 200000);                                     /* render done (video, ISP, TSP) */
+        }
         return;
     }
     if (m >= 0x00700000u && m < 0x00710000u) { aica[(m & 0xFFFC) >> 2] = v; if (dc_hw.on_aica_write) dc_hw.on_aica_write(m, v); return; }
     if (m >= 0x00800000u && m < 0x00A00000u) { memcpy(aram + (m & 0x1FFFFF), &v, size); return; }
     if ((m >> 24) == 0x04 || (m >> 24) == 0x06) { memcpy(dc_vram + (m & 0x7FFFFF), &v, size); return; }
     if ((m >> 24) == 0x05 || (m >> 24) == 0x07) { memcpy(dc_vram + vram32(m), &v, size); return; }
-    if ((m >> 26) == 0x04) { if (dc_hw.on_ta_write) dc_hw.on_ta_write(m, v); return; }      /* 0x10000000.. TA FIFO */
+    if ((m >> 26) == 0x04) {                                                                  /* 0x10000000.. TA FIFO */
+        static uint32_t blk[8]; static int nb;
+        if (dc_hw.on_ta_write) dc_hw.on_ta_write(m, v);
+        blk[nb++] = v;
+        if (nb == 8) { nb = 0; ta_area_write(m & ~31u, (const uint8_t *)blk, 32); }
+        return;
+    }
     warn(size == 4 ? "write32" : size == 2 ? "write16" : "write8", a);
 }
 

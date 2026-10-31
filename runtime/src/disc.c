@@ -13,7 +13,7 @@ typedef struct {
     int sector;             /* 2352 or 2048 */
     uint32_t skip;          /* sectors to skip at the start of the file (pregap) */
     uint32_t sectors;       /* sectors in the file */
-    char path[1024];
+    char path[2200];
     FILE *f;
 } track_t;
 
