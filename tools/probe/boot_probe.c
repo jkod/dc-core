@@ -133,8 +133,11 @@ static void sb_wr(uint32_t a, uint32_t v) {
     }
 }
 /* DC_DUMP_FRAMES=a,b,c: dump RAM at these vblank counts (ramdump_f<N>.bin) */
+static uint64_t renders;
+static void on_render_count(void) { renders++; }
 static void on_vblank(uint64_t f) {
     cur_frame = f;
+    if (getenv("DC_FPS") && f % 500 == 0) { static uint64_t last; printf("fps f=%llu renders/vblank=%.2f\n", (unsigned long long)f, (renders - last) / 500.0); last = renders; }
     const char *p = getenv("DC_DUMP_FRAMES");
     while (p && *p) {
         unsigned long v = strtoul(p, (char **)&p, 10);
@@ -169,7 +172,8 @@ int main(int argc, char **argv) {
         dc_coro_trace = getenv("DC_CORO_TRACE") != NULL;
     }
     if (getenv("DC_HWSTATS")) dc_hw_read_hook = hw_read;
-    dc_hw.on_vblank = on_vblank;   /* frame count for logs; DC_DUMP_FRAMES dumps */
+    dc_hw.on_vblank = on_vblank;
+    if (getenv("DC_FPS")) dc_hw.on_render = on_render_count;   /* frame count for logs; DC_DUMP_FRAMES dumps */
     if (getenv("DC_TRACE_FROM")) { unsigned a, n = 200; sscanf(getenv("DC_TRACE_FROM"), "%x:%u", &a, &n); trace_from = a | 0x80000000u; trace_left = (int)n; }
     if (getenv("DC_LOGFN")) {
         const char *p = getenv("DC_LOGFN");
