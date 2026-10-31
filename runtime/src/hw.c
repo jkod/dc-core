@@ -444,7 +444,7 @@ static uint32_t rd(uint32_t a, int size) {
     if (m >= 0x00700000u && m < 0x00710000u) { dc_aica_advance(now_cycles()); return dc_aica_read(m, size); }
     if (m >= 0x00800000u && m < 0x00A00000u) { dc_aica_advance(now_cycles()); uint32_t v = 0; memcpy(&v, aram + (m & 0x1FFFFF), size); return v; }
     if ((m >> 24) == 0x04 || (m >> 24) == 0x06) { uint32_t v = 0; memcpy(&v, dc_vram + (m & 0x7FFFFF), size); return v; }
-    if ((m >> 24) == 0x05 || (m >> 24) == 0x07) { uint32_t v = 0; memcpy(&v, dc_vram + vram32(m), size); return v; }
+    if ((m >> 24) == 0x05 || (m >> 24) == 0x07) { uint32_t v = 0; memcpy(&v, dc_vram + (vram32(m) | (m & 3)), size); return v; }   /* 8/16-bit: byte lanes within the word */
     if (m < 0x00200000u && dc_bios_rom) { uint32_t v = 0; memcpy(&v, dc_bios_rom + m, size); return v; }   /* boot ROM */
     if (m >= 0x00200000u && m < 0x00220000u) { uint32_t v = 0; memcpy(&v, dc_flash + (m & 0x1FFFF), size); return v; }
     warn(size == 4 ? "read32" : size == 2 ? "read16" : "read8", a);
@@ -504,7 +504,7 @@ static void wr(uint32_t a, uint32_t v, int size) {
     if (m >= 0x00700000u && m < 0x00710000u) { dc_aica_advance(now_cycles()); dc_aica_write(m, v, size); if (dc_hw.on_aica_write) dc_hw.on_aica_write(m, v); dc_next_event = 0; return; }
     if (m >= 0x00800000u && m < 0x00A00000u) { memcpy(aram + (m & 0x1FFFFF), &v, size); if (dc_hw.on_aica_write) dc_hw.on_aica_write(m, v); return; }
     if ((m >> 24) == 0x04 || (m >> 24) == 0x06) { memcpy(dc_vram + (m & 0x7FFFFF), &v, size); return; }
-    if ((m >> 24) == 0x05 || (m >> 24) == 0x07) { memcpy(dc_vram + vram32(m), &v, size); return; }
+    if ((m >> 24) == 0x05 || (m >> 24) == 0x07) { memcpy(dc_vram + (vram32(m) | (m & 3)), &v, size); return; }
     if ((m >> 26) == 0x04) {                                                                  /* 0x10000000.. TA FIFO */
         static uint32_t blk[8]; static int nb;
         if (dc_hw.on_ta_write) dc_hw.on_ta_write(m, v);

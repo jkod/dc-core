@@ -23,7 +23,7 @@ static struct {
 static dc_ta_sink sink;
 void dc_ta_set_sink(dc_ta_sink s) { sink = s; }
 
-void dc_ta_reset(void) { ta.list = -1; ta.pending = 0; ta.vtx64 = 0; }
+void dc_ta_reset(void) { ta.list = -1; ta.pending = 0; ta.vtx64 = 0; if (sink) sink(-1, -1, NULL, 0); }   /* -1: TA_LIST_INIT */
 
 /* polygon global parameter size and vertex size from the parameter control word */
 static void poly_format(uint32_t pcw, int *hdr64, int *vtx64) {

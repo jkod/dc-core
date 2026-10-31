@@ -6,6 +6,7 @@
  */
 #include "dccore/runtime.h"
 #include "dccore/coro.h"
+#include "dccore/pvr.h"
 #include "dccore/disc.h"
 #include "dccore/bios.h"
 #include "dccore/hw.h"
@@ -136,8 +137,57 @@ static void sb_wr(uint32_t a, uint32_t v) {
 /* DC_DUMP_FRAMES=a,b,c: dump RAM at these vblank counts (ramdump_f<N>.bin) */
 static uint64_t renders;
 static void on_render_count(void) { renders++; }
+
+/* ---- DC_SHOT=f1,f2,...: software-render every frame, save the displayed image at these vblanks
+ * (shot_fNNNNN.png). Uncompressed PNG (stored deflate) to stay dependency-free. */
+static uint32_t crc_tab[256];
+static uint32_t crc(uint32_t c, const uint8_t *p, size_t n) {
+    if (!crc_tab[1]) for (uint32_t i = 0; i < 256; i++) { uint32_t k = i; for (int j = 0; j < 8; j++) k = k & 1 ? 0xEDB88320u ^ (k >> 1) : k >> 1; crc_tab[i] = k; }
+    c = ~c; while (n--) c = crc_tab[(c ^ *p++) & 255] ^ (c >> 8); return ~c;
+}
+static void be32(uint8_t *p, uint32_t v) { p[0] = v >> 24; p[1] = v >> 16; p[2] = v >> 8; p[3] = v; }
+static void chunk(FILE *f, const char *t, const uint8_t *d, uint32_t n) {
+    uint8_t h[8]; be32(h, n); memcpy(h + 4, t, 4); fwrite(h, 1, 8, f); if (n) fwrite(d, 1, n, f);
+    uint32_t c = crc(crc(0, (const uint8_t *)t, 4), d, n); uint8_t cb[4]; be32(cb, c); fwrite(cb, 1, 4, f);
+}
+static int write_png(const char *path, const uint8_t *rgb, int w, int h) {
+    FILE *f = fopen(path, "wb"); if (!f) return -1;
+    fwrite("\x89PNG\r\n\x1a\n", 1, 8, f);
+    uint8_t ih[13]; be32(ih, w); be32(ih + 4, h); ih[8] = 8; ih[9] = 2; ih[10] = ih[11] = ih[12] = 0; chunk(f, "IHDR", ih, 13);
+    size_t raw_n = (size_t)h * (w * 3 + 1), blocks = (raw_n + 65534) / 65535;
+    uint8_t *raw = malloc(raw_n), *z = malloc(2 + raw_n + blocks * 5 + 4);
+    for (int y = 0; y < h; y++) { raw[y * (w * 3 + 1)] = 0; memcpy(raw + y * (w * 3 + 1) + 1, rgb + (size_t)y * w * 3, (size_t)w * 3); }
+    size_t o = 0; z[o++] = 0x78; z[o++] = 0x01;
+    uint32_t a = 1, b = 0;
+    for (size_t i = 0; i < raw_n; i += 65535) {
+        size_t n = raw_n - i < 65535 ? raw_n - i : 65535;
+        z[o++] = i + n >= raw_n; z[o++] = n & 255; z[o++] = n >> 8; z[o++] = ~n & 255; z[o++] = (~n >> 8) & 255;
+        memcpy(z + o, raw + i, n); o += n;
+    }
+    for (size_t i = 0; i < raw_n; i++) { a = (a + raw[i]) % 65521; b = (b + a) % 65521; }
+    be32(z + o, b << 16 | a); o += 4;
+    chunk(f, "IDAT", z, (uint32_t)o); chunk(f, "IEND", NULL, 0);
+    fclose(f); free(raw); free(z); return 0;
+}
+static void shot_check(uint64_t f) {
+    const char *p = getenv("DC_SHOT");
+    while (p && *p) {
+        unsigned long v = strtoul(p, (char **)&p, 10);
+        if (v == f) {
+            static uint8_t rgb[1280 * 1024 * 3]; int w, h;
+            int on = dc_pvr_display(rgb, 1280, 1024, &w, &h);
+            char b[64]; snprintf(b, sizeof b, "shot_f%05lu.png", v);
+            write_png(b, rgb, w, h);
+            fprintf(stderr, "shot %s %dx%d%s\n", b, w, h, on ? " (display off)" : "");
+        }
+        if (*p == ',') p++; else break;
+    }
+}
+static int rendered;
+static void on_render_sw(void) { renders++; dc_pvr_sw_render(); rendered++; }
 static void on_vblank(uint64_t f) {
     cur_frame = f;
+    if (getenv("DC_SHOT")) shot_check(f);
     if (getenv("DC_TRACE_FRAME")) {   /* DC_TRACE_FRAME=frame:count: trace calls from that vblank on */
         unsigned fr = 0, n = 200; sscanf(getenv("DC_TRACE_FRAME"), "%u:%u", &fr, &n);
         if (f == fr) { trace_armed = 1; trace_left = (int)n; }
@@ -182,7 +232,8 @@ int main(int argc, char **argv) {
     dc_hw.on_vblank = on_vblank;
     if (getenv("DC_CABLE")) dc_cable = atoi(getenv("DC_CABLE"));
     if (getenv("DC_CALLCOST")) dc_call_cost = (uint32_t)atoi(getenv("DC_CALLCOST"));
-    if (getenv("DC_FPS")) dc_hw.on_render = on_render_count;   /* frame count for logs; DC_DUMP_FRAMES dumps */
+    if (getenv("DC_FPS")) dc_hw.on_render = on_render_count;
+    if (getenv("DC_SHOT")) { dc_pvr_sw_install(); dc_hw.on_render = on_render_sw; }   /* frame count for logs; DC_DUMP_FRAMES dumps */
     if (getenv("DC_TRACE_FROM")) { unsigned a, n = 200; sscanf(getenv("DC_TRACE_FROM"), "%x:%u", &a, &n); trace_from = a | 0x80000000u; trace_left = (int)n; }
     if (getenv("DC_LOGFN")) {
         const char *p = getenv("DC_LOGFN");
