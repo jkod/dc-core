@@ -23,7 +23,8 @@ typedef struct sh4ctx {
     uint32_t gbr, vbr, ssr, spc, sgr, dbr;
     uint32_t mach, macl, pr, fpul, fpscr;
     union { float f[32]; uint32_t u[32]; } fr;   /* [0..15] current FR bank, [16..31] XF bank */
-    uint64_t cycles;            /* rough instruction counter, for profiling only */
+    uint64_t cycles;            /* rough cycle counter, drives the hardware model */
+    uint32_t entry;             /* address a function is being entered at (set by dc_call) */
 } sh4ctx;
 
 #define FPSCR_PR (1u << 19)

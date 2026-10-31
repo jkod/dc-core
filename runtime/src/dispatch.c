@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-typedef struct { uint32_t addr; sh4fn fn; } dc_fn_entry;
+typedef struct { uint32_t addr, end; sh4fn fn; } dc_fn_entry;
 extern const dc_fn_entry dc_fn_table[];
 extern const size_t dc_fn_count;
 
@@ -76,6 +76,8 @@ static sh4fn lookup_table(uint32_t addr) {
         if (dc_fn_table[mid].addr < addr) lo = mid + 1; else hi = mid;
     }
     if (lo < dc_fn_count && dc_fn_table[lo].addr == addr) return dc_fn_table[lo].fn;
+    /* inside a function: it is entered there through its entry switch */
+    if (lo > 0 && addr < dc_fn_table[lo - 1].end && !(addr & 1)) return dc_fn_table[lo - 1].fn;
     return NULL;
 }
 
@@ -93,6 +95,9 @@ void dc_call(sh4ctx *c, uint32_t addr) {
             fprintf(stderr, "dc-core: no recompiled function at %08X (pr=%08X)\n", addr, c->pr);
             abort();
         }
+        c->entry = (addr & 0x1FFFFFFFu) | 0x80000000u;
+        for (int i = 0; i < alias_n; i++)       /* copied code runs as its original */
+            if (c->entry - alias[i].dst < alias[i].len) { c->entry = alias[i].src + (c->entry - alias[i].dst); break; }
         addr = f(c);
     }
 }

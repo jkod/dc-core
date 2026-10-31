@@ -117,6 +117,12 @@ t("runtime_copied_code_alias", {0: [0x0009, 0x000B, 0x0009], 0x20: [0xE02A, 0x70
   "memcpy(dc_ram + 0xF000, dc_ram + 0x10020, 32); dc_alias_verbose = 0;",
   "(dc_call(&c, 0x8C00F000u), c.r[0] == 43)")
 
+# 18. a computed jump into the middle of another function enters it through its entry switch
+#   A@0: mov.l @(lit),r1 ; jmp @r1 ; nop ; (lit = B+4)      B@0x20: mov #1,r0 ; mov #2,r2 ; mov #3,r3 ; rts ; nop
+t("mid_function_entry", {0: [0xD101, 0x412B, 0x0009, 0x0009, (BASE + 0x24) & 0xFFFF, (BASE + 0x24) >> 16],
+                         0x20: [0xE001, 0xE202, 0xE303, 0x000B, 0x0009]},
+  "c.r[0] = 7;", "c.r[0] == 7 && c.r[2] == 0 && c.r[3] == 3")
+
 
 def build_bin(prog):
     size = max(off + 2 * len(w) for off, w in prog.items())

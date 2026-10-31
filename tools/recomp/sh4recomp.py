@@ -330,11 +330,12 @@ class Translator:
         """known: sorted list of function starts (for direct calls)."""
         name = "f_%08X" % start
         out.append("uint32_t %s(sh4ctx *c) {" % name)
+        out.append("  if (c->entry != %s) { jt = c->entry; goto local_jump; }" % h(start))
         insns = {}
         a = start
         while a < end:
             insns[a] = self.decode(a); a += 2
-        needs_local_jump = any(i.kind in ("jmp", "braf") for i in insns.values())
+        needs_local_jump = True   # computed jumps and mid-function entries both use the switch
         for a in range(start, end, 2):
             i = insns[a]
             out.append("L_%08X:" % a)
@@ -355,7 +356,7 @@ class Translator:
             # insert after function header
             for k in range(idx, -1, -1):
                 if out[k].startswith("uint32_t %s(" % name):
-                    out.insert(k + 1, "  uint32_t jt = 0;")
+                    out.insert(k + 1, "  uint32_t jt = 0; (void)jt;")
                     break
 
     def slot_code(self, i, insns):
@@ -536,7 +537,7 @@ def main():
     ap.add_argument("--out", required=True)
     ap.add_argument("--write-funcs", help="save the final function list here")
     ap.add_argument("--chunk", type=int, default=150, help="functions per .c file")
-    ap.add_argument("--max-func-bytes", type=lambda x: int(x, 0), default=0x4000,
+    ap.add_argument("--max-func-bytes", type=lambda x: int(x, 0), default=0x40000,
                     help="cap a function's range (protects against huge data gaps)")
     ap.add_argument("--no-discover", action="store_true")
     args = ap.parse_args()
@@ -586,9 +587,9 @@ def main():
     tab = ['#include "dccore/sh4.h"', "#include <stddef.h>", ""]
     for s, _ in ranges: tab.append("uint32_t f_%08X(sh4ctx *c);" % s)
     tab.append("")
-    tab.append("typedef struct { uint32_t addr; sh4fn fn; } dc_fn_entry;")
+    tab.append("typedef struct { uint32_t addr, end; sh4fn fn; } dc_fn_entry;")
     tab.append("const dc_fn_entry dc_fn_table[] = {")
-    for s, _ in ranges: tab.append("  { %s, f_%08X }," % (h(s), s))
+    for s_, e_ in ranges: tab.append("  { %s, %s, f_%08X }," % (h(s_), h(e_), s_))
     tab.append("};")
     tab.append("const size_t dc_fn_count = %d;" % len(ranges))
     tp = os.path.join(args.out, "recomp_table.c"); text = "\n".join(tab) + "\n"
