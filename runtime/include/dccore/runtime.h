@@ -19,6 +19,9 @@ void  dc_init(sh4ctx *c);                         /* allocates 16 MB RAM, sets b
 int   dc_load_binary(const char *path, uint32_t addr);
 sh4fn dc_lookup(uint32_t addr);
 void  dc_hle_register(uint32_t addr, sh4fn fn);   /* replace a guest function with native code */
+/* RAM range [dst, dst+len) holds a copy of executable code at src (found automatically for code
+ * a game copies at runtime, e.g. exception vectors; call this to declare one up front). */
+void  dc_alias_code(uint32_t dst, uint32_t src, uint32_t len);
 void  dc_set_miss_handler(dc_miss_fn f);
 void  dc_set_trap_handler(dc_trap_fn f);
 void  dc_set_call_hook(dc_call_hook f);          /* sees every dc_call (tracing/profiling) */

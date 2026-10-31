@@ -112,6 +112,11 @@ t("cross_function_loop_1M", {0: [0x4110, 0x8901, 0xA004, 0x0009, 0x000B, 0x0009]
                              0x10: [0x7001, 0xAFF5, 0x0009]},
   "c.r[1] = 1000000; c.r[0] = 0;", "c.r[0] == 999999")
 
+# 17. code copied to RAM at runtime (like exception vectors) runs as the recompiled original
+t("runtime_copied_code_alias", {0: [0x0009, 0x000B, 0x0009], 0x20: [0xE02A, 0x7001, 0x000B, 0x0009]},
+  "memcpy(dc_ram + 0xF000, dc_ram + 0x10020, 32); dc_alias_verbose = 0;",
+  "(dc_call(&c, 0x8C00F000u), c.r[0] == 43)")
+
 
 def build_bin(prog):
     size = max(off + 2 * len(w) for off, w in prog.items())
@@ -137,6 +142,8 @@ def main():
         main_c = """
 #include "dccore/runtime.h"
 #include <stdio.h>
+#include <string.h>
+extern int dc_alias_verbose;
 int main(void) {
   sh4ctx c; dc_init(&c);
   if (dc_load_binary("%s", 0x8C010000u) < 0) return 2;
