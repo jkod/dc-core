@@ -22,6 +22,7 @@
                                    (Rush 2049) call it directly as a disc check */
 
 int dc_bios_trace;
+void (*dc_bios_read_hook)(uint32_t lba, uint32_t count, uint32_t dst);
 #define TR(...) do { if (dc_bios_trace) fprintf(stderr, __VA_ARGS__); } while (0)
 
 /* ---------------------------------------------------------------- flash */
@@ -71,6 +72,7 @@ static int gd_exec(int cmd, uint32_t *p) {
     case 16: case 17: case 32: case 34: {   /* PIOREAD / DMAREAD (+ stream variants) */
         uint32_t lba = p[0] - 150, n = p[1], dst = p[2];
         TR("bios: gd read lba %u x%u -> %08X\n", lba, n, dst);
+        if (dc_bios_read_hook) dc_bios_read_hook(lba, n, dst);
         if (!DC_IS_RAM(dst)) return -1;
         if (DC_RAM_OFS(dst) + n * 2048 > 0x1000000) return -1;
         last_lba = lba + n;

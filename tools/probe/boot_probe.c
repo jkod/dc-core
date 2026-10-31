@@ -59,6 +59,14 @@ static void unhandled(const char *k, uint32_t a) {
     if (ns < 64) seen[ns++] = key;
     if (n++ < 64) printf("unhandled %s %08X in %08X (called from pr=%08X, %lu calls)\n", k, a, key, C.pr, calls);
 }
+static void on_read(uint32_t lba, uint32_t n, uint32_t dst) {
+    static int done;
+    const char *at = getenv("DC_DUMP_AT_LBA");
+    if (done || !at || (uint32_t)strtoul(at, 0, 10) != lba) return;
+    done = 1;
+    FILE *f = fopen("ramdump_at_lba.bin", "wb"); if (f) { fwrite(dc_ram, 1, 0x1000000, f); fclose(f); }
+    printf("RAM dumped before reading LBA %u (frame %llu, %lu calls)\n", lba, (unsigned long long)dc_frame_count(), calls);
+}
 static void trap(sh4ctx *c, uint32_t pc, const char *w) { printf("TRAP %s @%08X\n", w, pc); }
 static void alrm(int s) { report("timeout"); _exit(0); }
 
@@ -75,6 +83,7 @@ int main(int argc, char **argv) {
     }
     if (dc_bios_install(&C, argc > 4 ? argv[4][0] : '2')) fprintf(stderr, "warning: IP.BIN not loaded\n");
     dc_unhandled_hook = unhandled; dc_hw_verbose = 0;
+    dc_bios_read_hook = on_read;
 #ifdef DC_WATCH
     if (getenv("DC_WATCH")) { unsigned lo, len = 4; sscanf(getenv("DC_WATCH"), "%x:%x", &lo, &len); dc_watch_lo = lo & 0xFFFFFF; dc_watch_hi = dc_watch_lo + len; }
 #endif
