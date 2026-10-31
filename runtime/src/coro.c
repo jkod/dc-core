@@ -163,7 +163,9 @@ static uint32_t h_switch(sh4ctx *c) {
     for (int i = 0; i < nsw; i++) if (sw[i].addr == at) orig = sw[i].orig;
     uint32_t next = orig(c);                 /* the game's switch; its rte returns here */
     if (next) dc_call(c, next);
-    if (c->r[15] == r15 && c->spc == ret) return 0;          /* switched back to ourselves */
+    uint32_t d = c->r[15] > r15 ? c->r[15] - r15 : r15 - c->r[15];
+    if (d <= 256) return 0;    /* the task picked itself (also when preempted: the stack differs a little) */
+    (void)ret;
     coro *to = waiting_on(c->r[15]);
     cur->sp_key = r15; cur->sp_waiting = 1;
     if (!to) {
