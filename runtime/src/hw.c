@@ -276,7 +276,7 @@ static void yuv_macroblock(void) {
             }
             uint32_t o = base + (my * 16 + y) * pitch + (mx * 16 + x) * 2;
             uint8_t px[4] = {U, Y0, V, Y1};
-            for (int k = 0; k < 4; k++) dc_vram[vram32((o + k) & 0x7FFFFF) | ((o + k) & 3)] = px[k];
+            for (int k = 0; k < 4; k++) dc_vram[(o + k) & 0x7FFFFF] = px[k];   /* texture memory: 64-bit (linear) layout */
         }
     if (++yuv.mb >= w_mb * h_mb) { yuv.mb = 0; dc_raise(1u << 6); }
     PVR(0x150) = yuv.mb;                                                 /* TA_YUV_TEX_CNT */

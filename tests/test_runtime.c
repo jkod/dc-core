@@ -102,7 +102,7 @@ int main(void) {
     memcpy(dc_ram + 0x500000, mbw, 384);
     dc_wr32(0xFFA00020u, 0x8C500000u); dc_wr32(0xA05F6800u, 0x10800000u); dc_wr32(0xA05F6804u, 384); dc_wr32(0xA05F6808u, 1);
     CHECK(dc_rd32(IST) & (1u << 6));
-    CHECK(dc_rd32(0xA5100000u) == 0x80C08040u);       /* U Y V Y */
+    CHECK(dc_rd32(0xA4100000u) == 0x80C08040u);       /* U Y V Y, in texture memory (64-bit area) */
 
     printf(fails ? "%d runtime test(s) FAILED\n" : "runtime tests passed\n", fails);
     return fails != 0;
