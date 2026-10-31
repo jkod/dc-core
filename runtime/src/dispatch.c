@@ -118,6 +118,15 @@ int dc_load_binary(const char *path, uint32_t addr) {
     return (int)n;
 }
 
+/* an executable already in memory (e.g. read from the disc image) */
+int dc_load_memory(const uint8_t *data, uint32_t len, uint32_t addr) {
+    uint32_t o = DC_RAM_OFS(addr);
+    if (o + len > 0x1000000) return -1;
+    memcpy(dc_ram + o, data, len);
+    img_base = (addr & 0x1FFFFFFFu) | 0x80000000u; img_end = img_base + len;
+    return (int)len;
+}
+
 void dc_init(sh4ctx *c) {
     if (!dc_ram) dc_ram = (uint8_t *)calloc(1, 0x1000000);
     memset(c, 0, sizeof *c);

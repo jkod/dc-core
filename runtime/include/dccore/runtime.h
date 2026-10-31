@@ -17,6 +17,7 @@ typedef struct dc_hw_ops {
 
 void  dc_init(sh4ctx *c);                         /* allocates 16 MB RAM, sets boot-like state */
 int   dc_load_binary(const char *path, uint32_t addr);
+int   dc_load_memory(const uint8_t *data, uint32_t len, uint32_t addr);   /* call after dc_init */
 sh4fn dc_lookup(uint32_t addr);
 void  dc_hle_register(uint32_t addr, sh4fn fn);   /* replace a guest function with native code */
 /* RAM range [dst, dst+len) holds a copy of executable code at src (found automatically for code

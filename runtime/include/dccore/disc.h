@@ -14,6 +14,7 @@ int  dc_disc_track_info(int i, uint32_t *lba, int *is_data, uint32_t *sectors);
 /* ISO9660 file in the high-density area ("1ST_READ.BIN", "DATA/X.BIN"; case-insensitive) */
 int  dc_disc_find(const char *path, uint32_t *lba, uint32_t *size);
 int  dc_disc_load_file(const char *path, uint8_t *dst, uint32_t max);   /* bytes read, -1 on error */
+int  dc_disc_ip_product(char out[11]);    /* product number from IP.BIN, e.g. "T-9709D-50" */
 #ifdef __cplusplus
 }
 #endif

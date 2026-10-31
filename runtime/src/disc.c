@@ -181,3 +181,12 @@ int dc_disc_load_file(const char *path, uint8_t *dst, uint32_t max) {
     memcpy(dst, tmp, size); free(tmp);
     return (int)size;
 }
+
+int dc_disc_ip_product(char out[11]) {
+    uint8_t ip[2048];
+    if (dc_disc_read(45000, 1, ip)) return -1;
+    int n = 0;
+    for (int i = 0x40; i < 0x4A && ip[i] != ' '; i++) out[n++] = (char)ip[i];
+    out[n] = 0;
+    return 0;
+}
