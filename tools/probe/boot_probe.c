@@ -29,8 +29,14 @@ static void print_guest_str(uint32_t p) {
     for (; i < 159; i++) { char ch = (char)dc_rd8(p + i); if (!ch) break; b[i] = (ch >= 32 && ch < 127) ? ch : '.'; }
     b[i] = 0; printf("\"%s\"", b);
 }
+static uint32_t trace_from; static int trace_left, trace_armed;
 static void hook(sh4ctx *c, uint32_t a) {
     calls++; last[li++ & 15] = a;
+    if (trace_from && ((a & 0x1FFFFFFFu) | 0x80000000u) == trace_from && !trace_armed) trace_armed = 1;
+    if (trace_armed && trace_left > 0) {
+        trace_left--;
+        printf("trace %08X r4=%08X r5=%08X r6=%08X r0=%08X pr=%08X\n", a, c->r[4], c->r[5], c->r[6], c->r[0], c->pr);
+    }
     for (int i = 0; i < nlogfn; i++) if (logfn[i].a == ((a & 0x1FFFFFFFu) | 0x80000000u)) {
         printf("log %08X r4=%08X r5=%08X r6=%08X: ", a, c->r[4], c->r[5], c->r[6]);
         print_guest_str(c->r[logfn[i].reg]); printf(" (pr=%08X)\n", c->pr);
@@ -146,6 +152,7 @@ int main(int argc, char **argv) {
     dc_bios_read_hook = on_read;
     if (getenv("DC_HWSTATS")) dc_hw_read_hook = hw_read;
     if (getenv("DC_DUMP_FRAMES")) dc_hw.on_vblank = on_vblank;
+    if (getenv("DC_TRACE_FROM")) { unsigned a, n = 200; sscanf(getenv("DC_TRACE_FROM"), "%x:%u", &a, &n); trace_from = a | 0x80000000u; trace_left = (int)n; }
     if (getenv("DC_LOGFN")) {
         const char *p = getenv("DC_LOGFN");
         while (*p && nlogfn < 8) { unsigned a, r; if (sscanf(p, "%x:%u", &a, &r) != 2) break; logfn[nlogfn].a = a | 0x80000000u; logfn[nlogfn].reg = (int)r; nlogfn++; p = strchr(p, ','); if (!p) break; p++; }
