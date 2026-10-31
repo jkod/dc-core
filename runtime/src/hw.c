@@ -12,6 +12,7 @@
 #include "dccore/hw.h"
 #include "dccore/ta.h"
 #include "dccore/bios.h"
+#include "dccore/aica.h"
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -29,8 +30,7 @@ void dc_set_hw(const dc_hw_ops *ops) { if (ops) user_ops = *ops; else memset(&us
 /* ---------------------------------------------------------------- storage */
 static uint32_t sb[0x800];           /* 0x005F6800..0x005F7FFF, word index */
 static uint32_t pvr[0x800];          /* 0x005F8000..0x005F9FFF */
-static uint32_t aica[0x4000];        /* 0x00700000..0x0070FFFF */
-static uint8_t  aram[0x200000];      /* 0x00800000..0x009FFFFF sound RAM */
+#define aram dc_aram                 /* 0x00800000..0x009FFFFF sound RAM (aica.c) */
 uint8_t dc_vram[0x800000];           /* 8 MB, 64-bit layout */
 static uint32_t p4[32][64];          /* SH-4 on-chip registers, by module */
 static uint32_t sq[2][8];            /* store queues */
@@ -134,6 +134,11 @@ static int holly_level(void) {
 }
 
 void dc_raise(uint32_t istnrm_bits) { SBR(ISTNRM) |= istnrm_bits; dc_next_event = 0; }
+void dc_set_ext_irq(uint32_t bit, int on) {                    /* ISTEXT is level-driven by the devices */
+    uint32_t o = SBR(ISTEXT);
+    SBR(ISTEXT) = on ? (o | bit) : (o & ~bit);
+    if (SBR(ISTEXT) != o) dc_next_event = 0;
+}
 
 static void check_irqs(sh4ctx *c) {
     if (irq_depth) return;
@@ -172,6 +177,7 @@ void dc_events(sh4ctx *c) {
     for (int ch = 0; ch < 3; ch++) tmu_sync(ch, now);
     for (int i = 0; i < evn; )
         if (evq[i].at <= now) { SBR(ISTNRM) |= evq[i].bits; evq[i] = evq[--evn]; } else i++;
+    dc_aica_advance(now);
     check_irqs(c);
     /* next event: the next vblank in/out edge or TMU underflow */
     uint64_t nx = (last_vbin_field == field) ? (field + 1) * f + (uint64_t)vbin * f / lines : at_in;
@@ -179,6 +185,7 @@ void dc_events(sh4ctx *c) {
     if (no < nx) nx = no;
     for (int ch = 0; ch < 3; ch++) { uint64_t t = tmu_next_underflow(ch, now); if (t < nx) nx = t; }
     for (int i = 0; i < evn; i++) if (evq[i].at < nx) nx = evq[i].at;
+    if (dc_aica_arm_running() || (SBR(ISTEXT) & 2)) { uint64_t t = dc_aica_next(); if (t < nx) nx = t; }
     /* while an interrupt is still pending (masked), look again soon */
     if (holly_level() || ((*tmu_reg(0, 2) | *tmu_reg(1, 2) | *tmu_reg(2, 2)) & 0x100)) { uint64_t t = now + 2000; if (t < nx) nx = t; }
     dc_next_event = nx;
@@ -342,8 +349,8 @@ static uint32_t rd(uint32_t a, int size) {
         uint32_t t = (uint32_t)time(NULL) + 631152000u;                  /* 1950-01-01 -> 1970-01-01 */
         return (m & 4) ? (t & 0xFFFF) : (t >> 16);
     }
-    if (m >= 0x00700000u && m < 0x00710000u) { uint32_t v = aica[(m & 0xFFFC) >> 2]; return size == 4 ? v : size == 2 ? (v >> ((m & 2) * 8)) & 0xFFFF : (v >> ((m & 3) * 8)) & 0xFF; }
-    if (m >= 0x00800000u && m < 0x00A00000u) { uint32_t v = 0; memcpy(&v, aram + (m & 0x1FFFFF), size); return v; }
+    if (m >= 0x00700000u && m < 0x00710000u) { dc_aica_advance(now_cycles()); return dc_aica_read(m, size); }
+    if (m >= 0x00800000u && m < 0x00A00000u) { dc_aica_advance(now_cycles()); uint32_t v = 0; memcpy(&v, aram + (m & 0x1FFFFF), size); return v; }
     if ((m >> 24) == 0x04 || (m >> 24) == 0x06) { uint32_t v = 0; memcpy(&v, dc_vram + (m & 0x7FFFFF), size); return v; }
     if ((m >> 24) == 0x05 || (m >> 24) == 0x07) { uint32_t v = 0; memcpy(&v, dc_vram + vram32(m), size); return v; }
     if (m < 0x00200000u && dc_bios_rom) { uint32_t v = 0; memcpy(&v, dc_bios_rom + m, size); return v; }   /* boot ROM */
@@ -401,7 +408,7 @@ static void wr(uint32_t a, uint32_t v, int size) {
         }
         return;
     }
-    if (m >= 0x00700000u && m < 0x00710000u) { aica[(m & 0xFFFC) >> 2] = v; if (dc_hw.on_aica_write) dc_hw.on_aica_write(m, v); return; }
+    if (m >= 0x00700000u && m < 0x00710000u) { dc_aica_advance(now_cycles()); dc_aica_write(m, v, size); if (dc_hw.on_aica_write) dc_hw.on_aica_write(m, v); dc_next_event = 0; return; }
     if (m >= 0x00800000u && m < 0x00A00000u) { memcpy(aram + (m & 0x1FFFFF), &v, size); if (dc_hw.on_aica_write) dc_hw.on_aica_write(m, v); return; }
     if ((m >> 24) == 0x04 || (m >> 24) == 0x06) { memcpy(dc_vram + (m & 0x7FFFFF), &v, size); return; }
     if ((m >> 24) == 0x05 || (m >> 24) == 0x07) { memcpy(dc_vram + vram32(m), &v, size); return; }

@@ -3,6 +3,7 @@
 #include "dccore/runtime.h"
 #include "dccore/hw.h"
 #include "dccore/ta.h"
+#include "dccore/aica.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -73,6 +74,23 @@ int main(void) {
     CHECK(dc_rd32(0xA080003Cu) == 0x1111000Fu);
     run(&c, 100000);
     CHECK(dc_rd32(IST) & (1u << 15));
+
+    /* 6. AICA: upload an ARM program, release ARMRST; it writes a mailbox in sound RAM and raises
+     *    MCIPD bit 5 (ARM -> SH-4), which must reach Holly ISTEXT bit 1. Timer A must then count. */
+    static const uint8_t armprog[] = { 0x20,0x00,0x9F,0xE5,0x42,0x10,0xA0,0xE3,0x00,0x10,0x80,0xE5,0x18,0x20,0x9F,0xE5,0x20,0x30,0xA0,0xE3,0x00,0x30,0x82,0xE5,0x10,0x40,0x9F,0xE5,0x00,0x50,0xA0,0xE3,0x00,0x50,0x84,0xE5,0xFE,0xFF,0xFF,0xEA,0x00,0x10,0x00,0x00,0xB8,0x28,0x80,0x00,0x90,0x28,0x80,0x00 };
+    dc_wr32(0xA0702C00u, 1);
+    for (unsigned i = 0; i < sizeof armprog; i += 4) { uint32_t w; memcpy(&w, armprog + i, 4); dc_wr32(0xA0800000u + i, w); }
+    dc_wr32(0xA0801000u, 0);
+    dc_wr32(0xA07028B4u, 0x20);                       /* MCIEB: CPU interrupt */
+    dc_wr32(0xA0702C00u, 0);                          /* release the ARM */
+    run(&c, 2000000);                                 /* 10 ms */
+    CHECK(dc_rd32(0xA0801000u) == 0x42);
+    CHECK(dc_rd32(0xA07028B8u) & 0x20);
+    CHECK(dc_rd32(0xA05F6904u) & 2);                  /* ISTEXT: AICA */
+    dc_wr32(0xA07028BCu, 0x20);                       /* MCIRE */
+    run(&c, 10000);
+    CHECK(!(dc_rd32(0xA05F6904u) & 2));
+    CHECK((dc_rd32(0xA0702890u) & 0xFF) != 0);        /* timer A counted */
 
     printf(fails ? "%d runtime test(s) FAILED\n" : "runtime tests passed\n", fails);
     return fails != 0;
