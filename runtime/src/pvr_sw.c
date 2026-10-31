@@ -446,6 +446,29 @@ typedef struct { int pid, va, vb, vc; float pa, pb; } dpix;
 static dpix *dbuf;
 static int cur_pid;
 
+/* Is the pixel centre (px, py) inside triangle abc? Barycentric weights out (inv = 1/area).
+ * Top-left fill rule: a centre exactly on an edge belongs to the triangle only for top or left
+ * edges, so shared edges are drawn once (as GPUs do). */
+static int top_left(float dx, float dy, float area) {
+    if (area < 0) { dx = -dx; dy = -dy; }
+    return dy < 0 || (dy == 0 && dx > 0);
+}
+static int inside(float ax, float ay, float bx, float by, float cx, float cy, float px, float py, float inv,
+                  float *w0, float *w1, float *w2) {
+    float e0 = (bx - px) * (cy - py) - (by - py) * (cx - px);   /* edge b -> c */
+    float e1 = (cx - px) * (ay - py) - (cy - py) * (ax - px);   /* edge c -> a */
+    float e2 = (ax - px) * (by - py) - (ay - py) * (bx - px);   /* edge a -> b */
+    float area = 1.f / inv;
+    if (area < 0) { e0 = -e0; e1 = -e1; e2 = -e2; }
+    if (e0 < 0 || e1 < 0 || e2 < 0) return 0;
+    if (e0 == 0 && !top_left(cx - bx, cy - by, area)) return 0;
+    if (e1 == 0 && !top_left(ax - cx, ay - cy, area)) return 0;
+    if (e2 == 0 && !top_left(bx - ax, by - ay, area)) return 0;
+    float ai = fabsf(inv);
+    *w0 = e0 * ai; *w1 = e1 * ai; *w2 = e2 * ai;
+    return 1;
+}
+
 static void draw_tri(const poly *p, const vtx *a, const vtx *b, const vtx *c, int flip) {
     float ax = a->x, ay = a->y, bx = b->x, by = b->y, cx = c->x, cy = c->y;
     float area = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
@@ -469,11 +492,8 @@ static void draw_tri(const poly *p, const vtx *a, const vtx *b, const vtx *c, in
     int ia = (int)(a - vt), ib = (int)(b - vt), ic = (int)(c - vt);
     for (int y = y0; y < y1; y++)
         for (int x = x0; x < x1; x++) {
-            float px = x + 0.5f, py = y + 0.5f;
-            float w0 = ((bx - px) * (cy - py) - (by - py) * (cx - px)) * inv;
-            float w1 = ((cx - px) * (ay - py) - (cy - py) * (ax - px)) * inv;
-            float w2 = 1 - w0 - w1;
-            if (w0 < 0 || w1 < 0 || w2 < 0) continue;
+            float px = x + 0.5f, py = y + 0.5f, w0, w1, w2;
+            if (!inside(ax, ay, bx, by, cx, cy, px, py, inv, &w0, &w1, &w2)) continue;
             float z = w0 * a->z + w1 * b->z + w2 * c->z;
             int i = y * RW + x;
             if (!depth_pass(zmode, z, zbuf[i])) continue;
@@ -510,11 +530,8 @@ static void mod_tri(const modtri *m) {
     float inv = 1.f / area;
     for (int y = y0; y < y1; y++)
         for (int x = x0; x < x1; x++) {
-            float px = x + 0.5f, py = y + 0.5f;
-            float w0 = ((bx - px) * (cy - py) - (by - py) * (cx - px)) * inv;
-            float w1 = ((cx - px) * (ay - py) - (cy - py) * (ax - px)) * inv;
-            float w2 = 1 - w0 - w1;
-            if (w0 < 0 || w1 < 0 || w2 < 0) continue;
+            float px = x + 0.5f, py = y + 0.5f, w0, w1, w2;
+            if (!inside(ax, ay, bx, by, cx, cy, px, py, inv, &w0, &w1, &w2)) continue;
             float z = w0 * m->z[0] + w1 * m->z[1] + w2 * m->z[2];
             int i = y * RW + x;
             if (z >= zbuf[i]) mvbuf[i] ^= 1;          /* volume surface between the eye and the pixel */

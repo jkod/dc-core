@@ -1,5 +1,7 @@
 /* Software PowerVR2 renderer: a frame built through the real register/TA path, checked pixel by
- * pixel. cc -Iruntime/include tests/test_pvr_sw.c runtime/src/*.c -lm */
+ * pixel. cc -Iruntime/include tests/test_pvr_sw.c runtime/src/*.c -lm
+ * With -DWITH_GL (and -lEGL): every frame is also drawn by the OpenGL backend in a headless EGL
+ * context and compared with the software renderer pixel by pixel. */
 #include "dccore/runtime.h"
 #include "dccore/hw.h"
 #include "dccore/pvr.h"
@@ -17,17 +19,58 @@ static int fails;
 static void pvr(uint32_t ofs, uint32_t v) { dc_wr32(0xA05F8000u + ofs, v); }
 static void ta(const uint32_t w[8]) { for (int i = 0; i < 8; i++) dc_wr32(0x10000000u + i * 4, w[i]); }
 static uint32_t fu(float f) { uint32_t u; memcpy(&u, &f, 4); return u; }
-static void on_render(void) { int n = dc_pvr_sw_render(); if (getenv("PVRDBG")) printf("rendered %d polys\n", n); }
-
 static uint32_t fb_px(int x, int y) {          /* ARGB8888 framebuffer at 0x200000, stride 64 px */
     uint32_t v = 0;
     for (int k = 0; k < 4; k++) v |= (uint32_t)dc_rd8(0xA5000000u + 0x200000u + (uint32_t)(y * 64 + x) * 4 + k) << (8 * k);
     return v & 0xFFFFFF;
 }
 
+#ifdef WITH_GL
+#include <EGL/egl.h>
+#include <EGL/eglext.h>
+static int gl_frames;
+static void *getproc(const char *n) { return (void *)eglGetProcAddress(n); }
+static int gl_setup(void) {
+    PFNEGLGETPLATFORMDISPLAYEXTPROC gpd = (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress("eglGetPlatformDisplayEXT");
+    EGLDisplay d = gpd ? gpd(EGL_PLATFORM_SURFACELESS_MESA, EGL_DEFAULT_DISPLAY, NULL) : eglGetDisplay(EGL_DEFAULT_DISPLAY);
+    if (!eglInitialize(d, NULL, NULL)) return -1;
+    eglBindAPI(EGL_OPENGL_API);
+    EGLint ca[] = { EGL_RENDERABLE_TYPE, EGL_OPENGL_BIT, EGL_NONE }; EGLConfig cfg; EGLint n;
+    if (!eglChooseConfig(d, ca, &cfg, 1, &n) || !n) cfg = (EGLConfig)0;   /* EGL_NO_CONFIG_KHR: configless (Mesa surfaceless) */
+    EGLint xa[] = { EGL_CONTEXT_MAJOR_VERSION, 3, EGL_CONTEXT_MINOR_VERSION, 3, EGL_CONTEXT_OPENGL_PROFILE_MASK, EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT, EGL_NONE };
+    EGLContext ctx = eglCreateContext(d, cfg, EGL_NO_CONTEXT, xa);
+    if (!ctx || !eglMakeCurrent(d, EGL_NO_SURFACE, EGL_NO_SURFACE, ctx)) return -1;
+    return dc_pvr_gl_init(getproc);
+}
+#endif
+
+static void on_render(void) {
+    int n = dc_pvr_sw_render();
+    if (getenv("PVRDBG")) printf("rendered %d polys\n", n);
+#ifdef WITH_GL
+    /* the same frame on the GPU backend: compare with the software framebuffer (64x64 region) */
+    static uint8_t rgb[64 * 64 * 3]; int w, h;
+    dc_pvr_gl_render(1);
+    dc_pvr_gl_read(rgb, &w, &h);
+    int bad = 0, worst = 0, wx = 0, wy = 0;
+    for (int y = 0; y < 64 && y < h; y++) for (int x = 0; x < 64 && x < w; x++) {
+        uint32_t sw = fb_px(x, y); const uint8_t *g = rgb + (y * w + x) * 3;
+        int d = abs((int)((sw >> 16) & 255) - g[0]) + abs((int)((sw >> 8) & 255) - g[1]) + abs((int)(sw & 255) - g[2]);
+        if (d > 12) { bad++; if (d > worst) { worst = d; wx = x; wy = y; } if (getenv("GLDBG2") && gl_frames == 0) printf("  diff at %d,%d sw %06X gl %02X%02X%02X\n", x, y, sw, g[0], g[1], g[2]); }
+    }
+    gl_frames++;
+    if (getenv("GLDBG")) printf("frame %d: %d pixels differ (worst %d)\n", gl_frames, bad, worst);
+    CHECK(bad <= 64 * 64 / 200, "GL frame %d differs from software at %d pixels (worst %d at %d,%d: sw %06X gl %02X%02X%02X)",
+          gl_frames, bad, worst, wx, wy, fb_px(wx, wy), rgb[(wy * w + wx) * 3], rgb[(wy * w + wx) * 3 + 1], rgb[(wy * w + wx) * 3 + 2]);
+#endif
+}
+
 int main(void) {
     sh4ctx c; dc_init(&c);
     dc_pvr_sw_install();
+#ifdef WITH_GL
+    if (gl_setup()) { printf("FAIL: no OpenGL 3.3 context\n"); return 1; }
+#endif
     dc_hw.on_render = on_render;
 
     /* 64x64 target, ARGB8888 at 0x200000 (32-bit area), stride 64*4 bytes = 32 64-bit units */
@@ -147,6 +190,9 @@ int main(void) {
       CHECK(((fp >> 16) & 255) <= 2 && ((fp >> 8) & 255) >= 0xFD && (fp & 255) == 0, "fogged pixel %06X", fp); }
     CHECK(fb_px(40, 40) == 0xFF0000, "unfogged pixel %06X", fb_px(40, 40));
 
+#ifdef WITH_GL
+    printf("compared %d frames with the OpenGL backend\n", gl_frames);
+#endif
     printf(fails ? "%d pvr_sw checks failed\n" : "pvr_sw tests passed\n", fails);
     return fails != 0;
 }
