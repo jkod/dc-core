@@ -110,6 +110,7 @@ static void schedule_irq(uint32_t bits, uint64_t delay) {
 
 /* ---------------------------------------------------------------- interrupts */
 static int irq_depth;
+#define DC_IRQ_RET 0xFFFFFFF0u
 static void take_irq(sh4ctx *c, uint32_t code) {
     uint32_t sr = sh4_get_sr(c);
     c->ssr = sr; c->sgr = c->r[15];
@@ -118,7 +119,17 @@ static void take_irq(sh4ctx *c, uint32_t code) {
     irq_depth++;
     if (dc_hw.on_irq) dc_hw.on_irq(code);
     uint32_t saved_pr = c->pr;
+    /* spc = "back to the interrupted code". A handler that wants the interrupt to return
+     * elsewhere (an OS doing a preemptive task switch patches its saved frame) leaves another
+     * address in spc at rte: that guest code runs first; it gets back here when whatever it
+     * resumes returns to the marker. */
+    c->spc = DC_IRQ_RET;
     dc_call(c, c->vbr + 0x600);
+    for (int n = 0; c->spc != DC_IRQ_RET && n < 4; n++) {
+        uint32_t to = c->spc;
+        c->spc = DC_IRQ_RET;
+        dc_call(c, to);
+    }
     c->pr = saved_pr;
     irq_depth--;
     /* if the handler did not rte (unusual), restore SR ourselves */
