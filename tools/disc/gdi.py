@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """dc-core GD-ROM image reader: .gdi + track files -> ISO9660 file tree of the high-density area.
 
-    gdi.py check   game.gdi                 # validate tracks, print IP.BIN header
+    gdi.py check   game.gdi|game.cue        # validate tracks, print IP.BIN header (Redump .cue works too)
     gdi.py list    game.gdi                 # list files (path, LBA, size)
     gdi.py extract game.gdi OUTDIR [names]  # extract all files (or only the given names)
 
@@ -28,10 +28,18 @@ class MissingTrack(Exception):
     pass
 
 
+def _msf(t):
+    m, s_, f = (int(x) for x in t.split(":"))
+    return (m * 60 + s_) * 75 + f
+
+
 class GDI:
     def __init__(self, path):
         self.path = path
         d = os.path.dirname(os.path.abspath(path))
+        if path.lower().endswith(".cue"):
+            self._load_cue(path, d)
+            return
         lines = [l.strip() for l in open(path, encoding="latin-1") if l.strip()]
         n = int(lines[0])
         self.tracks = []
@@ -42,11 +50,38 @@ class GDI:
                 p = pre.split(); offset = int(post.split()[0]) if post.split() else 0
             else:
                 p = line.split(); name = p[4]; offset = int(p[5]) if len(p) > 5 else 0
-            self.tracks.append(Track(int(p[0]), int(p[1]), int(p[2]), int(p[3]), os.path.join(d, name), offset))
+            self.tracks.append(Track(int(p[0]), int(p[1]), int(p[2]), int(p[3]), os.path.join(d, name), 0))  # 6th column is a byte offset, always 0
         # sector counts for missing files: infer from the next track's LBA
         for i, t in enumerate(self.tracks):
             if not t.exists and i + 1 < len(self.tracks):
                 t.sectors = self.tracks[i + 1].lba - t.lba - 150 if self.tracks[i + 1].lba > t.lba else 0
+
+    def _load_cue(self, path, d):
+        """Redump-style Dreamcast cue: one FILE per track, REM HIGH-DENSITY AREA restarts at LBA 45000,
+        each file starts at its pregap (INDEX 00) and the track's LBA is its INDEX 01."""
+        self.tracks = []
+        cur_file, file_lba, cur = None, 0, None
+        pending = []
+        for raw in open(path, encoding="latin-1"):
+            line = raw.strip()
+            if line.upper().startswith("REM HIGH-DENSITY"):
+                file_lba = HD_START
+            elif line.upper().startswith("FILE"):
+                cur_file = os.path.join(d, line.split('"')[1])
+            elif line.upper().startswith("TRACK"):
+                p = line.split()
+                cur = {"num": int(p[1]), "type": 0 if p[2].upper() == "AUDIO" else 4,
+                       "sector": 2048 if p[2].upper().endswith("/2048") else 2352, "file": cur_file, "start": file_lba}
+                pending.append(cur)
+            elif line.upper().startswith("INDEX") and cur is not None:
+                p = line.split()
+                if int(p[1]) == 1:
+                    cur["off"] = _msf(p[2])
+                    sz = os.path.getsize(cur["file"]) // cur["sector"] if os.path.isfile(cur["file"]) else 0
+                    file_lba = cur["start"] + sz      # next file follows this one
+        for t in pending:
+            off = t.get("off", 0)
+            self.tracks.append(Track(t["num"], t["start"] + off, t["type"], t["sector"], t["file"], off))
 
     def missing(self):
         return [t for t in self.tracks if not t.exists]
@@ -68,9 +103,9 @@ class GDI:
         if t.f is None:
             t.f = open(t.path, "rb")
         idx = lba - t.lba
-        if idx >= t.sectors:
+        if idx >= t.sectors - t.offset:
             raise ValueError("LBA %d past end of track %02d" % (lba, t.num))
-        t.f.seek(idx * t.sector)
+        t.f.seek((idx + t.offset) * t.sector)
         raw = t.f.read(t.sector)
         if t.sector == 2352:
             return raw[16:16 + 2048]     # MODE1: 12 sync + 4 header
@@ -151,7 +186,7 @@ def cmd_check(g):
         last = lba + (size - 1) // 2048
         t = g.track_for(last)
         t0 = g.track_for(lba)
-        if not t0.exists or not t.exists or last >= t.lba + t.sectors:
+        if not t0.exists or not t.exists or last >= t.lba + t.sectors - t.offset:
             bad.append((path, t0.num))
     if bad:
         tr = sorted({b[1] for b in bad})
