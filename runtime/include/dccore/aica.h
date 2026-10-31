@@ -10,6 +10,8 @@ void     dc_aica_write(uint32_t ofs, uint32_t v, int size);
 void     dc_aica_advance(uint64_t sh4_cycles);       /* run samples (and the ARM) up to this time */
 uint64_t dc_aica_next(void);                         /* when it next needs to run */
 int      dc_aica_arm_running(void);
+/* mixed output, 44100 Hz interleaved stereo int16: copy up to `frames` frames, returns how many */
+int      dc_aica_audio_read(int16_t *dst, int frames);
 void     dc_set_ext_irq(uint32_t istext_bit, int on);   /* hw.c: Holly external interrupt line */
 #ifdef __cplusplus
 }

@@ -121,6 +121,40 @@ int main(void) {
     CHECK((dc_rd32(rb + 12) & 0xFF) == 10 && ((dc_rd32(rb + 12) >> 8) & 0xFF) == 128);
     CHECK(dc_rd32(rc) == 0xFFFFFFFFu);
 
+    /* 9. AICA mixer: looping PCM16 square wave on channel 0 */
+    for (int i = 0; i < 200; i++) { int16_t v = i < 100 ? 16000 : -16000; dc_wr16(0xA0810000u + i * 2, (uint16_t)v); }
+    #define CH0(r, v) dc_wr32(0xA0700000u + (r) * 4, (v))
+    dc_wr32(0xA0702800u, 15);                       /* MVOL */
+    CH0(1, 0x0000); CH0(2, 0); CH0(3, 200);          /* SA low, LSA, LEA */
+    CH0(4, 31); CH0(5, 0x3C00 | 0);                  /* AR 31; KRS 15 (off), DL 0, RR 0 */
+    CH0(6, 0);                                       /* pitch 1.0 */
+    CH0(9, 15 << 8);                                 /* DISDL 15, centre */
+    CH0(10, 0);                                      /* TL 0 */
+    { int16_t junk[2048]; while (dc_aica_audio_read(junk, 1024) > 0) {} }
+    CH0(0, 0xC000 | (1 << 9) | (0 << 7) | 0x01);    /* KYONEX KYONB, loop, PCM16, SA 0x10000 */
+    uint64_t t0 = c.cycles;
+    for (int k = 1; k <= 20; k++) dc_aica_advance(t0 + (uint64_t)k * 200000000ull / 44100 * 50);
+    static int16_t au[4096 * 2];
+    int got = dc_aica_audio_read(au, 4096);
+    CHECK(got >= 900);
+    int maxv = 0, flips = 0;
+    for (int i = 10; i < got; i++) { if (au[i * 2] > maxv) maxv = au[i * 2]; if ((au[i * 2] > 0) != (au[i * 2 - 2] > 0)) flips++; }
+    CHECK(maxv > 7000 && maxv < 9000);               /* 16000 at half scale */
+    CHECK(flips >= got / 100 - 3 && flips <= got / 100 + 3);   /* a sign change every 100 samples */
+    CHECK(au[200 * 2] == au[200 * 2 + 1]);           /* centred */
+    /* key off with a fast release: silence */
+    CH0(5, 0x3C00 | 31); CH0(0, 0x8000 | (1 << 9) | 0x01);
+    for (int k = 21; k <= 40; k++) dc_aica_advance(t0 + (uint64_t)k * 200000000ull / 44100 * 50);
+    got = dc_aica_audio_read(au, 4096);
+    CHECK(got > 100 && au[(got - 1) * 2] == 0);
+    /* ADPCM channel: non-silent and bounded */
+    for (int i = 0; i < 256; i++) dc_wr8(0xA0820000u + i, (uint8_t)(i & 1 ? 0x77 : 0x07));
+    CH0(1, 0x0000); CH0(3, 400); CH0(5, 0x3C00); CH0(0, 0xC000 | (1 << 9) | (2 << 7) | 0x02);
+    for (int k = 41; k <= 50; k++) dc_aica_advance(t0 + (uint64_t)k * 200000000ull / 44100 * 50);
+    got = dc_aica_audio_read(au, 4096);
+    maxv = 0; for (int i = 0; i < got; i++) { int v = au[i * 2] < 0 ? -au[i * 2] : au[i * 2]; if (v > maxv) maxv = v; }
+    CHECK(maxv > 500 && maxv <= 16384);
+
     printf(fails ? "%d runtime test(s) FAILED\n" : "runtime tests passed\n", fails);
     return fails != 0;
 }
