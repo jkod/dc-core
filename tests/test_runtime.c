@@ -92,6 +92,18 @@ int main(void) {
     CHECK(!(dc_rd32(0xA05F6904u) & 2));
     CHECK((dc_rd32(0xA0702890u) & 0xFF) != 0);        /* timer A counted */
 
+    /* 7. YUV converter: one 16x16 YUV420 macroblock (U=0x40, V=0xC0, Y=0x80) -> UYVY in VRAM + ISTNRM bit 6 */
+    dc_wr32(IST, 0xFFFFFFFFu);
+    dc_wr32(0xA05F814Cu, 0);                          /* 1x1 macroblocks, YUV420 */
+    dc_wr32(0xA05F8148u, 0x00100000u);                /* texture base */
+    uint32_t mbw[96];
+    for (int i = 0; i < 96; i++) mbw[i] = i < 16 ? 0x40404040u : i < 32 ? 0xC0C0C0C0u : 0x80808080u;
+    for (int i = 0; i < 96; i += 8) { uint32_t b8[8]; memcpy(b8, mbw + i, 32); dc_wr32(0xFFA00020u, 0); (void)b8; }
+    memcpy(dc_ram + 0x500000, mbw, 384);
+    dc_wr32(0xFFA00020u, 0x8C500000u); dc_wr32(0xA05F6800u, 0x10800000u); dc_wr32(0xA05F6804u, 384); dc_wr32(0xA05F6808u, 1);
+    CHECK(dc_rd32(IST) & (1u << 6));
+    CHECK(dc_rd32(0xA5100000u) == 0x80C08040u);       /* U Y V Y */
+
     printf(fails ? "%d runtime test(s) FAILED\n" : "runtime tests passed\n", fails);
     return fails != 0;
 }

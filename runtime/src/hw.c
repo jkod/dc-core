@@ -199,12 +199,52 @@ static uint32_t vram32(uint32_t o) {
     return rv & 0x7FFFFF;
 }
 
+/* ---------------------------------------------------------------- YUV converter
+ * Input: macroblocks of YUV420 (384 bytes: U 8x8, V 8x8, Y 4x 8x8) or YUV422 (512 bytes), written
+ * to 0x10800000..; output: UYVY 4:2:2 texture at TA_YUV_TEX_BASE, (U+1)*16 x (V+1)*16 pixels.
+ * When the configured number of macroblocks has arrived, ISTNRM bit 6 is raised. */
+static struct { uint8_t buf[512]; uint32_t fill, mb; } yuv;
+static void yuv_macroblock(void) {
+    uint32_t ctrl = PVR(0x14C), w_mb = (ctrl & 0x3F) + 1, h_mb = ((ctrl >> 8) & 0x3F) + 1;
+    int is422 = (ctrl >> 24) & 1;
+    uint32_t mx = yuv.mb % w_mb, my = yuv.mb / w_mb, pitch = w_mb * 16 * 2;
+    uint32_t base = PVR(0x148) & 0x7FFFF8;
+    const uint8_t *b = yuv.buf;
+    for (int y = 0; y < 16; y++)
+        for (int x = 0; x < 16; x += 2) {
+            uint8_t U, V, Y0, Y1;
+            if (!is422) {
+                U = b[(y / 2) * 8 + x / 2]; V = b[64 + (y / 2) * 8 + x / 2];
+                int blk = (y / 8) * 2 + (x / 8);                     /* Y blocks: TL, TR, BL, BR */
+                const uint8_t *yb = b + 128 + blk * 64;
+                Y0 = yb[(y % 8) * 8 + (x % 8)]; Y1 = yb[(y % 8) * 8 + (x % 8) + 1];
+            } else {
+                U = b[y * 8 + x / 2]; V = b[128 + y * 8 + x / 2];
+                int blk = x / 8; const uint8_t *yb = b + 256 + blk * 128;
+                Y0 = yb[y * 8 + (x % 8)]; Y1 = yb[y * 8 + (x % 8) + 1];
+            }
+            uint32_t o = base + (my * 16 + y) * pitch + (mx * 16 + x) * 2;
+            uint8_t px[4] = {U, Y0, V, Y1};
+            for (int k = 0; k < 4; k++) dc_vram[vram32((o + k) & 0x7FFFFF) | ((o + k) & 3)] = px[k];
+        }
+    if (++yuv.mb >= w_mb * h_mb) { yuv.mb = 0; dc_raise(1u << 6); }
+    PVR(0x150) = yuv.mb;                                                 /* TA_YUV_TEX_CNT */
+}
+static void yuv_write(const uint8_t *p, uint32_t len) {
+    uint32_t need = ((PVR(0x14C) >> 24) & 1) ? 512 : 384;
+    while (len) {
+        uint32_t n = need - yuv.fill; if (n > len) n = len;
+        memcpy(yuv.buf + yuv.fill, p, n); yuv.fill += n; p += n; len -= n;
+        if (yuv.fill == need) { yuv.fill = 0; yuv_macroblock(); }
+    }
+}
+
 /* ---------------------------------------------------------------- TA FIFO / texture path */
 /* m = address & 0x1FFFFFFF in 0x10000000..0x13FFFFFF */
 static void ta_area_write(uint32_t m, const uint8_t *p, uint32_t len) {
     uint32_t sub = m & 0x03FFFFFFu;
     if (sub < 0x00800000u || (sub >= 0x02000000u && sub < 0x02800000u)) { dc_ta_write(p, len); return; }
-    if (sub < 0x01000000u || (sub >= 0x02800000u && sub < 0x03000000u)) return;          /* YUV converter: TODO */
+    if (sub < 0x01000000u || (sub >= 0x02800000u && sub < 0x03000000u)) { yuv_write(p, len); return; }
     int lm32 = (sub >= 0x03000000u) ? (SBR(0x6888) & 1) : (SBR(0x6884) & 1);           /* LMMODE1 / LMMODE0 */
     for (uint32_t i = 0; i < len; i += 4) {
         uint32_t o = (sub + i) & 0x7FFFFF;
@@ -402,6 +442,7 @@ static void wr(uint32_t a, uint32_t v, int size) {
         if (dc_hw.on_pvr_write) dc_hw.on_pvr_write(o, v);
         if (o == 0x0CC || o == 0x0D8 || o == 0x0DC) dc_next_event = 0;
         if (o == 0x144 && (v >> 31)) dc_ta_reset();                      /* TA_LIST_INIT */
+        if (o == 0x148) { yuv.mb = 0; yuv.fill = 0; PVR(0x150) = 0; }   /* TA_YUV_TEX_BASE: new frame */
         if (o == 0x014) {                                                 /* STARTRENDER */
             if (dc_hw.on_render) dc_hw.on_render();
             schedule_irq(7u, 200000);                                     /* render done (video, ISP, TSP) */
