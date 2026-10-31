@@ -143,10 +143,18 @@ void dc_coro_install(uint32_t setjmp_addr, uint32_t lj_addr, size_t host_stack) 
 static struct { uint32_t addr; sh4fn orig; } sw[MAX_SW];
 static int nsw;
 
+/* The switch routine's own frame need not be balanced to the byte (pushes on one entry path,
+ * pops on another), so a task is matched by the nearest waiting stack within 256 bytes; different
+ * tasks' stacks are kilobytes apart. */
 static coro *waiting_on(uint32_t r15) {
-    if (main_coro.sp_waiting && main_coro.sp_key == r15) return &main_coro;
-    for (int i = 0; i < ncoros; i++) if (coros[i].sp_waiting && coros[i].sp_key == r15) return &coros[i];
-    return NULL;
+    coro *best = NULL; uint32_t bd = 257;
+    for (int i = -1; i < ncoros; i++) {
+        coro *k = i < 0 ? &main_coro : &coros[i];
+        if (!k->sp_waiting) continue;
+        uint32_t d = k->sp_key > r15 ? k->sp_key - r15 : r15 - k->sp_key;
+        if (d < bd) { bd = d; best = k; }
+    }
+    return best;
 }
 
 static uint32_t h_switch(sh4ctx *c) {
@@ -163,8 +171,10 @@ static uint32_t h_switch(sh4ctx *c) {
         to = new_coro();
         if (dc_coro_trace) fprintf(stderr, "coro: switch %08X starts coro %ld at %08X (r15 %08X)\n",
                                    at, (long)(to - coros), c->spc, c->r[15]);
-    } else if (dc_coro_trace) fprintf(stderr, "coro: switch %08X resumes %s (r15 %08X pc %08X)\n",
-                                      at, to->is_main ? "main" : "coro", c->r[15], c->spc);
+    } else if (dc_coro_trace) fprintf(stderr, "coro: switch %08X resumes %s%ld (key %08X, r15 %08X pc %08X)\n",
+                                      at, to->is_main ? "main" : "coro", to->is_main ? 0L : (long)(to - coros), to->sp_key, c->r[15], c->spc);
+    if (dc_coro_trace) fprintf(stderr, "coro:   suspended %s%ld under r15 %08X\n", cur->is_main ? "main" : "coro",
+                               cur->is_main ? 0L : (long)(cur - coros), r15);
     to->sp_waiting = 0;
     switch_to(to);
     /* resumed: the task that switched to us has loaded our registers */
