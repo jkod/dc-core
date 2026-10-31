@@ -164,7 +164,8 @@ static uint32_t h_gdrom(sh4ctx *c) {
 
 static uint32_t h_misc(sh4ctx *c) {
     TR("bios: misc r4=%d\n", (int)c->r[4]);
-    if ((int)c->r[4] == 1) dc_trap(c, 0, "exit to BIOS menu");
+    /* KOS uses misc(1) to return to the BIOS menu, but Katana games call it during normal
+     * start-up and carry on, so it is treated as a no-op */
     c->r[0] = 0;
     return 0;
 }

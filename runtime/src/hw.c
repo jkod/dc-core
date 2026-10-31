@@ -12,6 +12,7 @@
 #include "dccore/hw.h"
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #define CPU_HZ 200000000ull
 #define PERIPH_HZ (CPU_HZ / 4)      /* Pφ = 50 MHz feeds the TMU */
@@ -208,6 +209,10 @@ static uint32_t rd(uint32_t a, int size) {
         else if (o == 0x10C) v = spg_status(dc_current_ctx ? dc_current_ctx->cycles : 0);
         else v = PVR(o & 0x1FFC);
         return v;
+    }
+    if (m >= 0x00710000u && m < 0x00710010u) {                           /* AICA RTC: seconds since 1950 */
+        uint32_t t = (uint32_t)time(NULL) + 631152000u;                  /* 1950-01-01 -> 1970-01-01 */
+        return (m & 4) ? (t & 0xFFFF) : (t >> 16);
     }
     if (m >= 0x00700000u && m < 0x00710000u) { uint32_t v = aica[(m & 0xFFFC) >> 2]; return size == 4 ? v : size == 2 ? (v >> ((m & 2) * 8)) & 0xFFFF : (v >> ((m & 3) * 8)) & 0xFF; }
     if (m >= 0x00800000u && m < 0x00A00000u) { uint32_t v = 0; memcpy(&v, aram + (m & 0x1FFFFF), size); return v; }
