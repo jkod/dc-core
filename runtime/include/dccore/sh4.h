@@ -1,0 +1,166 @@
+/* dc-core: SH-4 CPU state and helpers used by statically recompiled Dreamcast code.
+ *
+ * Recompiled functions have the signature `void f_XXXXXXXX(sh4ctx *c)` and keep the
+ * original register-level semantics: arguments in r4..r7 / fr4..fr11, result in r0 / fr0,
+ * stack in r15, return address in pr. Memory is reached only through dc_rd* / dc_wr*.
+ */
+#ifndef DCCORE_SH4_H
+#define DCCORE_SH4_H
+
+#include <stdint.h>
+#include <string.h>
+#include <math.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef struct sh4ctx {
+    uint32_t r[16];
+    uint32_t rbank[8];          /* the other R0..R7 bank (only touched by ldc/stc Rn_BANK) */
+    uint32_t t, s, q, m;        /* SR flag bits kept apart for speed */
+    uint32_t sr_rest;           /* SR without T/S/Q/M */
+    uint32_t gbr, vbr, ssr, spc, sgr, dbr;
+    uint32_t mach, macl, pr, fpul, fpscr;
+    union { float f[32]; uint32_t u[32]; } fr;   /* [0..15] current FR bank, [16..31] XF bank */
+    uint64_t cycles;            /* rough instruction counter, for profiling only */
+} sh4ctx;
+
+#define FPSCR_PR (1u << 19)
+#define FPSCR_SZ (1u << 20)
+#define FPSCR_FR (1u << 21)
+
+/* ---------------- memory ---------------- */
+/* Main RAM: 16 MB at 0x0C000000 (P0/U0), mirrored in P1 0x8C.., P2 0xAC.., P3 0xCC... */
+extern uint8_t *dc_ram;
+
+uint8_t  dc_hw_rd8 (uint32_t a);
+uint16_t dc_hw_rd16(uint32_t a);
+uint32_t dc_hw_rd32(uint32_t a);
+void     dc_hw_wr8 (uint32_t a, uint8_t v);
+void     dc_hw_wr16(uint32_t a, uint16_t v);
+void     dc_hw_wr32(uint32_t a, uint32_t v);
+void     dc_hw_pref(uint32_t a);          /* store-queue flush etc. */
+
+#define DC_IS_RAM(a) (((a) & 0x1C000000u) == 0x0C000000u)
+#define DC_RAM_OFS(a) ((a) & 0x00FFFFFFu)
+
+static inline uint8_t  dc_rd8 (uint32_t a) { if (DC_IS_RAM(a)) return dc_ram[DC_RAM_OFS(a)]; return dc_hw_rd8(a); }
+static inline uint16_t dc_rd16(uint32_t a) { if (DC_IS_RAM(a)) { uint16_t v; memcpy(&v, dc_ram + DC_RAM_OFS(a), 2); return v; } return dc_hw_rd16(a); }
+static inline uint32_t dc_rd32(uint32_t a) { if (DC_IS_RAM(a)) { uint32_t v; memcpy(&v, dc_ram + DC_RAM_OFS(a), 4); return v; } return dc_hw_rd32(a); }
+static inline void dc_wr8 (uint32_t a, uint8_t v)  { if (DC_IS_RAM(a)) { dc_ram[DC_RAM_OFS(a)] = v; return; } dc_hw_wr8(a, v); }
+static inline void dc_wr16(uint32_t a, uint16_t v) { if (DC_IS_RAM(a)) { memcpy(dc_ram + DC_RAM_OFS(a), &v, 2); return; } dc_hw_wr16(a, v); }
+static inline void dc_wr32(uint32_t a, uint32_t v) { if (DC_IS_RAM(a)) { memcpy(dc_ram + DC_RAM_OFS(a), &v, 4); return; } dc_hw_wr32(a, v); }
+
+static inline float dc_rdf(uint32_t a) { uint32_t u = dc_rd32(a); float f; memcpy(&f, &u, 4); return f; }
+static inline void  dc_wrf(uint32_t a, float f) { uint32_t u; memcpy(&u, &f, 4); dc_wr32(a, u); }
+
+/* ---------------- dispatch ---------------- */
+typedef void (*sh4fn)(sh4ctx *c);
+/* Call guest code at `addr`. Implemented by the generated dispatch table (+ HLE overrides). */
+void dc_call(sh4ctx *c, uint32_t addr);
+/* Called for things the recompiler cannot do statically (trapa, sleep, rte, unknown opcodes). */
+void dc_trap(sh4ctx *c, uint32_t pc, const char *what);
+
+/* ---------------- SR / FPSCR ---------------- */
+static inline uint32_t sh4_get_sr(const sh4ctx *c) {
+    return c->sr_rest | (c->t & 1) | ((c->s & 1) << 1) | ((c->q & 1) << 8) | ((c->m & 1) << 9);
+}
+static inline void sh4_set_sr(sh4ctx *c, uint32_t v) {
+    c->t = v & 1; c->s = (v >> 1) & 1; c->q = (v >> 8) & 1; c->m = (v >> 9) & 1;
+    c->sr_rest = v & ~0x303u;
+}
+static inline void sh4_swap_fbank(sh4ctx *c) {
+    uint32_t tmp[16];
+    memcpy(tmp, &c->fr.u[0], 64); memcpy(&c->fr.u[0], &c->fr.u[16], 64); memcpy(&c->fr.u[16], tmp, 64);
+}
+static inline void sh4_set_fpscr(sh4ctx *c, uint32_t v) {
+    if ((v ^ c->fpscr) & FPSCR_FR) sh4_swap_fbank(c);
+    c->fpscr = v & 0x003FFFFFu;
+}
+
+/* ---------------- double-precision register pairs ---------------- */
+/* DRn = FR[n] (high word) : FR[n+1] (low word) */
+static inline double sh4_get_dr(const sh4ctx *c, int n) {
+    uint64_t v = ((uint64_t)c->fr.u[n] << 32) | c->fr.u[n + 1]; double d; memcpy(&d, &v, 8); return d;
+}
+static inline void sh4_set_dr(sh4ctx *c, int n, double d) {
+    uint64_t v; memcpy(&v, &d, 8); c->fr.u[n] = (uint32_t)(v >> 32); c->fr.u[n + 1] = (uint32_t)v;
+}
+/* 64-bit fmov register index: even -> DRn (bank 0), odd -> XDn-1 (bank 1) */
+static inline int sh4_xd(int n) { return (n & 1) ? 16 + (n & 0xE) : n; }
+
+/* ---------------- ALU helpers ---------------- */
+static inline void sh4_div1(sh4ctx *c, int n, int m) {
+    uint32_t old_q = c->q, tmp0, tmp1, tmp2 = c->r[m];
+    c->q = (c->r[n] >> 31) & 1;
+    c->r[n] = (c->r[n] << 1) | (c->t & 1);
+    tmp0 = c->r[n];
+    if (old_q == c->m) { c->r[n] -= tmp2; tmp1 = c->r[n] > tmp0; }
+    else               { c->r[n] += tmp2; tmp1 = c->r[n] < tmp0; }
+    /* Q update: the four-way table in the SH-4 manual collapses to this */
+    c->q = (tmp1 ^ c->q ^ c->m) & 1;
+    c->t = (c->q == c->m);
+}
+
+static inline uint32_t sh4_ftrc(float f) {
+    if (f != f) return 0x80000000u;
+    if (f >= 2147483648.0f) return 0x7FFFFFFFu;
+    if (f < -2147483648.0f) return 0x80000000u;
+    return (uint32_t)(int32_t)f;
+}
+static inline uint32_t sh4_ftrc_d(double f) {
+    if (f != f) return 0x80000000u;
+    if (f >= 2147483648.0) return 0x7FFFFFFFu;
+    if (f < -2147483648.0) return 0x80000000u;
+    return (uint32_t)(int32_t)f;
+}
+
+/* fsca: FPUL low 16 bits = fraction of a full turn. The hardware reads a sine table; a port that
+ * needs bit-exact results sets dc_fsca_table to 0x8000 floats = sin over the first half turn
+ * (index i -> i * pi / 32768), the second half is the negated first half. Default: sin/cos. */
+extern const float *dc_fsca_table;
+static inline float sh4_fsin(uint32_t a) {
+    a &= 0xFFFF;
+    if (dc_fsca_table) return a < 0x8000 ? dc_fsca_table[a] : -dc_fsca_table[a - 0x8000];
+    return (float)sin((double)a * (3.14159265358979323846 / 32768.0));
+}
+static inline void sh4_fsca(sh4ctx *c, int n) {
+    c->fr.f[n] = sh4_fsin(c->fpul); c->fr.f[n + 1] = sh4_fsin(c->fpul + 0x4000);
+}
+/* fipr / ftrv: accumulated in double and rounded once, like the hardware's wide adder (and Flycast) */
+static inline void sh4_fipr(sh4ctx *c, int n, int m) {
+    float *f = c->fr.f;
+    f[n + 3] = (float)((double)f[n] * f[m] + (double)f[n + 1] * f[m + 1] + (double)f[n + 2] * f[m + 2] + (double)f[n + 3] * f[m + 3]);
+}
+static inline void sh4_ftrv(sh4ctx *c, int n) {
+    float *f = c->fr.f, *x = &c->fr.f[16];
+    double v0 = f[n], v1 = f[n + 1], v2 = f[n + 2], v3 = f[n + 3];
+    for (int i = 0; i < 4; i++)
+        f[n + i] = (float)(x[i] * v0 + x[4 + i] * v1 + x[8 + i] * v2 + x[12 + i] * v3);
+}
+
+static inline void sh4_macl(sh4ctx *c, int n, int m) {
+    int64_t a = (int64_t)(int32_t)dc_rd32(c->r[n]); c->r[n] += 4;
+    int64_t b = (int64_t)(int32_t)dc_rd32(c->r[m]); c->r[m] += 4;
+    int64_t acc = (int64_t)(((uint64_t)c->mach << 32) | c->macl) + a * b;
+    if (c->s) { if (acc > 0x00007FFFFFFFFFFFLL) acc = 0x00007FFFFFFFFFFFLL; if (acc < -0x0000800000000000LL) acc = -0x0000800000000000LL; }
+    c->mach = (uint32_t)((uint64_t)acc >> 32); c->macl = (uint32_t)acc;
+}
+static inline void sh4_macw(sh4ctx *c, int n, int m) {
+    int32_t a = (int16_t)dc_rd16(c->r[n]); c->r[n] += 2;
+    int32_t b = (int16_t)dc_rd16(c->r[m]); c->r[m] += 2;
+    if (c->s) {
+        int64_t acc = (int64_t)(int32_t)c->macl + (int64_t)a * b;
+        if (acc > 0x7FFFFFFF) { acc = 0x7FFFFFFF; c->mach |= 1; } else if (acc < -0x7FFFFFFFLL - 1) { acc = -0x7FFFFFFFLL - 1; c->mach |= 1; }
+        c->macl = (uint32_t)acc;
+    } else {
+        int64_t acc = (int64_t)(((uint64_t)c->mach << 32) | c->macl) + (int64_t)a * b;
+        c->mach = (uint32_t)((uint64_t)acc >> 32); c->macl = (uint32_t)acc;
+    }
+}
+
+#ifdef __cplusplus
+}
+#endif
+#endif

@@ -1,0 +1,12 @@
+# never commit anything taken from a game disc
+*.gdi
+*.bin
+*.BIN
+*.raw
+*.chd
+*.cdi
+*_gen/
+gen/
+extracted/
+build/
+__pycache__/
