@@ -26,6 +26,7 @@ void  dc_set_miss_handler(dc_miss_fn f);
 void  dc_set_trap_handler(dc_trap_fn f);
 void  dc_set_call_hook(dc_call_hook f);          /* sees every dc_call (tracing/profiling) */
 void  dc_set_hw(const dc_hw_ops *ops);
+extern uint32_t dc_call_cost;                   /* cycles charged per dispatched call (default 40) */
 
 #ifdef __cplusplus
 }

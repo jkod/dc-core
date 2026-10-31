@@ -173,6 +173,7 @@ int main(int argc, char **argv) {
     }
     if (getenv("DC_HWSTATS")) dc_hw_read_hook = hw_read;
     dc_hw.on_vblank = on_vblank;
+    if (getenv("DC_CALLCOST")) dc_call_cost = (uint32_t)atoi(getenv("DC_CALLCOST"));
     if (getenv("DC_FPS")) dc_hw.on_render = on_render_count;   /* frame count for logs; DC_DUMP_FRAMES dumps */
     if (getenv("DC_TRACE_FROM")) { unsigned a, n = 200; sscanf(getenv("DC_TRACE_FROM"), "%x:%u", &a, &n); trace_from = a | 0x80000000u; trace_left = (int)n; }
     if (getenv("DC_LOGFN")) {

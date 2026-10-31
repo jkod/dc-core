@@ -9,6 +9,7 @@ extern const dc_fn_entry dc_fn_table[];
 extern const size_t dc_fn_count;
 
 uint8_t *dc_ram;
+uint32_t dc_call_cost = 40;   /* SH-4 cycles charged per call/jump through the dispatcher */
 sh4ctx *dc_current_ctx;
 const float *dc_fsca_table;
 
@@ -83,7 +84,7 @@ static sh4fn lookup_table(uint32_t addr) {
 
 void dc_call(sh4ctx *c, uint32_t addr) {
     while (addr) {
-        DC_TICK(c, 40);
+        DC_TICK(c, dc_call_cost);
         if (call_hook) call_hook(c, addr);
         sh4fn f = dc_lookup(addr);
         if (!f && img_end && ((addr & 0x1FFFFFFFu) | 0x80000000u) - img_base >= img_end - img_base) {
