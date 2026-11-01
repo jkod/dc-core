@@ -56,6 +56,9 @@ typedef unsigned char GLboolean; typedef char GLchar; typedef ptrdiff_t GLsizeip
 #define GL_TEXTURE0 0x84C0
 #define GL_TEXTURE_MAG_FILTER 0x2800
 #define GL_TEXTURE_MIN_FILTER 0x2801
+#define GL_LINEAR_MIPMAP_LINEAR 0x2703
+#define GL_TEXTURE_MAX_ANISOTROPY 0x84FE
+#define GL_MAX_TEXTURE_MAX_ANISOTROPY 0x84FF
 #define GL_TEXTURE_WRAP_S 0x2802
 #define GL_TEXTURE_WRAP_T 0x2803
 #define GL_NEAREST 0x2600
@@ -102,6 +105,7 @@ typedef unsigned char GLboolean; typedef char GLchar; typedef ptrdiff_t GLsizeip
     F(void, glViewport, (GLint, GLint, GLsizei, GLsizei)) F(void, glClearColor, (GLfloat, GLfloat, GLfloat, GLfloat)) \
     F(void, glClearDepth, (GLdouble)) F(void, glClearStencil, (GLint)) F(void, glClear, (GLbitfield)) \
     F(void, glScissor, (GLint, GLint, GLsizei, GLsizei)) \
+    F(void, glGenerateMipmap, (GLenum)) F(void, glTexParameterf, (GLenum, GLenum, GLfloat)) F(void, glGetFloatv, (GLenum, GLfloat *)) \
     F(void, glMultiDrawArrays, (GLenum, const GLint *, const GLsizei *, GLsizei)) \
     F(void, glTexSubImage2D, (GLenum, GLint, GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, const void *)) \
     F(void, glEnable, (GLenum)) F(void, glDisable, (GLenum)) F(void, glDepthFunc, (GLenum)) \
@@ -201,7 +205,7 @@ static span *spans; static int cap_spans;
 
 /* GL textures for decoded PVR textures, by decode id */
 #define GLTEX 1024
-static struct { uint64_t id; GLuint name; unsigned last; } gtex[GLTEX];
+static struct { uint64_t id; GLuint name; unsigned last; int mips; } gtex[GLTEX];
 static unsigned frame_no;
 
 static GLuint compile(GLenum type, const char *src) {
@@ -211,6 +215,10 @@ static GLuint compile(GLenum type, const char *src) {
     if (!ok) { char log[2048]; p_glGetShaderInfoLog(s, sizeof log, NULL, log); fprintf(stderr, "pvr_gl: shader: %s\n", log); }
     return s;
 }
+
+int dc_pvr_gl_mipmaps;                 /* enhancement: mipmaps for every texture */
+float dc_pvr_gl_anisotropy;            /* enhancement: anisotropic filtering (clamped to the driver's max) */
+static float max_aniso;
 
 int dc_pvr_gl_init(void *(*getproc)(const char *)) {
     int missing = 0;
@@ -239,6 +247,7 @@ int dc_pvr_gl_init(void *(*getproc)(const char *)) {
     p_glVertexAttribPointer(4, 4, GL_FLOAT, GL_FALSE, sizeof(gv), (void *)offsetof(gv, c1));
     p_glVertexAttribPointer(5, 4, GL_FLOAT, GL_FALSE, sizeof(gv), (void *)offsetof(gv, o1));
     for (int i = 0; i < 6; i++) p_glEnableVertexAttribArray((GLuint)i);
+    { GLfloat a = 0; p_glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY, &a); while (p_glGetError()) {} max_aniso = a; }
     ready = 1;
     return 0;
 }
@@ -267,7 +276,13 @@ static GLuint texture_for(uint32_t tcw, uint32_t tsp) {
     pvr_get_texture(tcw, tsp, &ti);
     int slot = -1, oldest = 0;
     for (int i = 0; i < GLTEX; i++) {
-        if (gtex[i].name && gtex[i].id == ti.id) { gtex[i].last = frame_no; return gtex[i].name; }
+        if (gtex[i].name && gtex[i].id == ti.id) {
+            gtex[i].last = frame_no;
+            if (dc_pvr_gl_mipmaps && !gtex[i].mips) {             /* mipmaps switched on after the upload */
+                p_glBindTexture(GL_TEXTURE_2D, gtex[i].name); p_glGenerateMipmap(GL_TEXTURE_2D); gtex[i].mips = 1;
+            }
+            return gtex[i].name;
+        }
         if (!gtex[i].name && slot < 0) slot = i;
         if (gtex[i].last < gtex[oldest].last) oldest = i;
     }
@@ -275,6 +290,8 @@ static GLuint texture_for(uint32_t tcw, uint32_t tsp) {
     GLuint n; p_glGenTextures(1, &n); p_glBindTexture(GL_TEXTURE_2D, n);
     p_glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
     p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, ti.w, ti.h, 0, GL_BGRA, GL_UNSIGNED_BYTE, ti.px);
+    if (dc_pvr_gl_mipmaps) p_glGenerateMipmap(GL_TEXTURE_2D);
+    gtex[slot].mips = dc_pvr_gl_mipmaps;
     gtex[slot].id = ti.id; gtex[slot].name = n; gtex[slot].last = frame_no;
     return n;
 }
@@ -309,7 +326,11 @@ static void set_poly_state(const pvr_poly *p, int set) {
     if (tex) {
         p_glActiveTexture(GL_TEXTURE0); p_glBindTexture(GL_TEXTURE_2D, texture_for(tcw, tsp));
         int filt = ((tsp >> 13) & 3) ? GL_LINEAR : GL_NEAREST;
-        p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, filt); p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filt);
+        int minf = filt == GL_LINEAR && dc_pvr_gl_mipmaps ? GL_LINEAR_MIPMAP_LINEAR : filt;   /* point-sampled stays sharp */
+        p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, minf); p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filt);
+        if (max_aniso >= 1.f)
+            p_glTexParameterf(GL_TEXTURE_2D, GL_TEXTURE_MAX_ANISOTROPY,
+                              minf == GL_LINEAR_MIPMAP_LINEAR && dc_pvr_gl_anisotropy > 1.f ? (dc_pvr_gl_anisotropy < max_aniso ? dc_pvr_gl_anisotropy : max_aniso) : 1.f);
         int cu = (tsp >> 16) & 1, cv = (tsp >> 15) & 1, fu = (tsp >> 18) & 1, fv = (tsp >> 17) & 1;
         p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, cu ? GL_CLAMP_TO_EDGE : fu ? GL_MIRRORED_REPEAT : GL_REPEAT);
         p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, cv ? GL_CLAMP_TO_EDGE : fv ? GL_MIRRORED_REPEAT : GL_REPEAT);

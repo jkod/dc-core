@@ -27,6 +27,10 @@ void dc_pvr_gl_load_rgb(const uint8_t *rgb, int w, int h);   /* show a CPU-drawn
 /* 1 = render 16:9: the 4:3 picture in the middle, the sides filled with geometry the game draws
  * beyond the screen edges (games usually cull it, so a per-game camera patch gives the real thing) */
 extern int dc_pvr_gl_widescreen;
+/* enhancements beyond the console (off by default): mipmaps for every bilinear-filtered texture,
+ * and anisotropic filtering up to this many samples where the driver supports it */
+extern int dc_pvr_gl_mipmaps;
+extern float dc_pvr_gl_anisotropy;
 /* widescreen HUD: polygons with every vertex at the same 1/w, at least this, are treated as 2D
  * overlay, and those in the left / right third of the 4:3 picture move to the edges (0 = off; a
  * per-game value: Rush 2049 draws its HUD at 1/w 1.0 (panels) and 1000+ (sprites), so 1.0) */

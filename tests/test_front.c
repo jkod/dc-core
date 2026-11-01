@@ -79,6 +79,27 @@ int main(void) {
     CHECK(old[2] == 255, "HUD left its 4:3 position %02X%02X%02X", old[0], old[1], old[2]);
     dc_pvr_gl_hud_z = 0;
     dc_pvr_gl_widescreen = 0;
+    /* mipmaps (also switched on for an already uploaded texture): a 64x64 one-texel checkerboard on a
+     * 4x4 quad averages to grey */
+    for (int y = 0; y < 64; y++) for (int x = 0; x < 64; x++) {
+        uint16_t px = ((x ^ y) & 1) ? 0xFFFF : 0x0000;                         /* RGB565, scan order */
+        dc_wr8(0xA4000000u + 0x100000u + (uint32_t)(y * 64 + x) * 2, px & 255); dc_wr8(0xA4000000u + 0x100000u + (uint32_t)(y * 64 + x) * 2 + 1, px >> 8);
+    }
+    int grey[2];
+    for (int m = 0; m < 2; m++) {
+        dc_pvr_gl_mipmaps = m;
+        pvr(0x128, 0); pvr(0x144, 0x80000000u);
+        uint32_t th[8] = { (4u << 29) | (1u << 3), (7u << 29) | (1u << 25), (1u << 29) | (1u << 13) | (3u << 3) | 3u, (1u << 27) | (1u << 26) | (0x100000u >> 3) | (uint32_t)m * 0, 0, 0, 0, 0 };
+        ta(th);
+        uint32_t q0[8] = { 7u << 29, fu(30), fu(30), fu(1), fu(0.f), fu(0.f), 0xFFFFFFFFu, 0 }, q1[8] = { 7u << 29, fu(34), fu(30), fu(1), fu(1.f), fu(0.f), 0xFFFFFFFFu, 0 };
+        uint32_t q2[8] = { 7u << 29, fu(30), fu(34), fu(1), fu(0.f), fu(1.f), 0xFFFFFFFFu, 0 }, q3[8] = { (7u << 29) | (1u << 28), fu(34), fu(34), fu(1), fu(1.f), fu(1.f), 0xFFFFFFFFu, 0 };
+        ta(q0); ta(q1); ta(q2); ta(q3); ta(eol);
+        pvr(0x014, 1);
+        dc_pvr_gl_read(rgb, &w, &h);
+        grey[m] = rgb[(64 * w + 64) * 3];
+    }
+    CHECK(grey[1] > 80 && grey[1] < 175, "mipmapped checkerboard %d, want grey", grey[1]);
+    dc_pvr_gl_mipmaps = 0;
     dc_front_close();
     printf(fails ? "%d frontend checks failed\n" : "frontend tests passed\n", fails);
     return fails != 0;
