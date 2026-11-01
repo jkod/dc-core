@@ -311,8 +311,8 @@ static int step(void) {
     return 1;
 }
 
-/* Idle loops: a short backward jump to the same place with every register unchanged and no memory
- * written since the last time spins on something only an interrupt, a timer or the SH-4 can
+/* Idle loops: a backward jump to the same place with every register unchanged and no memory
+ * changed since the last time spins on something only an interrupt, a timer or the SH-4 can
  * change, none of which happen inside this slice: give up the rest of it. */
 unsigned arm7_writes;                  /* counted by the bus (aica.c) */
 static struct { uint32_t pc, r[15], cpsr; unsigned writes; int valid; } idle;
@@ -325,7 +325,7 @@ int arm7_run(int cycles) {
         uint32_t pc = arm7.r[15];
         done += step();
         uint32_t to = arm7.r[15];
-        if (to < pc && pc - to <= 64) {                        /* short backward branch */
+        if (to < pc && pc - to <= 0x1000) {                    /* backward branch (a loop) */
             if (idle.valid && idle.pc == to && idle.writes == arm7_writes && idle.cpsr == arm7.cpsr &&
                 !memcmp(idle.r, arm7.r, sizeof idle.r))
                 return cycles;                                  /* spinning: done for this slice */
