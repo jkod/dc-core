@@ -1,19 +1,120 @@
 /* dc-core: guest setjmp/longjmp and cooperative threads on host coroutines (see coro.h). */
+/* Host context switching, one of:
+ *   Windows            fibers
+ *   AArch64 / x86-64   a small register switch in assembly (Switch / libnx has no ucontext); used
+ *                      where ucontext is missing, or everywhere with -DDCCORE_CORO_ASM
+ *   other POSIX        ucontext (Linux, macOS) */
+#if defined(_WIN32)
+#define CORO_FIBER 1
+#elif defined(DCCORE_CORO_ASM) || defined(__SWITCH__) || (defined(__aarch64__) && !defined(__linux__) && !defined(__APPLE__))
+#define CORO_ASM 1
+#else
+#define CORO_UCONTEXT 1
 #if defined(__APPLE__) && !defined(_XOPEN_SOURCE)
 #define _XOPEN_SOURCE 600      /* ucontext on macOS */
+#endif
+#if !defined(__APPLE__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
 #endif
 #include "dccore/coro.h"
 #include "dccore/runtime.h"
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
+#if CORO_FIBER
+#include <windows.h>
+#elif CORO_UCONTEXT
 #include <ucontext.h>
+#endif
+
+/* ---- host contexts ---- */
+#if CORO_FIBER
+typedef struct { LPVOID fiber; } hctx;
+static void hctx_switch(hctx *from, hctx *to) {
+    if (!from->fiber) from->fiber = GetCurrentFiber();
+    SwitchToFiber(to->fiber);
+}
+static VOID CALLBACK fiber_entry(LPVOID p) { ((void (*)(void))p)(); }
+static void hctx_make(hctx *k, void **stack, size_t bytes, void (*fn)(void)) {
+    (void)stack;
+    if (k->fiber) DeleteFiber(k->fiber);
+    k->fiber = CreateFiber(bytes, fiber_entry, (LPVOID)fn);
+    if (!k->fiber) { fprintf(stderr, "dc-core: CreateFiber failed\n"); abort(); }
+}
+static void hctx_main_init(hctx *m) {
+    if (!m->fiber) {
+        m->fiber = ConvertThreadToFiber(NULL);
+        if (!m->fiber) m->fiber = GetCurrentFiber();       /* already a fiber */
+    }
+}
+#elif CORO_ASM
+typedef struct { void *sp; } hctx;
+void dccore_ctx_switch(void **save_sp, void *new_sp);      /* below */
+#if defined(__APPLE__) || defined(_WIN32)
+#define CORO_SYM "_dccore_ctx_switch"
+#else
+#define CORO_SYM "dccore_ctx_switch"
+#endif
+#if defined(__aarch64__)
+/* callee-saved: x19-x30, d8-d15 (176 bytes, 16-aligned) */
+__asm__(".text\n.p2align 2\n.globl " CORO_SYM "\n" CORO_SYM ":\n"
+        "sub sp, sp, #176\n"
+        "stp x19, x20, [sp, #0]\n stp x21, x22, [sp, #16]\n stp x23, x24, [sp, #32]\n"
+        "stp x25, x26, [sp, #48]\n stp x27, x28, [sp, #64]\n stp x29, x30, [sp, #80]\n"
+        "stp d8, d9, [sp, #96]\n stp d10, d11, [sp, #112]\n stp d12, d13, [sp, #128]\n stp d14, d15, [sp, #144]\n"
+        "mov x9, sp\n str x9, [x0]\n mov sp, x1\n"
+        "ldp x19, x20, [sp, #0]\n ldp x21, x22, [sp, #16]\n ldp x23, x24, [sp, #32]\n"
+        "ldp x25, x26, [sp, #48]\n ldp x27, x28, [sp, #64]\n ldp x29, x30, [sp, #80]\n"
+        "ldp d8, d9, [sp, #96]\n ldp d10, d11, [sp, #112]\n ldp d12, d13, [sp, #128]\n ldp d14, d15, [sp, #144]\n"
+        "add sp, sp, #176\n ret\n");
+static void *frame_init(char *top, void (*fn)(void)) {
+    uint64_t *f = (uint64_t *)(top - 176);
+    for (int i = 0; i < 22; i++) f[i] = 0;
+    f[11] = (uint64_t)(uintptr_t)fn;                       /* x30: "return" into the entry */
+    return f;
+}
+#elif defined(__x86_64__) && !defined(_WIN32)
+/* System V: rbx, rbp, r12-r15 */
+__asm__(".text\n.globl " CORO_SYM "\n" CORO_SYM ":\n"
+        "pushq %rbp\n pushq %rbx\n pushq %r12\n pushq %r13\n pushq %r14\n pushq %r15\n"
+        "movq %rsp, (%rdi)\n movq %rsi, %rsp\n"
+        "popq %r15\n popq %r14\n popq %r13\n popq %r12\n popq %rbx\n popq %rbp\n ret\n");
+static void *frame_init(char *top, void (*fn)(void)) {
+    uint64_t *f = (uint64_t *)(top - 64);                  /* 6 registers, return address, pad */
+    for (int i = 0; i < 8; i++) f[i] = 0;
+    f[6] = (uint64_t)(uintptr_t)fn;                        /* rsp = 8 mod 16 at entry, like after a call */
+    return f;
+}
+#else
+#error "dc-core: no coroutine backend for this CPU (add one to coro.c)"
+#endif
+static void hctx_switch(hctx *from, hctx *to) { dccore_ctx_switch(&from->sp, to->sp); }
+static void hctx_make(hctx *k, void **stack, size_t bytes, void (*fn)(void)) {
+    if (!*stack) *stack = malloc(bytes);
+    if (!*stack) { fprintf(stderr, "dc-core: out of memory for a coroutine stack\n"); abort(); }
+    k->sp = frame_init((char *)(((uintptr_t)*stack + bytes) & ~(uintptr_t)15), fn);
+}
+static void hctx_main_init(hctx *m) { (void)m; }
+#else
+typedef struct { ucontext_t uc; } hctx;
+static void hctx_switch(hctx *from, hctx *to) { swapcontext(&from->uc, &to->uc); }
+static void hctx_make(hctx *k, void **stack, size_t bytes, void (*fn)(void)) {
+    if (!*stack) *stack = malloc(bytes);
+    if (!*stack) { fprintf(stderr, "dc-core: out of memory for a coroutine stack\n"); abort(); }
+    getcontext(&k->uc);
+    k->uc.uc_stack.ss_sp = *stack; k->uc.uc_stack.ss_size = bytes; k->uc.uc_link = NULL;
+    makecontext(&k->uc, fn, 0);
+}
+static void hctx_main_init(hctx *m) { (void)m; }
+#endif
 
 extern sh4ctx *dc_current_ctx;    /* dispatch.c */
 uint32_t dc_coro_setjmp_addr;   /* 0 = feature off: DC_CALL_SETJMP is a plain call */
 int dc_coro_trace;
 
 typedef struct coro {
-    ucontext_t uc;
+    hctx uc;
     void *stack;
     struct slot *pending;        /* set by whoever switches here: longjmp to this slot on resume */
     int refs;                    /* live slots owned by this coroutine */
@@ -68,7 +169,7 @@ void dc_coro_setjmp_done(sh4ctx *c, jmp_buf *jb) {
 static void switch_to(coro *to) {
     coro *from = cur;
     cur = to;
-    swapcontext(&from->uc, &to->uc);
+    hctx_switch(&from->uc, &to->uc);
     /* resumed: someone longjmp'd into one of our setjmps */
     cur = from;
     slot *s = from->pending; from->pending = NULL;
@@ -90,11 +191,9 @@ static coro *new_coro(void) {
     if (!k) {
         if (ncoros == MAX_COROS) { fprintf(stderr, "dc-core: out of coroutines\n"); abort(); }
         k = &coros[ncoros++];
-        k->stack = malloc(stack_bytes);
     }
-    getcontext(&k->uc);
-    k->uc.uc_stack.ss_sp = k->stack; k->uc.uc_stack.ss_size = stack_bytes; k->uc.uc_link = NULL;
-    makecontext(&k->uc, coro_main, 0);
+    hctx_main_init(&main_coro.uc);
+    hctx_make(&k->uc, &k->stack, stack_bytes, coro_main);
     k->pending = NULL; k->refs = 0; k->started = 1; k->sp_waiting = 0;
     return k;
 }

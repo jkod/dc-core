@@ -6,6 +6,7 @@
  */
 #include "dccore/arm7.h"
 #include <string.h>
+static inline int popcount16(uint32_t v) { int n = 0; for (v &= 0xFFFF; v; v &= v - 1) n++; return n; }
 
 enum { M_USR = 0x10, M_FIQ = 0x11, M_IRQ = 0x12, M_SVC = 0x13, M_ABT = 0x17, M_UND = 0x1B, M_SYS = 0x1F };
 #define F_N (1u << 31)
@@ -161,7 +162,7 @@ static void block_transfer(uint32_t op, uint32_t pc8) {
     int p = (op >> 24) & 1, u = (op >> 23) & 1, s = (op >> 22) & 1, w = (op >> 21) & 1, l = (op >> 20) & 1;
     int rn = (op >> 16) & 15;
     uint32_t list = op & 0xFFFF;
-    int n = __builtin_popcount(list);
+    int n = popcount16(list);
     uint32_t base = arm7.r[rn];
     uint32_t addr = u ? base : base - 4u * n;
     if (u ? p : !p) addr += 4;
@@ -247,7 +248,7 @@ static int step(void) {
         arm7.r[15] = pc8 + (uint32_t)off;
         return 3;
     }
-    if (top == 4) { block_transfer(op, pc8); return 2 + __builtin_popcount(op & 0xFFFF); }
+    if (top == 4) { block_transfer(op, pc8); return 2 + popcount16(op & 0xFFFF); }
     if (top == 2 || top == 3) {
         if (top == 3 && (op & 0x10)) { exception(0x04, M_UND, pc + 4, 0); return 3; }   /* undefined */
         single_transfer(op, pc8); return 3;

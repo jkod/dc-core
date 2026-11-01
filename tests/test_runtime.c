@@ -5,7 +5,6 @@
 #include "dccore/ta.h"
 #include "dccore/aica.h"
 #include "dccore/maple.h"
-#include <unistd.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -124,7 +123,7 @@ int main(void) {
 
     /* 8b. VMU in slot 1 of port A: new formatted card, media info, block write + read, file */
     {
-        char vp[] = "/tmp/dcvmuXXXXXX"; int fd = mkstemp(vp); close(fd); remove(vp);
+        const char *vp = "dctest_vmu.bin"; remove(vp);
         CHECK(dc_vmu_attach(0, vp) == 0);
         CHECK(dc_vmu_data(0)[255 * 512] == 0x55 && dc_vmu_data(0)[254 * 512 + 241 * 2] == 0xFA);
         uint32_t loc = 0u | 1u << 8 | 0u << 16 | 5u << 24;                         /* partition 0, phase 1, block 5 */

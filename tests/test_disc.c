@@ -17,9 +17,7 @@ static int dirent(uint8_t *p, uint32_t lba, uint32_t size, int dir, const char *
 }
 
 int main(void) {
-    char dir[] = "/tmp/dcdiscXXXXXX";
-    if (!mkdtemp(dir)) return 1;
-    char path[256];
+    char path[256];                   /* files in the current directory, removed at the end */
     /* track 3 (HD area, LBA 45000): sector 16 PVD, 17 root dir, 18 DATA dir, 19.. files */
     enum { NSEC = 24 };
     static uint8_t img[NSEC * 2048];
@@ -34,11 +32,11 @@ int main(void) {
     o += dirent(data + o, 45022, 100, 0, "TRACK1.LZS;1");
     for (int i = 0; i < 5000; i++) img[19 * 2048 + i] = (uint8_t)(i * 7);
     for (int i = 0; i < 100; i++) img[22 * 2048 + i] = (uint8_t)(0xA0 + i);
-    snprintf(path, sizeof path, "%s/track03.bin", dir); FILE *f = fopen(path, "wb"); fwrite(img, 1, sizeof img, f); fclose(f);
+    snprintf(path, sizeof path, "dctest_track03.bin"); FILE *f = fopen(path, "wb"); fwrite(img, 1, sizeof img, f); fclose(f);
     static uint8_t blank[2048 * 4];
-    snprintf(path, sizeof path, "%s/track01.bin", dir); f = fopen(path, "wb"); fwrite(blank, 1, sizeof blank, f); fclose(f);
-    snprintf(path, sizeof path, "%s/disc.gdi", dir); f = fopen(path, "w");
-    fprintf(f, "2\n1 0 4 2048 track01.bin 0\n2 45000 4 2048 track03.bin 0\n"); fclose(f);
+    snprintf(path, sizeof path, "dctest_track01.bin"); f = fopen(path, "wb"); fwrite(blank, 1, sizeof blank, f); fclose(f);
+    snprintf(path, sizeof path, "dctest_disc.gdi"); f = fopen(path, "w");
+    fprintf(f, "2\n1 0 4 2048 dctest_track01.bin 0\n2 45000 4 2048 dctest_track03.bin 0\n"); fclose(f);
 
     CHECK(dc_disc_open(path) == 0);
     uint32_t lba, size;
@@ -51,6 +49,7 @@ int main(void) {
     CHECK(dc_disc_load_file("1ST_READ.BIN", buf, sizeof buf) == 5000 && buf[4999] == (uint8_t)(4999 * 7) && buf[100] == (uint8_t)700);
     CHECK(dc_disc_load_file("DATA/TRACK1.LZS", buf, sizeof buf) == 100 && buf[0] == 0xA0 && buf[99] == (uint8_t)(0xA0 + 99));
     CHECK(dc_disc_load_file("1ST_READ.BIN", buf, 100) == -1);       /* does not fit */
+    remove("dctest_track01.bin"); remove("dctest_track03.bin"); remove("dctest_disc.gdi");
     printf(fails ? "%d disc checks failed\n" : "disc tests passed\n", fails);
     return fails != 0;
 }

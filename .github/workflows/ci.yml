@@ -1,0 +1,48 @@
+name: CI
+on:
+  push:
+  pull_request:
+
+jobs:
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: Linux x64, os: ubuntu-latest }
+          - { name: macOS Apple Silicon, os: macos-14 }
+          - { name: Windows x64 (MSVC), os: windows-latest }
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libsdl2-dev libegl-dev libgl1-mesa-dri
+      - name: Dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install sdl2
+      - name: Dependencies (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          vcpkg install sdl2:x64-windows
+          echo "CMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" >> $env:GITHUB_ENV
+      - name: Configure
+        run: cmake -S . -B build -DDCCORE_TESTS=ON -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+
+  switch:
+    name: Nintendo Switch (devkitA64)
+    runs-on: ubuntu-latest
+    container: devkitpro/devkita64:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Python
+        run: apt-get update && apt-get install -y python3
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE=$DEVKITPRO/cmake/Switch.cmake -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --parallel

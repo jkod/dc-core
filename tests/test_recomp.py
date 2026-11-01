@@ -189,9 +189,10 @@ int main(void) {
         open(os.path.join(d, "main.c"), "w").write(main_c)
         srcs = [os.path.join(d, "main.c")] + [os.path.join(ROOT, "runtime/src", f) for f in os.listdir(os.path.join(ROOT, "runtime/src"))] + \
                [os.path.join(d, "gen", f) for f in os.listdir(os.path.join(d, "gen"))]
-        exe = os.path.join(d, "t")
-        subprocess.check_call(["cc", "-O1", "-w", "-I" + os.path.join(ROOT, "runtime/include"), "-o", exe] + srcs + ["-lm"])
-        r = subprocess.run([exe], capture_output=True, text=True)
+        exe = os.path.join(d, "t.exe" if os.environ.get("EXE") else "t")
+        cc = os.environ.get("CC", "cc").split() + os.environ.get("CFLAGS", "").split()
+        subprocess.check_call(cc + ["-O1", "-w", "-I" + os.path.join(ROOT, "runtime/include"), "-o", exe] + srcs + ["-lm"])
+        r = subprocess.run(os.environ.get("RUN", "").split() + [exe], capture_output=True, text=True)
         status = "ok" if r.returncode == 0 else "FAIL " + r.stdout.strip() + r.stderr.strip()
         print("%-28s %s" % (name, status))
         ok += r.returncode == 0

@@ -1,4 +1,8 @@
 /* dc-core: read the player's GD-ROM image (.gdi or Redump-style .cue) by LBA. */
+#if !defined(_WIN32) && !defined(_POSIX_C_SOURCE)
+#define _POSIX_C_SOURCE 200809L      /* fseeko */
+#endif
+#define _FILE_OFFSET_BITS 64
 #include "dccore/disc.h"
 #include <stdio.h>
 #include <stdlib.h>
