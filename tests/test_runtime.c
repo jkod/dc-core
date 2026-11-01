@@ -5,6 +5,7 @@
 #include "dccore/ta.h"
 #include "dccore/aica.h"
 #include "dccore/maple.h"
+#include "dccore/bios.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -219,6 +220,17 @@ int main(void) {
         CH1(5, 0x3C00 | 31); CH1(0, 0x8000 | 0x01);
     }
 
+    /* 11. boot ROM: its system area is copied to RAM (games checksum it), vectors stay HLE */
+    {
+        static uint8_t rom[0x200000];
+        for (int i = 0; i < 0x8000; i++) rom[i] = (uint8_t)(i * 13 + 7);
+        FILE *rf = fopen("dctest_boot.bin", "wb"); fwrite(rom, 1, sizeof rom, rf); fclose(rf);
+        CHECK(dc_bios_load("dctest_boot.bin", NULL) == 0);
+        dc_bios_install(&c, 'E');
+        CHECK(dc_ram[0x10F0] == rom[0x10F0] && dc_ram[0x3200] == rom[0x3200] && dc_ram[0x7FFF] == rom[0x7FFF]);
+        CHECK(dc_rd32(0x8C0000BCu) == 0x8C0010F0u);          /* GD-ROM vector still the HLE entry */
+        remove("dctest_boot.bin");
+    }
     printf(fails ? "%d runtime test(s) FAILED\n" : "runtime tests passed\n", fails);
     return fails != 0;
 }
