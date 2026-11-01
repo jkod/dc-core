@@ -47,6 +47,7 @@ typedef unsigned char GLboolean; typedef char GLchar; typedef ptrdiff_t GLsizeip
 #define GL_DEPTH_TEST 0x0B71
 #define GL_STENCIL_TEST 0x0B90
 #define GL_BLEND 0x0BE2
+#define GL_SCISSOR_TEST 0x0C11
 #define GL_CULL_FACE 0x0B44
 #define GL_KEEP 0x1E00
 #define GL_REPLACE 0x1E01
@@ -100,6 +101,8 @@ typedef unsigned char GLboolean; typedef char GLchar; typedef ptrdiff_t GLsizeip
     F(void, glTexParameteri, (GLenum, GLenum, GLint)) F(void, glActiveTexture, (GLenum)) \
     F(void, glViewport, (GLint, GLint, GLsizei, GLsizei)) F(void, glClearColor, (GLfloat, GLfloat, GLfloat, GLfloat)) \
     F(void, glClearDepth, (GLdouble)) F(void, glClearStencil, (GLint)) F(void, glClear, (GLbitfield)) \
+    F(void, glScissor, (GLint, GLint, GLsizei, GLsizei)) \
+    F(void, glTexSubImage2D, (GLenum, GLint, GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, const void *)) \
     F(void, glEnable, (GLenum)) F(void, glDisable, (GLenum)) F(void, glDepthFunc, (GLenum)) \
     F(void, glDepthMask, (GLboolean)) F(void, glColorMask, (GLboolean, GLboolean, GLboolean, GLboolean)) \
     F(void, glStencilFunc, (GLenum, GLint, GLuint)) F(void, glStencilOp, (GLenum, GLenum, GLenum)) \
@@ -387,6 +390,14 @@ void dc_pvr_gl_render(int scale) {
 
     p_glDisable(GL_CULL_FACE);
     p_glColorMask(1, 1, 1, 1); p_glDepthMask(1); p_glStencilMask(0xFF);
+    /* outside the clip rectangle: black; inside: background plane, and all drawing scissored to it */
+    p_glDisable(GL_SCISSOR_TEST);
+    p_glClearColor(0, 0, 0, 1);
+    p_glClear(GL_COLOR_BUFFER_BIT);
+    { int sx0 = dc_pvr_gl_widescreen ? 0 : (int)((f.clip_x0 * (float)fb_w) / f.width), sx1 = dc_pvr_gl_widescreen ? fb_w : (int)(((f.clip_x1 + 1) * (float)fb_w) / f.width);
+      int sy0 = f.clip_y0 * scale, sy1 = (f.clip_y1 + 1) * scale;
+      p_glEnable(GL_SCISSOR_TEST);
+      p_glScissor(sx0, fb_h - sy1, sx1 - sx0, sy1 - sy0); }
     p_glClearColor(f.bg[0], f.bg[1], f.bg[2], 1.f);
     p_glClearDepth(depth_of(f.bgz)); p_glClearStencil(0);
     p_glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
@@ -473,6 +484,7 @@ void dc_pvr_gl_render(int scale) {
     }
     free(s);
     p_glDisable(GL_BLEND);
+    p_glDisable(GL_SCISSOR_TEST);
     p_glDepthMask(1);
     p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
@@ -509,12 +521,31 @@ void dc_pvr_gl_present(int win_w, int win_h, int stretch) {
  * into the framebuffer (dc_pvr_display) */
 void dc_pvr_gl_load_rgb(const uint8_t *rgb, int w, int h) {
     if (!ready || w <= 0 || h <= 0) return;
-    ensure_fbo(w, h);
+    if (!fbo) ensure_fbo(w, h);
     disp_aspect = 4.f / 3.f;                               /* a CPU-drawn screen: always 4:3 */
     uint8_t *tmp = malloc((size_t)w * h * 3);
     for (int y = 0; y < h; y++) memcpy(tmp + (size_t)(h - 1 - y) * w * 3, rgb + (size_t)y * w * 3, (size_t)w * 3);
-    p_glBindTexture(GL_TEXTURE_2D, color_tex);
-    p_glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, tmp);
+    if (w == fb_w && h == fb_h) {                          /* same size: straight into the picture */
+        p_glBindTexture(GL_TEXTURE_2D, color_tex);
+        p_glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        p_glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, tmp);
+    } else {                                               /* scaled into it, keeping the render size */
+        static GLuint up_tex, up_fbo; static int up_w, up_h;
+        if (!up_tex) { p_glGenTextures(1, &up_tex); p_glGenFramebuffers(1, &up_fbo); }
+        p_glBindTexture(GL_TEXTURE_2D, up_tex);
+        p_glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        if (w != up_w || h != up_h) {
+            p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, tmp);
+            p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            p_glBindFramebuffer(GL_FRAMEBUFFER, up_fbo);
+            p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, up_tex, 0);
+            up_w = w; up_h = h;
+        } else p_glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, tmp);
+        p_glBindFramebuffer(GL_READ_FRAMEBUFFER, up_fbo);
+        p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo);
+        p_glDisable(GL_SCISSOR_TEST);
+        p_glBlitFramebuffer(0, 0, w, h, 0, 0, fb_w, fb_h, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+        p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    }
     free(tmp);
 }

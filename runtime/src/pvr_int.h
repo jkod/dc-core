@@ -19,7 +19,8 @@ typedef struct {
     const pvr_vtx *verts; int nverts;
     const pvr_poly *polys; int npolys;
     const pvr_modtri *mods; int nmods;
-    int width, height;                  /* framebuffer written (FB_X/Y_CLIP) */
+    int width, height;                  /* output picture: the display size (FB_R_SIZE), at least the clip */
+    int clip_x0, clip_y0, clip_x1, clip_y1;   /* drawn area, inclusive (FB_X_CLIP / FB_Y_CLIP) */
     int hscale;                         /* scene coordinates are 2x wide (SCALER_CTL) */
     float bg[4], bgz;                   /* background plane colour and depth */
 } pvr_frame;

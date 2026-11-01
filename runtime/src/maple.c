@@ -94,7 +94,7 @@ static int vmu_cmd(int port, int cmd, uint32_t send, int words, uint32_t recv, u
     case CMD_DEVINFO: case CMD_ALLINFO: {
         uint8_t b[192];
         memset(b, 0, sizeof b);
-        uint32_t f[4] = { FUNC_STORAGE | FUNC_LCD | FUNC_CLOCK, 0x7E7E3F40u, 0x00051000u, 0x000F4100u };
+        uint32_t f[4] = { FUNC_STORAGE | FUNC_LCD | FUNC_CLOCK, 0x403F7E7Eu, 0x00100500u, 0x00410F00u };   /* clock, LCD, storage (1 read / write per block) */
         memcpy(b, f, 16);
         b[16] = 0xFF; b[17] = 0;
         put_str(b + 18, "Visual Memory", 30);
@@ -164,6 +164,11 @@ static void reply(uint32_t recv, int cmd, uint32_t to, uint32_t from, const uint
 static int on_maple(int port, uint32_t frame, uint32_t send, int words, uint32_t recv) {
     int cmd = frame & 255;
     uint32_t dest = (frame >> 8) & 255, src = (frame >> 16) & 255;
+    static int trace = -1;                                      /* DC_MAPLE_TRACE=1: commands (polls only when they change) */
+    if (trace < 0) trace = getenv("DC_MAPLE_TRACE") != NULL;
+    if (trace && (cmd != CMD_GETCOND || (dest & 0x1F)))
+        fprintf(stderr, "maple: port %d cmd %d to %02X from %02X words %d func %08X loc %08X\n", port, cmd, dest, src, words,
+                words ? dc_rd32(send) : 0, words > 1 ? dc_rd32(send + 4) : 0);
     if (port < 0 || port > 3 || !dc_pad[port].connected) return 0;
     if ((dest & 0x3F) == 0x01) return vmu[port].data ? vmu_cmd(port, cmd, send, words, recv, src) : 0;
     if ((dest & 0x3F) != 0x20) return 0;                       /* other sub-units (slot 2, rumble): none */
@@ -197,6 +202,7 @@ static int on_maple(int port, uint32_t frame, uint32_t send, int words, uint32_t
         w[1] = (uint32_t)btn | (uint32_t)p->rt << 16 | (uint32_t)p->lt << 24;
         w[2] = (uint32_t)p->jx | (uint32_t)p->jy << 8 | 0x80u << 16 | 0x80u << 24;   /* second stick centred */
         reply(recv, RE_DATA, src, me, w, 3);
+        if (trace) { static uint32_t last; if (w[1] != last) { fprintf(stderr, "maple: pad %d %08X %08X\n", port, w[1], w[2]); last = w[1]; } }
         return 1;
     }
     case CMD_RESET: case CMD_SHUTDOWN:

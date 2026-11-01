@@ -81,6 +81,28 @@ static void read_input(void) {
         #undef JB
     }
 #endif
+    /* debugging: DC_PRESS="field:buttons[:fields],..." holds Dreamcast buttons (DC_BTN_* mask, hex)
+     * from that presented field on, for `fields` fields (default 10); extra bits 16 L trigger,
+     * 17 R trigger, 18 stick left, 19 stick right */
+    {
+        static const char *press = (const char *)1;
+        if (press == (const char *)1) press = getenv("DC_PRESS");
+        for (const char *q = press; q && *q; ) {
+            char *e;
+            unsigned long f = strtoul(q, &e, 0), m = 0, d = 10; q = e;
+            if (*q == ':') { m = strtoul(q + 1, &e, 16); q = e; }
+            if (*q == ':') { d = strtoul(q + 1, &e, 0); q = e; }
+            if (presented >= f && presented < f + d) {
+                b |= (uint16_t)m;
+                if (m & (1ul << 16)) lt = 255;
+                if (m & (1ul << 17)) rt = 255;
+                if (m & (1ul << 18)) jx = 0;
+                if (m & (1ul << 19)) jx = 255;
+            }
+            while (*q && *q != ',') q++;
+            if (*q == ',') q++;
+        }
+    }
     dc_pad[0].buttons = b; dc_pad[0].jx = (uint8_t)jx; dc_pad[0].jy = (uint8_t)jy; dc_pad[0].lt = (uint8_t)lt; dc_pad[0].rt = (uint8_t)rt;
 }
 
@@ -133,6 +155,16 @@ static void on_vblank(uint64_t f) {
     SDL_GL_SwapWindow(win);
     presented++;
     if (cfg.stats && presented % 300 == 0) print_stats();
+    {   /* debugging: DC_SHOTS="every[:dir]" saves the picture every `every` fields as dir/fNNNNN.bmp */
+        static long every = -1; static char dir[512];
+        if (every < 0) {
+            const char *e = getenv("DC_SHOTS"); char *end; every = 0;
+            if (e) { every = strtol(e, &end, 0); snprintf(dir, sizeof dir, "%s", *end == ':' ? end + 1 : "."); }
+        }
+        if (every > 0 && presented % (unsigned long)every == 0) {
+            char path[640]; snprintf(path, sizeof path, "%s/f%05lu.bmp", dir, presented); screenshot_to(path);
+        }
+    }
     if (cfg.exit_after && presented >= cfg.exit_after) {
         if (cfg.shot_path) screenshot_to(cfg.shot_path);
         if (cfg.stats) print_stats();

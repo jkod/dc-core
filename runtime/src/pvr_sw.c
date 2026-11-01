@@ -605,9 +605,21 @@ void pvr_get_frame(pvr_frame *f) {
     ta_ctx = saved;
     uint32_t xc = REG(0x068), yc = REG(0x06C);
     f->hscale = (REG(0x0F4) >> 16) & 1;
-    f->width = (int)((xc >> 16) & 0x7FF) + 1; f->height = (int)((yc >> 16) & 0x3FF) + 1;
-    if (f->width < 16 || f->width > 1280) f->width = 640;
-    if (f->height < 16 || f->height > 1024) f->height = 480;
+    f->clip_x0 = (int)(xc & 0x7FF); f->clip_x1 = (int)((xc >> 16) & 0x7FF);
+    f->clip_y0 = (int)(yc & 0x3FF); f->clip_y1 = (int)((yc >> 16) & 0x3FF);
+    if (f->clip_x1 < 15 || f->clip_x1 >= 1280) { f->clip_x0 = 0; f->clip_x1 = 639; }
+    if (f->clip_y1 < 15 || f->clip_y1 >= 1024) { f->clip_y0 = 0; f->clip_y1 = 479; }
+    if (f->clip_x0 > f->clip_x1) f->clip_x0 = 0;
+    if (f->clip_y0 > f->clip_y1) f->clip_y0 = 0;
+    /* the picture is the display (FB_R_SIZE), which can be larger than the clip: Rush 2049 shows
+     * 640x470 and draws lines 4..443 only */
+    uint32_t ctrl = REG(0x044), size = REG(0x05C);
+    int depth = (ctrl >> 2) & 3, bpp = depth == 0 || depth == 1 ? 2 : depth == 2 ? 3 : 4;
+    int dw = ((int)(size & 0x3FF) + 1) * 4 / bpp, dh = (int)((size >> 10) & 0x3FF) + 1;
+    if ((REG(0x0D0) >> 4) & 1) dh *= 2;                       /* interlaced: both fields */
+    if (dw < 256 || dw > 1280 || dh < 200 || dh > 1024) dw = dh = 0;
+    f->width = dw > f->clip_x1 + 1 ? dw : f->clip_x1 + 1;
+    f->height = dh > f->clip_y1 + 1 ? dh : f->clip_y1 + 1;
     background(f->bg, &f->bgz);
 }
 void pvr_get_texture(uint32_t tcw, uint32_t tsp, pvr_texinfo *ti) {

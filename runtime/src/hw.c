@@ -376,7 +376,7 @@ static void maple_dma(void) {
             int handled = dc_hw.on_maple && dc_hw.on_maple(port, frame, p + 12, words, recv | 0x80000000u);
             if (!handled) dc_wr32(recv | 0x80000000u, 0xFFFFFFFFu);        /* no device on this port */
             p += 12 + (uint32_t)words * 4;
-        } else p += 8;
+        } else p += 4;                         /* NOP, reset, light-gun modes: a single word */
         if (hdr >> 31) break;
     }
     SBR(0x6C18) = 0;

@@ -127,8 +127,10 @@ int main(void) {
         CHECK(dc_vmu_attach(0, vp) == 0);
         CHECK(dc_vmu_data(0)[255 * 512] == 0x55 && dc_vmu_data(0)[254 * 512 + 241 * 2] == 0xFA);
         uint32_t loc = 0u | 1u << 8 | 0u << 16 | 5u << 24;                         /* partition 0, phase 1, block 5 */
-        uint32_t r1 = 0x8C330800u, r2 = 0x8C330A00u, r3 = 0x8C330C00u, r4 = 0x8C331000u, q = ml;
+        uint32_t r1 = 0x8C330800u, r2 = 0x8C330A00u, r3 = 0x8C330C00u, r4 = 0x8C331000u, r5 = 0x8C331400u, q = ml;
         dc_wr32(q, 0); dc_wr32(q + 4, r1); dc_wr32(q + 8, 0x00002001u); q += 12;                       /* DEVINFO main */
+        dc_wr32(q, 0x700); dc_wr32(q + 4, 0x700); dc_wr32(q + 8, 0x700); q += 12;                     /* 3 NOPs: one word each (Rush 2049) */
+        dc_wr32(q, 0); dc_wr32(q + 4, r5); dc_wr32(q + 8, 0x00000101u); q += 12;                       /* DEVINFO VMU */
         dc_wr32(q, 1); dc_wr32(q + 4, r2); dc_wr32(q + 8, 0x0100010Au); dc_wr32(q + 12, 0x02000000u); q += 16;   /* GETMINFO */
         dc_wr32(q, 34); dc_wr32(q + 4, r3); dc_wr32(q + 8, 0x2200010Cu); dc_wr32(q + 12, 0x02000000u); dc_wr32(q + 16, loc);
         for (int i = 0; i < 32; i++) dc_wr32(q + 20 + i * 4, 0x11223300u + (uint32_t)i);
@@ -136,6 +138,8 @@ int main(void) {
         dc_wr32(q, 0x80000000u | 2); dc_wr32(q + 4, r4); dc_wr32(q + 8, 0x0200010Bu); dc_wr32(q + 12, 0x02000000u); dc_wr32(q + 16, loc & ~0xFF00u);
         dc_wr32(0xA05F6C04u, ml); dc_wr32(0xA05F6C18u, 1);
         CHECK(((dc_rd32(r1) >> 16) & 0xFF) == 0x21);                   /* controller reports the VMU */
+        CHECK((dc_rd32(r5) & 0xFF) == 5 && dc_rd32(r5 + 4) == 0x0E000000u);   /* VMU found after the NOPs */
+        CHECK(dc_rd32(r5 + 8) == 0x403F7E7Eu && dc_rd32(r5 + 16) == 0x00410F00u);   /* clock ... storage data */
         CHECK((dc_rd32(r2) & 0xFF) == 8 && (dc_rd32(r2 + 12) >> 16) == 254 && (dc_rd32(r2 + 24) & 0xFFFF) == 200);
         CHECK((dc_rd32(r3) & 0xFF) == 7 && ((dc_rd32(r3) >> 16) & 0xFF) == 0x01);
         CHECK((dc_rd32(r4) & 0xFF) == 8 && (dc_rd32(r4) >> 24) == 130 && dc_rd32(r4 + 8) == (loc & ~0xFF00u));
