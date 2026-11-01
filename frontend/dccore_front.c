@@ -23,6 +23,7 @@ static SDL_Joystick *joy;
 #endif
 static dc_front_config cfg;
 static unsigned long presented, renders, last_render_frame;
+static int need_present = 1;
 static uint64_t vblanks;
 static Uint64 t0_count; static uint64_t t0_cycles; static int paced;
 
@@ -35,6 +36,7 @@ static void on_render(void) {
     if (from == -2) { const char *e = getenv("DC_RENDER_FROM"); from = e ? atol(e) : -1; }
     if (skip > 1 && (from < 0 || (long)presented < from) && renders % (unsigned long)skip) { renders++; last_render_frame = (unsigned long)vblanks; return; }
     dc_pvr_gl_render(cfg.scale);
+    need_present = 1;
     renders++; last_render_frame = (unsigned long)vblanks;
 }
 
@@ -134,6 +136,7 @@ static void events(void) {
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
         if (e.type == SDL_QUIT) { dc_front_close(); exit(0); }
+        if (e.type == SDL_WINDOWEVENT) need_present = 1;
         if (e.type == SDL_KEYDOWN && !e.key.repeat) {
             if (e.key.keysym.sym == SDLK_ESCAPE) { dc_front_close(); exit(0); }
             if (e.key.keysym.sym == SDLK_F11) {
@@ -175,11 +178,14 @@ static void on_vblank(uint64_t f) {
     vblanks = f;
     if (vblanks - last_render_frame > 3) {                 /* nothing drawn by the PVR: show the framebuffer */
         static uint8_t rgb[1280 * 1024 * 3]; int w, h;
-        if (dc_pvr_display(rgb, 1280, 1024, &w, &h) == 0) dc_pvr_gl_load_rgb(rgb, w, h);
+        if (dc_pvr_display(rgb, 1280, 1024, &w, &h) == 0) { dc_pvr_gl_load_rgb(rgb, w, h); need_present = 1; }
     }
-    int dw, dh; SDL_GL_GetDrawableSize(win, &dw, &dh);
-    dc_pvr_gl_present(dw, dh, 0);
-    SDL_GL_SwapWindow(win);
+    if (need_present) {                                    /* only when the picture changed (or the window) */
+        int dw, dh; SDL_GL_GetDrawableSize(win, &dw, &dh);
+        dc_pvr_gl_present(dw, dh, 0);
+        SDL_GL_SwapWindow(win);
+        need_present = 0;
+    }
     presented++;
     if (cfg.stats && presented % 300 == 0) print_stats();
     {   /* debugging: DC_SHOTS="every[:dir]" saves the picture every `every` fields as dir/fNNNNN.bmp */
