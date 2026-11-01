@@ -31,7 +31,9 @@ static void *getproc(const char *n) { return SDL_GL_GetProcAddress(n); }
 static void on_render(void) {
     static long skip = -1;                                 /* debugging: DC_RENDER_EVERY=n draws every nth frame */
     if (skip < 0) { const char *e = getenv("DC_RENDER_EVERY"); skip = e ? atol(e) : 1; if (skip < 1) skip = 1; }
-    if (skip > 1 && renders % (unsigned long)skip) { renders++; last_render_frame = (unsigned long)vblanks; return; }
+    static long from = -2;                                 /* DC_RENDER_FROM=field: draw every frame from then on */
+    if (from == -2) { const char *e = getenv("DC_RENDER_FROM"); from = e ? atol(e) : -1; }
+    if (skip > 1 && (from < 0 || (long)presented < from) && renders % (unsigned long)skip) { renders++; last_render_frame = (unsigned long)vblanks; return; }
     dc_pvr_gl_render(cfg.scale);
     renders++; last_render_frame = (unsigned long)vblanks;
 }
