@@ -27,7 +27,13 @@ void  dc_set_miss_handler(dc_miss_fn f);
 void  dc_set_trap_handler(dc_trap_fn f);
 void  dc_set_call_hook(dc_call_hook f);          /* sees every dc_call (tracing/profiling) */
 void  dc_set_hw(const dc_hw_ops *ops);
-extern uint32_t dc_call_cost;                   /* cycles charged per dispatched call (default 40) */
+extern uint32_t dc_call_cost;
+/* Interpreter fallback: an address with no recompiled code is interpreted instead of reaching the
+ * miss handler (which then only sees jumps into data). dc_interp_all interprets everything but
+ * HLE functions (env DC_INTERP_ALL=1, for checking the recompiler); DC_INTERP=0 turns it off.
+ * The notify callback sees each interpreted address once. */
+extern int dc_interp_enabled, dc_interp_all;
+void  dc_set_interp_notify(dc_miss_fn f);                   /* cycles charged per dispatched call (default 40) */
 
 #ifdef __cplusplus
 }

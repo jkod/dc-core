@@ -96,14 +96,48 @@ static sh4fn lookup_table(uint32_t addr) {
     return NULL;
 }
 
+/* ---- interpreter fallback (interp.c) ---- */
+extern int dc_interp_enabled, dc_interp_all;
+uint32_t dc_interp(sh4ctx *c, uint32_t pc);
+static dc_miss_fn interp_notify;
+void dc_set_interp_notify(dc_miss_fn f) { interp_notify = f; }
+/* first time an address is interpreted: say so (once), so it can be added to the function list */
+static void note_interp(sh4ctx *c, uint32_t addr) {
+    static uint32_t seen[4096]; static int nseen;
+    uint32_t k = (addr >> 1) * 2654435761u >> 20;
+    for (int i = 0; i < 4096; i++) {
+        uint32_t *e = &seen[(k + (uint32_t)i) & 4095];
+        if (*e == addr) return;
+        if (!*e) { if (nseen < 3500) { *e = addr; nseen++; } break; }
+    }
+    fprintf(stderr, "dc-core: interpreting %08X (no recompiled code; pr=%08X)\n", addr, c->pr);
+    if (interp_notify) interp_notify(c, addr);
+}
+/* the interpreter met an instruction that does not exist: a jump into data */
+void dc_interp_illegal(sh4ctx *c, uint32_t pc) {
+    if (miss_handler) { miss_handler(c, pc); return; }
+    fprintf(stderr, "dc-core: illegal instruction %04X at %08X (pr=%08X)\n", dc_rd16(pc), pc, c->pr);
+    abort();
+}
+static sh4fn lookup_hle(uint32_t addr) {
+    addr = (addr & 0x1FFFFFFFu) | 0x80000000u;
+    for (int i = 0; i < hle_n; i++) if (hle[i].addr == addr) return hle[i].fn;
+    return NULL;
+}
+
 void dc_call(sh4ctx *c, uint32_t addr) {
     while (addr) {
         DC_TICK(c, dc_call_cost);
         if (call_hook) call_hook(c, addr);
-        sh4fn f = dc_lookup(addr);
-        if (!f && img_end && ((addr & 0x1FFFFFFFu) | 0x80000000u) - img_base >= img_end - img_base) {
+        sh4fn f = dc_interp_all ? lookup_hle(addr) : dc_lookup(addr);
+        if (!f && !dc_interp_all && img_end && ((addr & 0x1FFFFFFFu) | 0x80000000u) - img_base >= img_end - img_base) {
             uint32_t src = auto_alias((addr & 0x1FFFFFFFu) | 0x80000000u);
             if (src) { f = dc_lookup(addr); if (!f) addr = src; }   /* report the image address */
+        }
+        if (!f && dc_interp_enabled) {
+            if (!dc_interp_all) note_interp(c, addr);
+            addr = dc_interp(c, addr);
+            continue;
         }
         if (!f) {
             if (miss_handler) { miss_handler(c, addr); return; }
@@ -149,4 +183,6 @@ void dc_init(sh4ctx *c) {
     c->sr_rest = 0x700000F0u;           /* MD=1 RB=1 BL=1 IMASK=15 */
     c->fpscr = 0x00040001u;             /* DN=1, RM=nearest, PR=0 SZ=0 FR=0 */
     c->vbr = 0x8C00F400u;
+    { const char *e = getenv("DC_INTERP_ALL"); if (e && *e == '1') dc_interp_all = 1; }
+    { const char *e = getenv("DC_INTERP"); if (e && *e == '0') dc_interp_enabled = 0; }
 }

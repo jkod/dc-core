@@ -147,6 +147,13 @@ t("coro_setjmp_threads", {
   "dc_wr32(0x8C100100u, 0x8C0F0000u); dc_wr32(0x8C100104u, %du); dc_wr32(0x8C100200u, 0);"
   "dc_coro_install(%du, %du, 0);" % (T, S, L),
   "c.r[0] == 3 && dc_coro_count() == 1")
+# code outside the executable that nothing recompiled (built at run time): interpreted
+#   main: mov.l @(lit),r1 ; jsr @r1 ; nop ; rts ; nop ; (lit = 0x8C200000)
+#   at 0x8C200000 (written by setup): mov #42,r0 ; add #1,r0 ; rts ; add r0,r0   -> 86
+t("interp_runtime_code", {0: [0xD102, 0x410B, 0x0009, 0x000B, 0x0009, 0x0009, 0x0000, 0x8C20]},
+  "{ static const uint16_t code[] = { 0xE02A, 0x7001, 0x000B, 0x300C }; memcpy(dc_ram + 0x200000, code, sizeof code); }",
+  "c.r[0] == 86")
+
 EXTRA = {"coro_setjmp_threads": ["--setjmp", hex(S)]}
 
 def build_bin(prog):
