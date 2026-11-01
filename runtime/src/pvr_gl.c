@@ -148,12 +148,36 @@ static void GLAPIENTRY_ on_gl_debug(GLenum src, GLenum type, GLuint id, GLenum s
     fflush(dbg_log);
     if (++dbg_count == 400) fprintf(dbg_log, "(more messages suppressed)\n");
 }
+static void (*p_getteximage)(GLenum, GLint, GLenum, GLenum, void *);
+static int dbg_tex_checked, dbg_tex_bad;
+/* debug: read the texture just uploaded back from the GPU and compare (first 300 uploads) */
+static void verify_upload(const pvr_texinfo *ti, uint32_t tcw, uint32_t tsp) {
+    if (!p_getteximage || dbg_tex_checked >= 300) return;
+    size_t n = (size_t)ti->w * ti->h;
+    uint32_t *back = malloc(n * 4);
+    if (!back) return;
+    memset(back, 0xCD, n * 4);
+    p_getteximage(0x0DE1 /* TEXTURE_2D */, 0, 0x80E1 /* BGRA */, 0x1401 /* UNSIGNED_BYTE */, back);
+    size_t bad = 0, first = 0;
+    for (size_t i = 0; i < n; i++) if (back[i] != ti->px[i]) { if (!bad) first = i; bad++; }
+    dbg_tex_checked++;
+    if (bad) {
+        dbg_tex_bad++;
+        fprintf(dbg_log, "texture %dx%d tcw %08X tsp %08X: %zu of %zu texels differ, first at (%d,%d): sent %08X got %08X\n",
+                ti->w, ti->h, tcw, tsp, bad, n, (int)(first % ti->w), (int)(first / ti->w), ti->px[first], back[first]);
+    }
+    if (dbg_tex_checked == 300 || (bad && dbg_tex_bad <= 3) || dbg_tex_checked % 50 == 0)
+        fprintf(dbg_log, "textures checked %d, differing %d\n", dbg_tex_checked, dbg_tex_bad);
+    fflush(dbg_log);
+    free(back);
+}
 static void gl_debug_init(void *(*getproc)(const char *)) {
     const char *e = getenv("DC_GL_DEBUG");
     if (!e || *e != '1') return;
     dbg_log = fopen("dc_gl_debug.txt", "w");
     if (!dbg_log) return;
     const GLubyte *(*getstr)(GLenum) = (const GLubyte *(*)(GLenum))getproc("glGetString");
+    p_getteximage = (void (*)(GLenum, GLint, GLenum, GLenum, void *))getproc("glGetTexImage");
     if (getstr) fprintf(dbg_log, "GL_VENDOR %s\nGL_RENDERER %s\nGL_VERSION %s\nGLSL %s\n", getstr(0x1F00), getstr(0x1F01), getstr(0x1F02), getstr(0x8B8C));
     void (*cb)(gl_debug_cb, const void *) = (void (*)(gl_debug_cb, const void *))getproc("glDebugMessageCallback");
     void (*en)(GLenum) = (void (*)(GLenum))getproc("glEnable");
@@ -324,6 +348,7 @@ static GLuint texture_for(uint32_t tcw, uint32_t tsp) {
     if (dc_pvr_gl_mipmaps) p_glGenerateMipmap(GL_TEXTURE_2D);
     gtex[slot].mips = dc_pvr_gl_mipmaps;
     gtex[slot].id = ti.id; gtex[slot].name = n; gtex[slot].last = frame_no;
+    if (dbg_log) verify_upload(&ti, tcw, tsp);
     return n;
 }
 
@@ -410,6 +435,9 @@ static void batch_add(const pvr_poly *p, int set, int mark, int blend, int first
         if (blend) p_glBlendFunc(blend_src((p->tsp >> 29) & 7), blend_dst((p->tsp >> 26) & 7));
         B.key = k; B.valid = 1;
     }
+    static int nobatch = -1;                       /* DC_GL_NOBATCH=1: one draw call per polygon (diagnosis) */
+    if (nobatch < 0) { const char *e = getenv("DC_GL_NOBATCH"); nobatch = e && *e == '1'; }
+    if (nobatch) { p_glDrawArrays(GL_TRIANGLES, first, count); return; }
     if (B.n && B.first[B.n - 1] + B.count[B.n - 1] == first) { B.count[B.n - 1] += count; return; }   /* contiguous */
     if (B.n == B.cap) { B.cap = B.cap ? B.cap * 2 : 256; B.first = realloc(B.first, B.cap * sizeof *B.first); B.count = realloc(B.count, B.cap * sizeof *B.count); }
     B.first[B.n] = first; B.count[B.n] = count; B.n++;
