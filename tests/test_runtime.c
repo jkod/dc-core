@@ -182,6 +182,40 @@ int main(void) {
     maxv = 0; for (int i = 0; i < got; i++) { int v = au[i * 2] < 0 ? -au[i * 2] : au[i * 2]; if (v > maxv) maxv = v; }
     CHECK(maxv > 500 && maxv <= 16384);
 
+    /* 10. effects DSP: channel -> MIXS0 -> 100-sample delay in the ring buffer -> EFREG0 */
+    {
+        CH0(5, 0x3C00 | 31); CH0(0, 0x8000 | 0x01);                       /* ADPCM voice off */
+        for (int k = 51; k <= 60; k++) dc_aica_advance(t0 + (uint64_t)k * 200000000ull / 44100 * 50);
+        { int16_t junk[2048]; while (dc_aica_audio_read(junk, 1024) > 0) {} }
+        #define AR(o, v) dc_wr32(0xA0700000u + (o), (v))
+        #define STEP(st, w0, w1, w2, w3) do { AR(0x3400 + (st) * 16, w0); AR(0x3404 + (st) * 16, w1); AR(0x3408 + (st) * 16, w2); AR(0x340C + (st) * 16, w3); } while (0)
+        AR(0x3000, 0x0FFFu << 3);                                         /* COEF0 ~ 1.0 */
+        AR(0x3200, 0); AR(0x3204, 100);                                   /* MADRS0 = 0, MADRS1 = 100 */
+        AR(0x2804, 0x100);                                                /* ring buffer at 0x80000, 8K words */
+        STEP(0, 0, 1u << 15 | 1u << 13 | 0x20u << 7, 1u << 1, 0);                                   /* ACC = MIXS0 * COEF0 */
+        STEP(1, 0, 0, 1u << 14, 1u << 15 | 0u << 2);                                                 /* write ring[dec] (NOFL) */
+        STEP(3, 0, 0, 1u << 13, 1u << 15 | 1u << 2);                                                 /* MEMVAL = ring[dec+100] */
+        STEP(4, 0, 1u << 15 | 1u << 13 | 0u << 7 | 1u << 6 | 0u << 1, 1u << 1, 0);                   /* MEMS0 = MEMVAL; ACC = it * COEF0 */
+        STEP(5, 0, 0, 1u << 12 | 0u << 8, 0);                                                         /* EFREG0 = ACC */
+        AR(0x2000, 15u << 8);                                             /* EFSDL 15, centre */
+        #define CH1(r, v) dc_wr32(0xA0700080u + (r) * 4, (v))
+        CH1(1, 0x0000); CH1(2, 0); CH1(3, 200); CH1(4, 31); CH1(5, 0x3C00); CH1(6, 0);
+        CH1(8, 15u << 4 | 0);                                             /* IMXL 15 -> MIXS0 */
+        CH1(9, 0); CH1(10, 0);                                            /* DISDL 0: dry signal muted */
+        uint64_t t1 = c.cycles + 100000000ull;
+        dc_aica_advance(t1);
+        { int16_t junk[2048]; while (dc_aica_audio_read(junk, 1024) > 0) {} }
+        CH1(0, 0xC000 | (1 << 9) | 0x01);                                 /* key on: PCM16 square, period 200 */
+        for (int k = 1; k <= 20; k++) dc_aica_advance(t1 + (uint64_t)k * 200000000ull / 44100 * 50);
+        got = dc_aica_audio_read(au, 4096);
+        int first = -1; maxv = 0;
+        for (int i = 0; i < got; i++) { int v = au[i * 2] < 0 ? -au[i * 2] : au[i * 2]; if (v > 100 && first < 0) first = i; if (v > maxv) maxv = v; }
+        CHECK(got > 500 && first >= 99 && first <= 102);                  /* silent until the delay elapses */
+        CHECK(maxv > 7000 && maxv < 9000);                                /* full level through the DSP */
+        CHECK(dc_aica_dsp_active());
+        CH1(5, 0x3C00 | 31); CH1(0, 0x8000 | 0x01);
+    }
+
     printf(fails ? "%d runtime test(s) FAILED\n" : "runtime tests passed\n", fails);
     return fails != 0;
 }
