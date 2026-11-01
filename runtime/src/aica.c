@@ -56,6 +56,7 @@ typedef struct {
     int eg_state; double att;         /* envelope */
     /* ADPCM */
     int32_t adpcm_sig, adpcm_step; uint32_t adpcm_at;   /* decoded up to this sample */
+    int32_t adpcm_prev;               /* the sample before adpcm_sig (for interpolation) */
     int32_t loop_sig, loop_step; int loop_saved;
     int16_t cur;                      /* last decoded sample */
 } chan_t;
@@ -87,7 +88,7 @@ static void key_on(int c) {
     h->playing = 1; h->pos = 0; h->looped = 0;
     h->eg_state = EG_ATTACK; h->att = 0x3FF;
     if (eff_rate(c, creg(c, 4) & 31) >= 62) h->att = 0;     /* instant attack */
-    h->adpcm_sig = 0; h->adpcm_step = 127; h->adpcm_at = 0; h->loop_saved = 0; h->cur = 0;
+    h->adpcm_sig = 0; h->adpcm_step = 127; h->adpcm_at = 0; h->loop_saved = 0; h->cur = 0; h->adpcm_prev = 0;
 }
 static void key_execute(void) {
     for (int c = 0; c < 64; c++) {
@@ -133,26 +134,42 @@ static void adpcm_one(chan_t *h, int nib) {
     if (h->adpcm_step < 127) h->adpcm_step = 127; if (h->adpcm_step > 24576) h->adpcm_step = 24576;
 }
 
+/* ADPCM: decode forward so that adpcm_sig is sample t and adpcm_prev sample t-1 (state restored at
+ * the loop start when the position jumps back) */
+static void adpcm_to(chan_t *h, uint32_t sa, uint32_t lsa, uint32_t t) {
+    if (h->adpcm_at == t + 1) return;                          /* already there (pitch < 1) */
+    if (t < h->adpcm_at) {                                     /* jumped back: loop */
+        if (h->loop_saved && t >= lsa) { h->adpcm_sig = h->loop_sig; h->adpcm_step = h->loop_step; h->adpcm_at = lsa; }
+        else { h->adpcm_sig = 0; h->adpcm_step = 127; h->adpcm_at = 0; }
+        h->adpcm_prev = h->adpcm_sig;
+    }
+    while (h->adpcm_at <= t) {
+        if (h->adpcm_at == lsa && !h->loop_saved) { h->loop_sig = h->adpcm_sig; h->loop_step = h->adpcm_step; h->loop_saved = 1; }
+        uint8_t b = dc_aram[(sa + (h->adpcm_at >> 1)) & 0x1FFFFF];
+        h->adpcm_prev = h->adpcm_sig;
+        adpcm_one(h, (h->adpcm_at & 1) ? b >> 4 : b & 15);
+        h->adpcm_at++;
+    }
+}
+
+/* the channel's output at its fractional position: linear interpolation between neighbouring
+ * samples, as the AICA does */
 static int16_t fetch(int c) {
     chan_t *h = &ch[c];
     uint32_t r0 = creg(c, 0), sa = ((r0 & 0x7F) << 16) | creg(c, 1), fmt = (r0 >> 7) & 3;
     uint32_t i = (uint32_t)h->pos;
-    if (fmt == 0) { int16_t v; memcpy(&v, dc_aram + ((sa + i * 2) & 0x1FFFFE), 2); return v; }
-    if (fmt == 1) return (int16_t)((int8_t)dc_aram[(sa + i) & 0x1FFFFF] << 8);
-    /* ADPCM: decode forward up to sample i (state restored at the loop start) */
-    uint32_t lsa = creg(c, 2);
-    if (h->adpcm_at && i == h->adpcm_at - 1) return (int16_t)h->adpcm_sig;   /* same sample again (pitch < 1) */
-    if (i < h->adpcm_at) {                                     /* jumped back: loop */
-        if (h->loop_saved && i >= lsa) { h->adpcm_sig = h->loop_sig; h->adpcm_step = h->loop_step; h->adpcm_at = lsa; }
-        else { h->adpcm_sig = 0; h->adpcm_step = 127; h->adpcm_at = 0; }
+    double fr = h->pos - (double)i;
+    int32_t s0, s1;
+    if (fmt == 0) {
+        int16_t a, b; memcpy(&a, dc_aram + ((sa + i * 2) & 0x1FFFFE), 2); memcpy(&b, dc_aram + ((sa + i * 2 + 2) & 0x1FFFFE), 2);
+        s0 = a; s1 = b;
+    } else if (fmt == 1) {
+        s0 = (int8_t)dc_aram[(sa + i) & 0x1FFFFF] << 8; s1 = (int8_t)dc_aram[(sa + i + 1) & 0x1FFFFF] << 8;
+    } else {
+        adpcm_to(h, sa, creg(c, 2), i + 1);
+        s0 = h->adpcm_prev; s1 = h->adpcm_sig;
     }
-    while (h->adpcm_at <= i) {
-        if (h->adpcm_at == lsa && !h->loop_saved) { h->loop_sig = h->adpcm_sig; h->loop_step = h->adpcm_step; h->loop_saved = 1; }
-        uint8_t b = dc_aram[(sa + (h->adpcm_at >> 1)) & 0x1FFFFF];
-        adpcm_one(h, (h->adpcm_at & 1) ? b >> 4 : b & 15);
-        h->adpcm_at++;
-    }
-    return (int16_t)h->adpcm_sig;
+    return (int16_t)(s0 + (int32_t)((double)(s1 - s0) * fr));
 }
 
 static void advance_channels(void) {
