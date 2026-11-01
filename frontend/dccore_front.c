@@ -192,7 +192,7 @@ static void on_vblank(uint64_t f) {
         if (cfg.stats) print_stats();
         dc_front_close(); exit(0);
     }
-    if (audio || wav_file()) {
+    if (wav_file() || audio) {
         static int16_t buf[4096 * 2];
         int n;
         while ((n = dc_aica_audio_read(buf, 4096)) > 0) {
