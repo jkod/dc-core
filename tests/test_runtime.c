@@ -220,6 +220,22 @@ int main(void) {
         CH1(5, 0x3C00 | 31); CH1(0, 0x8000 | 0x01);
     }
 
+    /* 10b. ADPCM at half pitch: each decoded sample twice (and no re-decode from the loop start) */
+    {
+        for (int i = 0; i < 0x4000; i++) dc_wr8(0xA0840000u + i, (uint8_t)(i * 37 + (i >> 3)));
+        #define CH2(r, v) dc_wr32(0xA0700100u + (r) * 4, (v))
+        CH2(1, 0x0000); CH2(2, 0x1000); CH2(3, 0x7000); CH2(4, 31); CH2(5, 0x3C00); CH2(6, 0xF800); CH2(8, 0); CH2(9, 15 << 8); CH2(10, 0);
+        uint64_t t2 = c.cycles + 300000000ull;
+        dc_aica_advance(t2);
+        { int16_t junk[2048]; while (dc_aica_audio_read(junk, 1024) > 0) {} }
+        CH2(0, 0xC000 | (1 << 9) | (2 << 7) | 0x04);          /* ADPCM at 0x40000, loop */
+        for (int k = 1; k <= 10; k++) dc_aica_advance(t2 + (uint64_t)k * 200000000ull / 44100 * 50);
+        got = dc_aica_audio_read(au, 4096);
+        int pairs = 0, nonzero = 0;
+        for (int i = 20; i + 1 < got; i += 2) { if (au[i * 2] == au[i * 2 + 2]) pairs++; if (au[i * 2]) nonzero++; }
+        CHECK(got > 400 && nonzero > got / 8 && pairs > got / 2 - 20);
+        CH2(5, 0x3C00 | 31); CH2(0, 0x8000 | 0x04);
+    }
     /* 11. boot ROM: its system area is copied to RAM (games checksum it), vectors stay HLE */
     {
         static uint8_t rom[0x200000];

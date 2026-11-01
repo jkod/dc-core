@@ -141,6 +141,7 @@ static int16_t fetch(int c) {
     if (fmt == 1) return (int16_t)((int8_t)dc_aram[(sa + i) & 0x1FFFFF] << 8);
     /* ADPCM: decode forward up to sample i (state restored at the loop start) */
     uint32_t lsa = creg(c, 2);
+    if (h->adpcm_at && i == h->adpcm_at - 1) return (int16_t)h->adpcm_sig;   /* same sample again (pitch < 1) */
     if (i < h->adpcm_at) {                                     /* jumped back: loop */
         if (h->loop_saved && i >= lsa) { h->adpcm_sig = h->loop_sig; h->adpcm_step = h->loop_step; h->adpcm_at = lsa; }
         else { h->adpcm_sig = 0; h->adpcm_step = 127; h->adpcm_at = 0; }
