@@ -143,6 +143,28 @@ static void events(void) {
     read_input();
 }
 
+/* debugging: DC_WAV=file.wav records everything the AICA outputs (44.1 kHz stereo) */
+static FILE *wav; static uint32_t wav_frames;
+static void wav_close(void) {
+    if (!wav) return;
+    uint32_t data = wav_frames * 4, riff = 36 + data;
+    fseek(wav, 4, SEEK_SET); fwrite(&riff, 4, 1, wav);
+    fseek(wav, 40, SEEK_SET); fwrite(&data, 4, 1, wav);
+    fclose(wav); wav = NULL;
+}
+static FILE *wav_file(void) {
+    static int tried;
+    if (tried) return wav;
+    tried = 1;
+    const char *p = getenv("DC_WAV");
+    if (!p || !(wav = fopen(p, "wb"))) return NULL;
+    static const uint8_t hdr[44] = { 'R','I','F','F', 0,0,0,0, 'W','A','V','E', 'f','m','t',' ', 16,0,0,0, 1,0, 2,0,
+                                     0x44,0xAC,0,0, 0x10,0xB1,0x02,0, 4,0, 16,0, 'd','a','t','a', 0,0,0,0 };
+    fwrite(hdr, 1, 44, wav);
+    atexit(wav_close);
+    return wav;
+}
+
 /* ------------------------------------------------------------------ per field */
 static void on_vblank(uint64_t f) {
     vblanks = f;
@@ -170,11 +192,13 @@ static void on_vblank(uint64_t f) {
         if (cfg.stats) print_stats();
         dc_front_close(); exit(0);
     }
-    if (audio) {
+    if (audio || wav_file()) {
         static int16_t buf[4096 * 2];
         int n;
-        while ((n = dc_aica_audio_read(buf, 4096)) > 0)
-            if (SDL_GetQueuedAudioSize(audio) < 44100 * 4 / 5) SDL_QueueAudio(audio, buf, (Uint32)n * 4);   /* keep < 0.2 s queued */
+        while ((n = dc_aica_audio_read(buf, 4096)) > 0) {
+            if (wav) { fwrite(buf, 4, (size_t)n, wav); wav_frames += (uint32_t)n; }
+            if (audio && SDL_GetQueuedAudioSize(audio) < 44100 * 4 / 5) SDL_QueueAudio(audio, buf, (Uint32)n * 4);   /* keep < 0.2 s queued */
+        }
     }
     events();
     /* pacing: emulated SH-4 time (200 MHz) against the wall clock */
@@ -244,6 +268,7 @@ int dc_front_open(const dc_front_config *c) {
 }
 
 void dc_front_close(void) {
+    wav_close();
     if (pad) SDL_GameControllerClose(pad);
 #ifdef __SWITCH__
     if (joy) SDL_JoystickClose(joy);
