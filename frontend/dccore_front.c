@@ -35,7 +35,13 @@ static void on_render(void) {
     static long from = -2;                                 /* DC_RENDER_FROM=field: draw every frame from then on */
     if (from == -2) { const char *e = getenv("DC_RENDER_FROM"); from = e ? atol(e) : -1; }
     if (skip > 1 && (from < 0 || (long)presented < from) && renders % (unsigned long)skip) { renders++; last_render_frame = (unsigned long)vblanks; return; }
-    dc_pvr_gl_render(cfg.scale);
+    static int sw = -1;                                    /* DC_SW_RENDER=1: software renderer (diagnosing GPU issues) */
+    if (sw < 0) { const char *e = getenv("DC_SW_RENDER"); sw = e && *e == '1'; }
+    if (sw) {
+        static uint8_t rgb[1280 * 1024 * 3]; int w, h;
+        dc_pvr_sw_render();
+        if (dc_pvr_display(rgb, 1280, 1024, &w, &h) == 0) dc_pvr_gl_load_rgb(rgb, w, h);
+    } else dc_pvr_gl_render(cfg.scale);
     need_present = 1;
     renders++; last_render_frame = (unsigned long)vblanks;
 }
