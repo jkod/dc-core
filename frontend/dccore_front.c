@@ -243,9 +243,12 @@ int dc_front_open(const dc_front_config *c) {
     }
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3); SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+    { int fl = 0; const char *e = getenv("DC_GL_DEBUG");
 #ifdef __APPLE__
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG);
+      fl |= SDL_GL_CONTEXT_FORWARD_COMPATIBLE_FLAG;
 #endif
+      if (e && *e == '1') fl |= SDL_GL_CONTEXT_DEBUG_FLAG;
+      if (fl) SDL_GL_SetAttribute(SDL_GL_CONTEXT_FLAGS, fl); }
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24); SDL_GL_SetAttribute(SDL_GL_STENCIL_SIZE, 8);
     win = SDL_CreateWindow(cfg.title ? cfg.title : "dc-core", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, cfg.width, cfg.height,
                            SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | (cfg.fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0));

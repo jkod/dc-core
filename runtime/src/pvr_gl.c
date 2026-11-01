@@ -25,7 +25,7 @@
 
 /* ------------------------------------------------------------------ minimal GL binding */
 typedef unsigned int GLenum, GLuint, GLbitfield; typedef int GLint, GLsizei; typedef float GLfloat;
-typedef unsigned char GLboolean; typedef char GLchar; typedef ptrdiff_t GLsizeiptr; typedef double GLdouble;
+typedef unsigned char GLboolean, GLubyte; typedef char GLchar; typedef ptrdiff_t GLsizeiptr; typedef double GLdouble;
 #define GL_FALSE 0
 #define GL_TRUE 1
 #define GL_TRIANGLES 0x0004
@@ -132,6 +132,36 @@ typedef unsigned char GLboolean; typedef char GLchar; typedef ptrdiff_t GLsizeip
 GLFUNCS
 #undef F
 
+/* DC_GL_DEBUG=1: the driver's own messages (and the GL in use) go to dc_gl_debug.txt in the
+ * current folder, for reports from machines we cannot test on */
+#ifdef _WIN32
+#define GLAPIENTRY_ __stdcall
+#else
+#define GLAPIENTRY_
+#endif
+typedef void (GLAPIENTRY_ *gl_debug_cb)(GLenum, GLenum, GLuint, GLenum, GLsizei, const GLchar *, const void *);
+static FILE *dbg_log; static int dbg_count;
+static void GLAPIENTRY_ on_gl_debug(GLenum src, GLenum type, GLuint id, GLenum sev, GLsizei len, const GLchar *msg, const void *user) {
+    (void)len; (void)user;
+    if (!dbg_log || dbg_count >= 400) return;
+    fprintf(dbg_log, "[src %04X type %04X id %u sev %04X] %s\n", src, type, id, sev, msg);
+    fflush(dbg_log);
+    if (++dbg_count == 400) fprintf(dbg_log, "(more messages suppressed)\n");
+}
+static void gl_debug_init(void *(*getproc)(const char *)) {
+    const char *e = getenv("DC_GL_DEBUG");
+    if (!e || *e != '1') return;
+    dbg_log = fopen("dc_gl_debug.txt", "w");
+    if (!dbg_log) return;
+    const GLubyte *(*getstr)(GLenum) = (const GLubyte *(*)(GLenum))getproc("glGetString");
+    if (getstr) fprintf(dbg_log, "GL_VENDOR %s\nGL_RENDERER %s\nGL_VERSION %s\nGLSL %s\n", getstr(0x1F00), getstr(0x1F01), getstr(0x1F02), getstr(0x8B8C));
+    void (*cb)(gl_debug_cb, const void *) = (void (*)(gl_debug_cb, const void *))getproc("glDebugMessageCallback");
+    void (*en)(GLenum) = (void (*)(GLenum))getproc("glEnable");
+    if (cb && en) { en(0x92E0 /* DEBUG_OUTPUT */); en(0x8242 /* DEBUG_OUTPUT_SYNCHRONOUS */); cb(on_gl_debug, NULL); fprintf(dbg_log, "debug output on\n"); }
+    else fprintf(dbg_log, "no glDebugMessageCallback\n");
+    fflush(dbg_log);
+}
+
 /* ------------------------------------------------------------------ shaders */
 static const char *vs_src =
 "#version 330 core\n"
@@ -226,6 +256,7 @@ int dc_pvr_gl_init(void *(*getproc)(const char *)) {
     GLFUNCS
 #undef F
     if (missing) return -1;
+    gl_debug_init(getproc);
     prog = p_glCreateProgram();
     p_glAttachShader(prog, compile(GL_VERTEX_SHADER, vs_src));
     p_glAttachShader(prog, compile(GL_FRAGMENT_SHADER, fs_src));
