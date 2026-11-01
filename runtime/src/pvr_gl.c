@@ -171,7 +171,9 @@ static void verify_upload(const pvr_texinfo *ti, uint32_t tcw, uint32_t tsp) {
     fflush(dbg_log);
     free(back);
 }
+static void *(*p_getproc_saved)(const char *);
 static void gl_debug_init(void *(*getproc)(const char *)) {
+    p_getproc_saved = getproc;
     const char *e = getenv("DC_GL_DEBUG");
     if (!e || *e != '1') return;
     dbg_log = fopen("dc_gl_debug.txt", "w");
@@ -445,6 +447,76 @@ static void batch_add(const pvr_poly *p, int set, int mark, int blend, int first
     B.first[B.n] = first; B.count[B.n] = count; B.n++;
 }
 
+
+/* debug (DC_GL_DEBUG): draw a known 4x4 texture through the real shader and read the result back,
+ * at several 1/w depths and filter settings, and log what the driver produced */
+static void gl_selftest(void) {
+    static int done;
+    if (done || !dbg_log || !fbo) return;
+    done = 1;
+    void (*getiv)(GLenum, GLint *) = NULL;
+    uint32_t tx[16];
+    for (int i = 0; i < 16; i++) tx[i] = 0xFF000000u | (uint32_t)(i * 16 + 8) << 16 | (uint32_t)(255 - i * 16) << 8 | (uint32_t)((i & 3) * 80);
+    GLuint t; p_glGenTextures(1, &t); p_glActiveTexture(GL_TEXTURE0); p_glBindTexture(GL_TEXTURE_2D, t);
+    p_glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
+    p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 4, 4, 0, GL_BGRA, GL_UNSIGNED_BYTE, tx);
+    p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    p_glBindFramebuffer(GL_FRAMEBUFFER, fbo); p_glViewport(0, 0, fb_w, fb_h);
+    p_glDisable(GL_SCISSOR_TEST); p_glDisable(GL_DEPTH_TEST); p_glDisable(GL_STENCIL_TEST); p_glDisable(GL_BLEND); p_glDisable(GL_CULL_FACE);
+    p_glColorMask(1, 1, 1, 1);
+    p_glUseProgram(prog);
+    p_glUniform2f(U.scale, 2.f / 640.f, 2.f / 480.f); p_glUniform1f(U.offx, 0);
+    p_glUniform1i(U.tex, 0); p_glUniform1i(U.quad, 0); p_glUniform1i(U.set, 0);
+    p_glUniform1i(U.textured, 1); p_glUniform1i(U.shade, 0); p_glUniform1i(U.use_alpha, 1); p_glUniform1i(U.ign_ta, 0);
+    p_glUniform1i(U.offset, 0); p_glUniform1i(U.gouraud, 1); p_glUniform1i(U.fog, 2); p_glUniform1i(U.pt, 0);
+    static const float zs[4] = { 1.f, 0.01f, 1000.f, -1.f };   /* -1: per-vertex 1/w 0.5 .. 2 (perspective) */
+    const char *names[4] = { "1/w=1", "1/w=0.01", "1/w=1000", "perspective" };
+    uint8_t *px = malloc((size_t)fb_w * fb_h * 4);
+    for (int c = 0; c < 4; c++) {
+        gv q[6]; memset(q, 0, sizeof q);
+        float X[4] = { 0, 64, 0, 64 }, Y[4] = { 0, 0, 64, 64 }, Uu[4] = { 0, 1, 0, 1 }, Vv[4] = { 0, 0, 1, 1 };
+        int idx[6] = { 0, 1, 2, 1, 3, 2 };
+        for (int k = 0; k < 6; k++) {
+            int j = idx[k]; gv *g = &q[k];
+            g->x = X[j]; g->y = Y[j]; g->z = zs[c] > 0 ? zs[c] : (j < 2 ? 0.5f : 2.f);
+            g->u = Uu[j]; g->v = Vv[j]; g->u1 = g->u; g->v1 = g->v;
+            for (int m = 0; m < 4; m++) { g->c[m] = g->c1[m] = 1.f; }
+        }
+        p_glClearColor(1, 0, 1, 1); p_glClear(GL_COLOR_BUFFER_BIT);
+        p_glBindVertexArray(vao); p_glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        p_glBufferData(GL_ARRAY_BUFFER, sizeof q, q, GL_STREAM_DRAW);
+        p_glDrawArrays(GL_TRIANGLES, 0, 6);
+        p_glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        p_glReadPixels(0, 0, fb_w, fb_h, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        int bad = 0;
+        fprintf(dbg_log, "selftest %s:", names[c]);
+        for (int ty = 0; ty < 4; ty++) for (int txi = 0; txi < 4; txi++) {
+            /* centre of texel (txi, ty): PVR x = 8 + 16 txi, y = 8 + 16 ty (perspective: just check order) */
+            int sx = (int)((8 + 16 * txi) * fb_w / 640.f), sy = fb_h - 1 - (int)((8 + 16 * ty) * fb_h / 480.f);
+            const uint8_t *p = px + ((size_t)sy * fb_w + sx) * 4;
+            uint32_t e = tx[ty * 4 + txi], got = (uint32_t)p[0] << 16 | (uint32_t)p[1] << 8 | p[2];
+            int ok = abs((int)((e >> 16) & 255) - p[0]) <= 2 && abs((int)((e >> 8) & 255) - p[1]) <= 2 && abs((int)(e & 255) - p[2]) <= 2;
+            if (c == 3) ok = 1;
+            if (!ok) bad++;
+            fprintf(dbg_log, " %06X%s", got, ok ? "" : (e & 0xFFFFFF) == 0 ? "!" : "*");
+        }
+        fprintf(dbg_log, "  -> %s\n", bad ? "WRONG" : "ok");
+    }
+    /* state the driver reports */
+    getiv = (void (*)(GLenum, GLint *))p_getproc_saved("glGetIntegerv");
+    if (getiv) {
+        GLint v[6] = {0};
+        getiv(0x8069 /* TEXTURE_BINDING_2D */, &v[0]); getiv(0x84E0 /* ACTIVE_TEXTURE */, &v[1]);
+        getiv(0x8B8D /* CURRENT_PROGRAM */, &v[2]); getiv(0x8919 /* SAMPLER_BINDING */, &v[3]);
+        fprintf(dbg_log, "state: texture %d (made %u) active unit %X program %d (ours %u) sampler %d\n", v[0], t, v[1], v[2], prog, v[3]);
+    }
+    fflush(dbg_log);
+    free(px);
+    p_glDeleteTextures(1, &t);
+    p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
 void dc_pvr_gl_render(int scale) {
     if (!ready) return;
     if (scale < 1) scale = 1;
@@ -456,6 +528,7 @@ void dc_pvr_gl_render(int scale) {
      * the game draws beyond the screen edges */
     float WW = dc_pvr_gl_widescreen ? RW * 4.f / 3.f : (float)RW;
     ensure_fbo(dc_pvr_gl_widescreen ? (f.width * scale * 4 + 2) / 3 : f.width * scale, f.height * scale);
+    gl_selftest();
     disp_aspect = dc_pvr_gl_widescreen ? 16.f / 9.f : 4.f / 3.f;
 
     /* geometry: every polygon's triangles, then volume triangles, then a full-screen quad */
