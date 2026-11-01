@@ -9,6 +9,7 @@
 #include <math.h>
 #include <string.h>
 #include <stdlib.h>
+#define SDL_MAIN_HANDLED          /* plain main() on every platform */
 #include <SDL.h>
 
 /* no recompiled game: empty function table */
