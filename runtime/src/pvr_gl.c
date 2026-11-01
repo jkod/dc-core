@@ -525,6 +525,49 @@ static void gl_selftest(void) {
     p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
+
+/* widescreen HUD grouping (see dc_pvr_gl_render): side[i] = -1 / +1 for HUD polygons whose group
+ * centre lies in the left / right third of the 4:3 picture, 0 otherwise */
+typedef struct { float x0, y0, x1, y1; int poly, parent; } hud_box;
+static int hud_find(hud_box *b, int i) { while (b[i].parent != i) { b[i].parent = b[b[i].parent].parent; i = b[i].parent; } return i; }
+static void hud_group(const pvr_frame *f, int RW, signed char *side) {
+    static hud_box *b; static int cap;
+    int n = 0;
+    for (int i = 0; i < f->npolys; i++) {
+        const pvr_poly *p = &f->polys[i];
+        const pvr_vtx *v = f->verts + p->first;
+        if (p->n < 3 || v[0].z < dc_pvr_gl_hud_z) continue;
+        int flat = 1; float x0 = v[0].x, x1 = v[0].x, y0 = v[0].y, y1 = v[0].y;
+        for (int k = 1; k < p->n; k++) {
+            if (v[k].z != v[0].z) flat = 0;
+            if (v[k].x < x0) x0 = v[k].x; if (v[k].x > x1) x1 = v[k].x;
+            if (v[k].y < y0) y0 = v[k].y; if (v[k].y > y1) y1 = v[k].y;
+        }
+        if (!flat || x1 - x0 > RW * 0.9f) continue;          /* full-width bars and fades stay */
+        if (n == cap) { cap = cap ? cap * 2 : 1024; b = realloc(b, (size_t)cap * sizeof *b); }
+        b[n].x0 = x0; b[n].y0 = y0; b[n].x1 = x1; b[n].y1 = y1; b[n].poly = i; b[n].parent = n; n++;
+    }
+    const float gap = 6.f;                                   /* letter spacing in the console's pixels */
+    for (int i = 0; i < n; i++)
+        for (int j = i + 1; j < n; j++) {
+            if (b[i].x0 > b[j].x1 + gap || b[j].x0 > b[i].x1 + gap) continue;
+            if (b[i].y0 > b[j].y1 + gap || b[j].y0 > b[i].y1 + gap) continue;
+            int a = hud_find(b, i), c = hud_find(b, j);
+            if (a != c) b[c].parent = a;
+        }
+    /* group extents */
+    float *gx0 = malloc(sizeof(float) * (size_t)(n ? n : 1) * 2), *gx1 = gx0 + (n ? n : 1);
+    for (int i = 0; i < n; i++) { gx0[i] = 1e30f; gx1[i] = -1e30f; }
+    for (int i = 0; i < n; i++) { int r = hud_find(b, i); if (b[i].x0 < gx0[r]) gx0[r] = b[i].x0; if (b[i].x1 > gx1[r]) gx1[r] = b[i].x1; }
+    for (int i = 0; i < n; i++) {
+        int r = hud_find(b, i);
+        float cx = (gx0[r] + gx1[r]) * 0.5f;
+        if (gx1[r] - gx0[r] > RW * 0.6f) continue;           /* spans most of the screen: centred layout */
+        side[b[i].poly] = cx < RW / 3.f ? -1 : cx > RW * 2.f / 3.f ? 1 : 0;
+    }
+    free(gx0);
+}
+
 void dc_pvr_gl_render(int scale) {
     if (!ready) return;
     if (scale < 1) scale = 1;
@@ -555,16 +598,20 @@ void dc_pvr_gl_render(int scale) {
         }
         if (n3d >= 50) hud_dx = (WW - (float)RW) * 0.5f;
     }
+    /* HUD pieces are grouped first (pieces that touch or nearly touch: the letters of a line, the
+     * parts of a panel), then each group moves as a whole by where its centre is, so centred text
+     * stays together */
+    static signed char *hud_side; static int cap_side;
+    if (hud_dx > 0) {
+        if (f.npolys > cap_side) { cap_side = f.npolys + 1024; hud_side = realloc(hud_side, (size_t)cap_side); }
+        memset(hud_side, 0, (size_t)f.npolys);
+        hud_group(&f, RW, hud_side);
+    }
     for (int i = 0; i < f.npolys; i++) {
         const pvr_poly *p = &f.polys[i];
         const pvr_vtx *v = f.verts + p->first;
         push_dx = 0;
-        if (hud_dx > 0) {
-            float cx = 0; int flat = 1;
-            for (int k = 0; k < p->n; k++) { if (v[k].z != v[0].z) flat = 0; cx += v[k].x; }
-            cx /= (float)p->n;
-            if (flat && v[0].z >= dc_pvr_gl_hud_z) push_dx = cx < RW / 3.f ? -hud_dx : cx > RW * 2.f / 3.f ? hud_dx : 0;
-        }
+        if (hud_dx > 0 && hud_side) push_dx = hud_side[i] * hud_dx;
         spans[i].first = nverts;
         if (p->sprite) { tri(p, &v[0], &v[1], &v[2], 0, cull_small); tri(p, &v[0], &v[2], &v[3], 0, cull_small); }
         else for (int k = 0; k + 2 < p->n; k++) tri(p, &v[k], &v[k + 1], &v[k + 2], k & 1, cull_small);
