@@ -315,10 +315,10 @@ static int step(void) {
  * changed since the last time spins on something only an interrupt, a timer or the SH-4 can
  * change, none of which happen inside this slice: give up the rest of it. */
 unsigned arm7_writes;                  /* counted by the bus (aica.c) */
-static struct { uint32_t pc, r[15], cpsr; unsigned writes; int valid; } idle;
+static struct { uint32_t pc, r[15], cpsr; unsigned writes; int valid; } idle[16];   /* per loop target */
 int arm7_run(int cycles) {
     int done = 0;
-    idle.valid = 0;
+    for (int i = 0; i < 16; i++) idle[i].valid = 0;
     while (done < cycles) {
         if (arm7.fiq_line && !(arm7.cpsr & F_F)) exception(0x1C, M_FIQ, arm7.r[15] + 4, 1);
         else if (arm7.irq_line && !(arm7.cpsr & F_I)) exception(0x18, M_IRQ, arm7.r[15] + 4, 0);
@@ -326,11 +326,12 @@ int arm7_run(int cycles) {
         done += step();
         uint32_t to = arm7.r[15];
         if (to < pc && pc - to <= 0x1000) {                    /* backward branch (a loop) */
-            if (idle.valid && idle.pc == to && idle.writes == arm7_writes && idle.cpsr == arm7.cpsr &&
-                !memcmp(idle.r, arm7.r, sizeof idle.r))
+            int k = (to >> 2) & 15;
+            if (idle[k].valid && idle[k].pc == to && idle[k].writes == arm7_writes && idle[k].cpsr == arm7.cpsr &&
+                !memcmp(idle[k].r, arm7.r, sizeof idle[k].r))
                 return cycles;                                  /* spinning: done for this slice */
-            idle.pc = to; idle.cpsr = arm7.cpsr; idle.writes = arm7_writes;
-            memcpy(idle.r, arm7.r, sizeof idle.r); idle.valid = 1;
+            idle[k].pc = to; idle[k].cpsr = arm7.cpsr; idle[k].writes = arm7_writes;
+            memcpy(idle[k].r, arm7.r, sizeof idle[k].r); idle[k].valid = 1;
         }
     }
     return done;
