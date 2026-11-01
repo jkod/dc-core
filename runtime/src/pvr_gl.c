@@ -179,12 +179,12 @@ static const char *fs_src =
 "  if (u_offset != 0) px.rgb = min(px.rgb + off.rgb, vec3(1.0));\n"
 "  if (u_fog != 2) {\n"
 "    float f; vec3 fc;\n"
-"    if (u_fog == 1) { fc = u_fog_vert; f = off.a; } else { fc = u_fog_ram; f = fog_alpha(v_invw); }\n"
+"    if (u_fog == 1) { fc = u_fog_vert; f = off.a; } else { fc = u_fog_ram; f = fog_alpha(gl_FragCoord.w); }\n"
 "    if (u_fog == 3) px = vec4(fc, f); else px.rgb = mix(px.rgb, fc, f);\n"
 "  }\n"
 "  if (u_pt != 0 && px.a < u_pt_ref) discard;\n"
 "  o_col = px;\n"
-"  gl_FragDepth = clamp((log2(max(v_invw, 1e-30)) + 64.0) / 128.0, 0.0, 1.0);\n"
+"  gl_FragDepth = clamp((log2(max(gl_FragCoord.w, 1e-30)) + 64.0) / 128.0, 0.0, 1.0);\n"
 "}\n";
 
 static float depth_of(float invw) { float d = (log2f(fmaxf(invw, 1e-30f)) + 64.f) / 128.f; return d < 0 ? 0 : d > 1 ? 1 : d; }
