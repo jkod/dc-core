@@ -159,18 +159,16 @@ def build_bin(prog):
     return bytes(b)
 
 
-def main():
-    tmp = tempfile.mkdtemp(prefix="dccore_test_")
-    ok = 0
-    for name, prog, setup, check in TESTS:
-        d = os.path.join(tmp, name); os.makedirs(d)
-        open(os.path.join(d, "t.bin"), "wb").write(build_bin(prog))
-        starts = sorted(BASE + off for off in prog)
-        open(os.path.join(d, "funcs.txt"), "w").write("\n".join("%08x" % s for s in starts))
-        subprocess.check_call([sys.executable, os.path.join(ROOT, "tools/recomp/sh4recomp.py"),
-                               os.path.join(d, "t.bin"), "--funcs", os.path.join(d, "funcs.txt"),
-                               "--out", os.path.join(d, "gen")] + EXTRA.get(name, []), stdout=subprocess.DEVNULL)
-        main_c = """
+def prepare(tmp, name, prog, setup, check):
+    """Write test `name` to tmp/name: t.bin, funcs.txt, gen/ (recompiled) and main.c."""
+    d = os.path.join(tmp, name); os.makedirs(d, exist_ok=True)
+    open(os.path.join(d, "t.bin"), "wb").write(build_bin(prog))
+    starts = sorted(BASE + off for off in prog)
+    open(os.path.join(d, "funcs.txt"), "w").write("\n".join("%08x" % s for s in starts))
+    subprocess.check_call([sys.executable, os.path.join(ROOT, "tools/recomp/sh4recomp.py"),
+                           os.path.join(d, "t.bin"), "--funcs", os.path.join(d, "funcs.txt"),
+                           "--out", os.path.join(d, "gen")] + EXTRA.get(name, []), stdout=subprocess.DEVNULL)
+    main_c = """
 #include "dccore/runtime.h"
 #include "dccore/coro.h"
 #include <stdio.h>
@@ -185,8 +183,21 @@ int main(void) {
   printf("r0=%%08X r1=%%08X r2=%%08X t=%%u\\n", c.r[0], c.r[1], c.r[2], c.t);
   return 1;
 }
-""" % (os.path.join(d, "t.bin"), setup, check)
-        open(os.path.join(d, "main.c"), "w").write(main_c)
+""" % (os.path.join(d, "t.bin").replace("\\", "/"), setup, check)
+    open(os.path.join(d, "main.c"), "w").write(main_c)
+    return d
+
+
+def main():
+    if len(sys.argv) == 3 and sys.argv[1] == "--emit":      # for CMake: build with the configured compiler
+        for name, prog, setup, check in TESTS:
+            prepare(sys.argv[2], name, prog, setup, check)
+        open(os.path.join(sys.argv[2], "tests.txt"), "w").write(";".join(n for n, _, _, _ in TESTS))
+        return
+    tmp = tempfile.mkdtemp(prefix="dccore_test_")
+    ok = 0
+    for name, prog, setup, check in TESTS:
+        d = prepare(tmp, name, prog, setup, check)
         srcs = [os.path.join(d, "main.c")] + [os.path.join(ROOT, "runtime/src", f) for f in os.listdir(os.path.join(ROOT, "runtime/src")) if f.endswith(".c")] + \
                [os.path.join(d, "gen", f) for f in os.listdir(os.path.join(d, "gen")) if f.endswith(".c")]
         exe = os.path.join(d, "t.exe" if os.environ.get("EXE") else "t")
