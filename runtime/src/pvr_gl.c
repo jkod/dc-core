@@ -102,6 +102,7 @@ typedef unsigned char GLboolean; typedef char GLchar; typedef ptrdiff_t GLsizeip
     F(void, glViewport, (GLint, GLint, GLsizei, GLsizei)) F(void, glClearColor, (GLfloat, GLfloat, GLfloat, GLfloat)) \
     F(void, glClearDepth, (GLdouble)) F(void, glClearStencil, (GLint)) F(void, glClear, (GLbitfield)) \
     F(void, glScissor, (GLint, GLint, GLsizei, GLsizei)) \
+    F(void, glMultiDrawArrays, (GLenum, const GLint *, const GLsizei *, GLsizei)) \
     F(void, glTexSubImage2D, (GLenum, GLint, GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, const void *)) \
     F(void, glEnable, (GLenum)) F(void, glDisable, (GLenum)) F(void, glDepthFunc, (GLenum)) \
     F(void, glDepthMask, (GLboolean)) F(void, glColorMask, (GLboolean, GLboolean, GLboolean, GLboolean)) \
@@ -333,6 +334,33 @@ static int cmp_sort(const void *a, const void *b) {
     return x < y ? -1 : x > y;
 }
 
+/* Draw batching: consecutive polygons with the same render state go out in one call (menus can
+ * have thousands of small polygons, and per-call overhead dominates). Draw order is unchanged. */
+typedef struct { uint32_t isp, tsp, tcw; int list, set, mark, blend; } bkey;
+static struct { bkey key; int valid; GLint *first; GLsizei *count; int n, cap; } B;
+static void batch_flush(void) {
+    if (B.n == 1) p_glDrawArrays(GL_TRIANGLES, B.first[0], B.count[0]);
+    else if (B.n > 1) p_glMultiDrawArrays(GL_TRIANGLES, B.first, B.count, B.n);
+    B.n = 0;
+}
+static void batch_reset(void) { batch_flush(); B.valid = 0; }
+/* mark: stencil reference (-1 = leave the stencil state alone); blend: set the blend function */
+static void batch_add(const pvr_poly *p, int set, int mark, int blend, int first, int count) {
+    if (!count) return;
+    bkey k = { p->isp, set ? p->tsp1 : p->tsp, set ? p->tcw1 : p->tcw, p->list, set, mark, blend };
+    if (!B.valid || memcmp(&k, &B.key, sizeof k)) {
+        batch_flush();
+        if (mark >= 0) p_glStencilFunc(GL_ALWAYS, mark, 0xFF);
+        set_poly_state(p, set);
+        if (set) { p_glDepthFunc(GL_EQUAL); p_glDepthMask(0); }
+        if (blend) p_glBlendFunc(blend_src((p->tsp >> 29) & 7), blend_dst((p->tsp >> 26) & 7));
+        B.key = k; B.valid = 1;
+    }
+    if (B.n && B.first[B.n - 1] + B.count[B.n - 1] == first) { B.count[B.n - 1] += count; return; }   /* contiguous */
+    if (B.n == B.cap) { B.cap = B.cap ? B.cap * 2 : 256; B.first = realloc(B.first, B.cap * sizeof *B.first); B.count = realloc(B.count, B.cap * sizeof *B.count); }
+    B.first[B.n] = first; B.count[B.n] = count; B.n++;
+}
+
 void dc_pvr_gl_render(int scale) {
     if (!ready) return;
     if (scale < 1) scale = 1;
@@ -416,11 +444,10 @@ void dc_pvr_gl_render(int scale) {
             const pvr_poly *p = &f.polys[i];
             if (p->list != list || !spans[i].count) continue;
             int mark = has_mods && (cheap ? p->shadow : p->twovol);
-            p_glStencilFunc(GL_ALWAYS, mark ? 2 : 0, 0xFF);
-            set_poly_state(p, 0);
-            p_glDrawArrays(GL_TRIANGLES, spans[i].first, spans[i].count);
+            batch_add(p, 0, mark ? 2 : 0, 0, spans[i].first, spans[i].count);
         }
     }
+    batch_reset();
 
     /* modifier volumes */
     if (has_mods) {
@@ -456,10 +483,9 @@ void dc_pvr_gl_render(int scale) {
             for (int i = 0; i < f.npolys; i++) {
                 const pvr_poly *p = &f.polys[i];
                 if (!p->twovol || (p->list != 0 && p->list != 4) || !spans[i].count) continue;
-                set_poly_state(p, 1);
-                p_glDepthFunc(GL_EQUAL); p_glDepthMask(0);
-                p_glDrawArrays(GL_TRIANGLES, spans[i].first, spans[i].count);
+                batch_add(p, 1, -1, 0, spans[i].first, spans[i].count);
             }
+            batch_reset();
         }
     }
     p_glDisable(GL_STENCIL_TEST);
@@ -477,11 +503,9 @@ void dc_pvr_gl_render(int scale) {
     p_glEnable(GL_BLEND);
     for (int k = 0; k < nt; k++) {
         const pvr_poly *p = &f.polys[s[k].idx];
-        if (!spans[s[k].idx].count) continue;
-        set_poly_state(p, 0);
-        p_glBlendFunc(blend_src((p->tsp >> 29) & 7), blend_dst((p->tsp >> 26) & 7));
-        p_glDrawArrays(GL_TRIANGLES, spans[s[k].idx].first, spans[s[k].idx].count);
+        batch_add(p, 0, -1, 1, spans[s[k].idx].first, spans[s[k].idx].count);
     }
+    batch_reset();
     free(s);
     p_glDisable(GL_BLEND);
     p_glDisable(GL_SCISSOR_TEST);
