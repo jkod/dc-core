@@ -28,11 +28,20 @@ jobs:
           vcpkg install sdl2:x64-windows
           echo "CMAKE_TOOLCHAIN_FILE=$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake" >> $env:GITHUB_ENV
       - name: Configure
-        run: cmake -S . -B build -DDCCORE_TESTS=ON -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B build -DDCCORE_TESTS=ON -DDCCORE_DEMO=ON -DCMAKE_BUILD_TYPE=Release
       - name: Build
         run: cmake --build build --config Release --parallel
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
+      - name: Demo package
+        shell: bash
+        run: |
+          mkdir demo
+          if [ -f build/Release/dccore_demo.exe ]; then cp build/Release/dccore_demo.exe build/Release/*.dll demo/; else cp build/dccore_demo demo/; fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dccore-demo-${{ runner.os }}
+          path: demo
 
   switch:
     name: Nintendo Switch (devkitA64)
@@ -40,9 +49,15 @@ jobs:
     container: devkitpro/devkita64:latest
     steps:
       - uses: actions/checkout@v5
-      - name: Python
-        run: apt-get update && apt-get install -y python3
+      - name: Python, SDL2 and Mesa for Switch
+        run: |
+          apt-get update && apt-get install -y python3
+          dkp-pacman -S --noconfirm --needed switch-sdl2 switch-mesa switch-glad || true
       - name: Configure
-        run: cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE=$DEVKITPRO/cmake/Switch.cmake -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE=$DEVKITPRO/cmake/Switch.cmake -DCMAKE_BUILD_TYPE=Release -DDCCORE_DEMO=ON
       - name: Build
         run: cmake --build build --parallel
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dccore-demo-Switch
+          path: build/dccore_demo.nro

@@ -17,6 +17,9 @@ static SDL_Window *win;
 static SDL_GLContext glc;
 static SDL_AudioDeviceID audio;
 static SDL_GameController *pad;
+#ifdef __SWITCH__
+static SDL_Joystick *joy;
+#endif
 static dc_front_config cfg;
 static unsigned long presented, renders, last_render_frame;
 static uint64_t vblanks;
@@ -59,6 +62,24 @@ static void read_input(void) {
             { SDL_CONTROLLER_BUTTON_DPAD_LEFT, DC_BTN_LEFT }, { SDL_CONTROLLER_BUTTON_DPAD_RIGHT, DC_BTN_RIGHT } };
         for (unsigned i = 0; i < sizeof map / sizeof map[0]; i++) if (SDL_GameControllerGetButton(pad, map[i].s)) b |= map[i].d;
     }
+#ifdef __SWITCH__
+    /* Joy-Cons / Pro Controller as SDL joystick 0, buttons in libnx order. Mapped by position:
+     * B (bottom) = A, A (right) = B, Y (left) = X, X (top) = Y; ZL/ZR = triggers; + = Start;
+     * + and - together quit. */
+    if (joy) {
+        enum { NA, NB, NX, NY, NLS, NRS, NL, NR, NZL, NZR, NPLUS, NMINUS, NLEFT, NUP, NRIGHT, NDOWN };
+        #define JB(i) SDL_JoystickGetButton(joy, i)
+        if (JB(NB)) b |= DC_BTN_A; if (JB(NA)) b |= DC_BTN_B; if (JB(NY)) b |= DC_BTN_X; if (JB(NX)) b |= DC_BTN_Y;
+        if (JB(NPLUS)) b |= DC_BTN_START;
+        if (JB(NUP)) b |= DC_BTN_UP; if (JB(NDOWN)) b |= DC_BTN_DOWN; if (JB(NLEFT)) b |= DC_BTN_LEFT; if (JB(NRIGHT)) b |= DC_BTN_RIGHT;
+        if (JB(NZL)) lt = 255; if (JB(NZR)) rt = 255;
+        Sint16 ax = SDL_JoystickGetAxis(joy, 0), ay = SDL_JoystickGetAxis(joy, 1);
+        if (ax < -4000 || ax > 4000) jx = axis8(ax);
+        if (ay < -4000 || ay > 4000) jy = axis8(ay);
+        if (JB(NPLUS) && JB(NMINUS)) { dc_front_close(); exit(0); }
+        #undef JB
+    }
+#endif
     dc_pad[0].buttons = b; dc_pad[0].jx = (uint8_t)jx; dc_pad[0].jy = (uint8_t)jy; dc_pad[0].lt = (uint8_t)lt; dc_pad[0].rt = (uint8_t)rt;
 }
 
@@ -136,10 +157,13 @@ static void on_vblank(uint64_t f) {
 int dc_front_open(const dc_front_config *c) {
     cfg = *c;
     if (cfg.scale <= 0) cfg.scale = 2;
+#ifdef __SWITCH__
+    cfg.width = 1280; cfg.height = 720; cfg.fullscreen = 1;   /* the console's screen / TV output */
+#endif
     if (!cfg.width) cfg.width = (cfg.widescreen ? 854 : 640) * cfg.scale > 1600 ? 1600 : (cfg.widescreen ? 854 : 640) * cfg.scale;
     if (!cfg.height) cfg.height = cfg.widescreen ? cfg.width * 9 / 16 : cfg.width * 3 / 4;
     dc_pvr_gl_widescreen = cfg.widescreen;
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER | (cfg.no_audio ? 0 : SDL_INIT_AUDIO)) != 0) {
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER | (cfg.no_audio ? 0 : SDL_INIT_AUDIO)) != 0) {
         fprintf(stderr, "SDL: %s\n", SDL_GetError()); return -1;
     }
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3); SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
@@ -174,7 +198,11 @@ int dc_front_open(const dc_front_config *c) {
         if (audio) SDL_PauseAudioDevice(audio, 0);
         else fprintf(stderr, "audio: %s (continuing without sound)\n", SDL_GetError());
     }
+#ifdef __SWITCH__
+    if (SDL_NumJoysticks() > 0) joy = SDL_JoystickOpen(0);
+#else
     for (int i = 0; i < SDL_NumJoysticks() && !pad; i++) if (SDL_IsGameController(i)) pad = SDL_GameControllerOpen(i);
+#endif
     dc_hw.on_render = on_render;
     dc_hw.on_vblank = on_vblank;
     start_count = SDL_GetPerformanceCounter(); start_cycles = dc_current_ctx ? dc_current_ctx->cycles : 0;
@@ -183,6 +211,10 @@ int dc_front_open(const dc_front_config *c) {
 
 void dc_front_close(void) {
     if (pad) SDL_GameControllerClose(pad);
+#ifdef __SWITCH__
+    if (joy) SDL_JoystickClose(joy);
+    joy = NULL;
+#endif
     if (audio) SDL_CloseAudioDevice(audio);
     if (glc) SDL_GL_DeleteContext(glc);
     if (win) SDL_DestroyWindow(win);
