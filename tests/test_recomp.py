@@ -187,8 +187,8 @@ int main(void) {
 }
 """ % (os.path.join(d, "t.bin"), setup, check)
         open(os.path.join(d, "main.c"), "w").write(main_c)
-        srcs = [os.path.join(d, "main.c")] + [os.path.join(ROOT, "runtime/src", f) for f in os.listdir(os.path.join(ROOT, "runtime/src"))] + \
-               [os.path.join(d, "gen", f) for f in os.listdir(os.path.join(d, "gen"))]
+        srcs = [os.path.join(d, "main.c")] + [os.path.join(ROOT, "runtime/src", f) for f in os.listdir(os.path.join(ROOT, "runtime/src")) if f.endswith(".c")] + \
+               [os.path.join(d, "gen", f) for f in os.listdir(os.path.join(d, "gen")) if f.endswith(".c")]
         exe = os.path.join(d, "t.exe" if os.environ.get("EXE") else "t")
         cc = os.environ.get("CC", "cc").split() + os.environ.get("CFLAGS", "").split()
         subprocess.check_call(cc + ["-O1", "-w", "-I" + os.path.join(ROOT, "runtime/include"), "-o", exe] + srcs + ["-lm"])

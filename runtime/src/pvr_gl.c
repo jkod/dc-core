@@ -131,12 +131,12 @@ static const char *vs_src =
 "layout(location=1) in vec4 a_uv;\n"             /* u v (set 0), u v (set 1) */
 "layout(location=2) in vec4 a_c;  layout(location=3) in vec4 a_o;\n"
 "layout(location=4) in vec4 a_c1; layout(location=5) in vec4 a_o1;\n"
-"uniform vec2 u_scale; uniform int u_set; uniform int u_quad;\n"
+"uniform vec2 u_scale; uniform float u_offx; uniform int u_set; uniform int u_quad;\n"
 "out vec2 v_uv; out vec4 v_c; out vec4 v_o; flat out vec4 f_c; flat out vec4 f_o; noperspective out float v_invw;\n"
 "void main() {\n"
 "  if (u_quad != 0) { gl_Position = vec4(a_pos.xy, 0.0, 1.0); v_invw = 1.0; return; }\n"
 "  float z = max(a_pos.z, 1e-30); float w = 1.0 / z;\n"
-"  vec2 ndc = vec2(a_pos.x * u_scale.x - 1.0, 1.0 - a_pos.y * u_scale.y);\n"
+"  vec2 ndc = vec2((a_pos.x + u_offx) * u_scale.x - 1.0, 1.0 - a_pos.y * u_scale.y);\n"
 "  gl_Position = vec4(ndc * w, 0.0, w);\n"
 "  v_uv = u_set != 0 ? a_uv.zw : a_uv.xy;\n"
 "  v_c = u_set != 0 ? a_c1 : a_c; v_o = u_set != 0 ? a_o1 : a_o; f_c = v_c; f_o = v_o;\n"
@@ -189,7 +189,7 @@ static float depth_of(float invw) { float d = (log2f(fmaxf(invw, 1e-30f)) + 64.f
 typedef struct { float x, y, z, u, v, u1, v1, c[4], o[4], c1[4], o1[4]; } gv;
 static GLuint prog, vao, vbo, fbo, color_tex, depth_rb;
 static int fb_w, fb_h, ready;
-static struct { GLint scale, set, quad, quad_col, tex, textured, shade, use_alpha, ign_ta, offset, gouraud, fog, pt, pt_ref,
+static struct { GLint scale, offx, set, quad, quad_col, tex, textured, shade, use_alpha, ign_ta, offset, gouraud, fog, pt, pt_ref,
                 fog_ram, fog_vert, fog_den, fog_tab; } U;
 static gv *verts; static int nverts, cap_verts;
 typedef struct { int first, count; } span;
@@ -221,7 +221,7 @@ int dc_pvr_gl_init(void *(*getproc)(const char *)) {
     GLint ok = 0; p_glGetProgramiv(prog, GL_LINK_STATUS, &ok);
     if (!ok) { char log[2048]; p_glGetProgramInfoLog(prog, sizeof log, NULL, log); fprintf(stderr, "pvr_gl: link: %s\n", log); return -1; }
 #define UL(f, n) U.f = p_glGetUniformLocation(prog, n)
-    UL(scale, "u_scale"); UL(set, "u_set"); UL(quad, "u_quad"); UL(quad_col, "u_quad_col"); UL(tex, "u_tex");
+    UL(scale, "u_scale"); UL(offx, "u_offx"); UL(set, "u_set"); UL(quad, "u_quad"); UL(quad_col, "u_quad_col"); UL(tex, "u_tex");
     UL(textured, "u_textured"); UL(shade, "u_shade"); UL(use_alpha, "u_use_alpha"); UL(ign_ta, "u_ign_ta"); UL(offset, "u_offset");
     UL(gouraud, "u_gouraud"); UL(fog, "u_fog"); UL(pt, "u_pt"); UL(pt_ref, "u_pt_ref"); UL(fog_ram, "u_fog_ram");
     UL(fog_vert, "u_fog_vert"); UL(fog_den, "u_fog_den"); UL(fog_tab, "u_fog_tab");
@@ -238,6 +238,9 @@ int dc_pvr_gl_init(void *(*getproc)(const char *)) {
     ready = 1;
     return 0;
 }
+
+int dc_pvr_gl_widescreen;
+static float disp_aspect = 4.f / 3.f;
 
 static void ensure_fbo(int w, int h) {
     if (fbo && w == fb_w && h == fb_h) return;
@@ -334,7 +337,11 @@ void dc_pvr_gl_render(int scale) {
     pvr_frame f;
     pvr_get_frame(&f);
     int RW = f.width * (f.hscale ? 2 : 1), RH = f.height;
-    ensure_fbo(f.width * scale, f.height * scale);
+    /* widescreen: a 16:9 target with the console's 4:3 picture in the middle; the sides show what
+     * the game draws beyond the screen edges */
+    float WW = dc_pvr_gl_widescreen ? RW * 4.f / 3.f : (float)RW;
+    ensure_fbo(dc_pvr_gl_widescreen ? (f.width * scale * 4 + 2) / 3 : f.width * scale, f.height * scale);
+    disp_aspect = dc_pvr_gl_widescreen ? 16.f / 9.f : 4.f / 3.f;
 
     /* geometry: every polygon's triangles, then volume triangles, then a full-screen quad */
     nverts = 0;
@@ -366,7 +373,8 @@ void dc_pvr_gl_render(int scale) {
     p_glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     p_glViewport(0, 0, fb_w, fb_h);
     p_glUseProgram(prog);
-    p_glUniform2f(U.scale, 2.f / RW, 2.f / RH);
+    p_glUniform2f(U.scale, 2.f / WW, 2.f / RH);
+    p_glUniform1f(U.offx, (WW - (float)RW) * 0.5f);
     p_glUniform1i(U.tex, 0); p_glUniform1i(U.quad, 0);
     p_glUniform1f(U.pt_ref, (dc_pvr_reg(0x11C) & 255) / 255.f);
     { uint32_t fr = dc_pvr_reg(0x0B0), fv = dc_pvr_reg(0x0AC), den = dc_pvr_reg(0x0B4);
@@ -485,9 +493,9 @@ void dc_pvr_gl_read(uint8_t *rgb, int *w, int *h) {
 void dc_pvr_gl_present(int win_w, int win_h, int stretch) {
     if (!fbo) return;
     int dw = win_w, dh = win_h, dx = 0, dy = 0;
-    if (!stretch) {                                        /* keep 4:3, letterbox */
-        if (win_w * 3 > win_h * 4) { dw = win_h * 4 / 3; dx = (win_w - dw) / 2; }
-        else { dh = win_w * 3 / 4; dy = (win_h - dh) / 2; }
+    if (!stretch) {                                        /* keep 4:3 (16:9 in widescreen), letterbox */
+        if (win_w > win_h * disp_aspect) { dw = (int)(win_h * disp_aspect + 0.5f); dx = (win_w - dw) / 2; }
+        else { dh = (int)(win_w / disp_aspect + 0.5f); dy = (win_h - dh) / 2; }
     }
     p_glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
     p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
@@ -502,6 +510,7 @@ void dc_pvr_gl_present(int win_w, int win_h, int stretch) {
 void dc_pvr_gl_load_rgb(const uint8_t *rgb, int w, int h) {
     if (!ready || w <= 0 || h <= 0) return;
     ensure_fbo(w, h);
+    disp_aspect = 4.f / 3.f;                               /* a CPU-drawn screen: always 4:3 */
     uint8_t *tmp = malloc((size_t)w * h * 3);
     for (int y = 0; y < h; y++) memcpy(tmp + (size_t)(h - 1 - y) * w * 3, rgb + (size_t)y * w * 3, (size_t)w * 3);
     p_glBindTexture(GL_TEXTURE_2D, color_tex);

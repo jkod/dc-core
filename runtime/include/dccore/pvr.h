@@ -24,6 +24,9 @@ void dc_pvr_gl_render(int scale);
 void dc_pvr_gl_present(int win_w, int win_h, int stretch);
 void dc_pvr_gl_read(uint8_t *rgb, int *w, int *h);
 void dc_pvr_gl_load_rgb(const uint8_t *rgb, int w, int h);   /* show a CPU-drawn framebuffer instead */
+/* 1 = render 16:9: the 4:3 picture in the middle, the sides filled with geometry the game draws
+ * beyond the screen edges (games usually cull it, so a per-game camera patch gives the real thing) */
+extern int dc_pvr_gl_widescreen;
 #ifdef __cplusplus
 }
 #endif

@@ -136,8 +136,9 @@ static void on_vblank(uint64_t f) {
 int dc_front_open(const dc_front_config *c) {
     cfg = *c;
     if (cfg.scale <= 0) cfg.scale = 2;
-    if (!cfg.width) cfg.width = 640 * cfg.scale > 1600 ? 1600 : 640 * cfg.scale;
-    if (!cfg.height) cfg.height = cfg.width * 3 / 4;
+    if (!cfg.width) cfg.width = (cfg.widescreen ? 854 : 640) * cfg.scale > 1600 ? 1600 : (cfg.widescreen ? 854 : 640) * cfg.scale;
+    if (!cfg.height) cfg.height = cfg.widescreen ? cfg.width * 9 / 16 : cfg.width * 3 / 4;
+    dc_pvr_gl_widescreen = cfg.widescreen;
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER | (cfg.no_audio ? 0 : SDL_INIT_AUDIO)) != 0) {
         fprintf(stderr, "SDL: %s\n", SDL_GetError()); return -1;
     }

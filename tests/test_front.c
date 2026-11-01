@@ -36,13 +36,28 @@ int main(void) {
     dc_hw.on_vblank(1);                                    /* present, audio, input */
     dc_hw.on_vblank(2);
 
-    static uint8_t rgb[128 * 128 * 3]; int w, h;
+    static uint8_t rgb[256 * 128 * 3]; int w, h;
     dc_pvr_gl_read(rgb, &w, &h);
     CHECK(w == 128 && h == 128, "render target %dx%d, want 128x128 (scale 2)", w, h);
     const uint8_t *in = rgb + (20 * w + 20) * 3, *out = rgb + (100 * w + 100) * 3;
     CHECK(in[0] == 255 && in[1] == 0 && in[2] == 0, "triangle %02X%02X%02X", in[0], in[1], in[2]);
     CHECK(out[0] == 0 && out[2] == 255, "background %02X%02X%02X", out[0], out[1], out[2]);
     CHECK(dc_front_frames() == 2, "presented %lu frames", dc_front_frames());
+
+    /* widescreen: 16:9 target, a triangle left of the 4:3 picture lands in the left band */
+    dc_pvr_gl_widescreen = 1;
+    { uint32_t w0[8] = { 7u << 29, fu(-20), fu(4), fu(1), 0, 0, 0xFF00FF00u, 0 }, w1[8] = { 7u << 29, fu(-2), fu(4), fu(1), 0, 0, 0xFF00FF00u, 0 };
+      uint32_t w2[8] = { (7u << 29) | (1u << 28), fu(-20), fu(40), fu(1), 0, 0, 0xFF00FF00u, 0 };
+      pvr(0x128, 0); pvr(0x144, 0x80000000u);              /* new list */
+      ta(hdr); ta(w0); ta(w1); ta(w2); ta(v0); ta(v1); ta(v2); ta(eol); }
+    pvr(0x014, 1);
+    dc_pvr_gl_read(rgb, &w, &h);
+    CHECK(w == 171 && h == 128, "widescreen target %dx%d, want 171x128", w, h);
+    const uint8_t *side = rgb + (20 * w + 6) * 3, *mid = rgb + (20 * w + 21 + 20) * 3, *edge = rgb + (100 * w + 5) * 3;
+    CHECK(side[1] == 255 && side[0] == 0, "left band %02X%02X%02X, want the green triangle", side[0], side[1], side[2]);
+    CHECK(mid[0] == 255 && mid[1] == 0, "centre %02X%02X%02X, want the red triangle", mid[0], mid[1], mid[2]);
+    CHECK(edge[2] == 255, "band background %02X%02X%02X", edge[0], edge[1], edge[2]);
+    dc_pvr_gl_widescreen = 0;
     dc_front_close();
     printf(fails ? "%d frontend checks failed\n" : "frontend tests passed\n", fails);
     return fails != 0;

@@ -18,6 +18,7 @@ typedef struct {
     int scale;              /* render resolution multiplier (1 = 640x480), 0 = 2 */
     int width, height;      /* window size, 0 = 4:3 at scale */
     int fullscreen;
+    int widescreen;         /* 16:9 (dc_pvr_gl_widescreen) */
     int no_pacing;          /* run as fast as possible (benchmarks) */
     int no_audio;
     unsigned long exit_after;   /* quit after this many presented fields (0 = run until closed) */
