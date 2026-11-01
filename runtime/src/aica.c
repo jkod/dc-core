@@ -418,8 +418,9 @@ static inline int is_reg(uint32_t a) { return (a & 0x00F00000u) == 0x00800000u; 
 uint32_t arm7_read32(uint32_t a) { if (is_reg(a)) return dc_aica_read(a, 4); uint32_t v; memcpy(&v, dc_aram + (a & 0x1FFFFC), 4); return v; }
 uint16_t arm7_read16(uint32_t a) { if (is_reg(a)) return (uint16_t)dc_aica_read(a, 2); uint16_t v; memcpy(&v, dc_aram + (a & 0x1FFFFE), 2); return v; }
 uint8_t  arm7_read8(uint32_t a)  { if (is_reg(a)) return (uint8_t)dc_aica_read(a, 1); return dc_aram[a & 0x1FFFFF]; }
-void arm7_write32(uint32_t a, uint32_t v) { if (is_reg(a)) { dc_aica_write(a, v, 4); return; } memcpy(dc_aram + (a & 0x1FFFFC), &v, 4); }
-void arm7_write16(uint32_t a, uint16_t v) { if (is_reg(a)) { dc_aica_write(a, v, 2); return; } memcpy(dc_aram + (a & 0x1FFFFE), &v, 2); }
-void arm7_write8(uint32_t a, uint8_t v)   { if (is_reg(a)) { dc_aica_write(a, v, 1); return; } dc_aram[a & 0x1FFFFF] = v; }
+extern unsigned arm7_writes;          /* memory writes by the ARM (idle-loop detection, arm7.c) */
+void arm7_write32(uint32_t a, uint32_t v) { arm7_writes++; if (is_reg(a)) { dc_aica_write(a, v, 4); return; } memcpy(dc_aram + (a & 0x1FFFFC), &v, 4); }
+void arm7_write16(uint32_t a, uint16_t v) { arm7_writes++; if (is_reg(a)) { dc_aica_write(a, v, 2); return; } memcpy(dc_aram + (a & 0x1FFFFE), &v, 2); }
+void arm7_write8(uint32_t a, uint8_t v)   { arm7_writes++; if (is_reg(a)) { dc_aica_write(a, v, 1); return; } dc_aram[a & 0x1FFFFF] = v; }
 
 int dc_aica_arm_running(void) { return arm_running; }
