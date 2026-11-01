@@ -190,6 +190,10 @@ static void gl_debug_init(void *(*getproc)(const char *)) {
 }
 
 /* ------------------------------------------------------------------ shaders */
+/* Perspective is done here, not by GL: positions go out with w = 1 and every interpolated value
+ * is sent premultiplied by 1/w (noperspective), then divided by the interpolated 1/w per pixel.
+ * Drivers then interpolate plainly in screen space, clipping included; GL's own perspective
+ * correction with w = 1/(1/w) gave wrong texture coordinates on NVIDIA whenever 1/w was far from 1. */
 static const char *vs_src =
 "#version 330 core\n"
 "layout(location=0) in vec3 a_pos;\n"            /* PVR x, y, 1/w */
@@ -197,20 +201,22 @@ static const char *vs_src =
 "layout(location=2) in vec4 a_c;  layout(location=3) in vec4 a_o;\n"
 "layout(location=4) in vec4 a_c1; layout(location=5) in vec4 a_o1;\n"
 "uniform vec2 u_scale; uniform float u_offx; uniform int u_set; uniform int u_quad;\n"
-"out vec2 v_uv; out vec4 v_c; out vec4 v_o; flat out vec4 f_c; flat out vec4 f_o; noperspective out float v_invw;\n"
+"noperspective out vec2 v_uvz; noperspective out vec4 v_cz; noperspective out vec4 v_oz; noperspective out float v_invw;\n"
+"flat out vec4 f_c; flat out vec4 f_o;\n"
 "void main() {\n"
-"  if (u_quad != 0) { gl_Position = vec4(a_pos.xy, 0.0, 1.0); v_invw = 1.0; return; }\n"
-"  float z = max(a_pos.z, 1e-30); float w = 1.0 / z;\n"
+"  if (u_quad != 0) { gl_Position = vec4(a_pos.xy, 0.0, 1.0); v_invw = 1.0; v_uvz = vec2(0.0); v_cz = vec4(0.0); v_oz = vec4(0.0); f_c = vec4(0.0); f_o = vec4(0.0); return; }\n"
+"  float z = max(a_pos.z, 1e-30);\n"
 "  vec2 ndc = vec2((a_pos.x + u_offx) * u_scale.x - 1.0, 1.0 - a_pos.y * u_scale.y);\n"
-"  gl_Position = vec4(ndc * w, 0.0, w);\n"
-"  v_uv = u_set != 0 ? a_uv.zw : a_uv.xy;\n"
-"  v_c = u_set != 0 ? a_c1 : a_c; v_o = u_set != 0 ? a_o1 : a_o; f_c = v_c; f_o = v_o;\n"
-"  v_invw = z;\n"
+"  gl_Position = vec4(ndc, 0.0, 1.0);\n"
+"  vec2 uv = u_set != 0 ? a_uv.zw : a_uv.xy;\n"
+"  vec4 c = u_set != 0 ? a_c1 : a_c, o = u_set != 0 ? a_o1 : a_o;\n"
+"  v_uvz = uv * z; v_cz = c * z; v_oz = o * z; v_invw = z; f_c = c; f_o = o;\n"
 "}\n";
 
 static const char *fs_src =
 "#version 330 core\n"
-"in vec2 v_uv; in vec4 v_c; in vec4 v_o; flat in vec4 f_c; flat in vec4 f_o; noperspective in float v_invw;\n"
+"noperspective in vec2 v_uvz; noperspective in vec4 v_cz; noperspective in vec4 v_oz; noperspective in float v_invw;\n"
+"flat in vec4 f_c; flat in vec4 f_o;\n"
 "uniform sampler2D u_tex;\n"
 "uniform int u_quad; uniform vec4 u_quad_col;\n"
 "uniform int u_textured, u_shade, u_use_alpha, u_ign_ta, u_offset, u_gouraud, u_fog, u_pt;\n"
@@ -226,11 +232,13 @@ static const char *fs_src =
 "}\n"
 "void main() {\n"
 "  if (u_quad != 0) { o_col = u_quad_col; gl_FragDepth = 0.0; return; }\n"
-"  vec4 col = u_gouraud != 0 ? v_c : f_c, off = u_gouraud != 0 ? v_o : f_o;\n"
+"  float iw = max(v_invw, 1e-30);\n"
+"  vec2 uv = v_uvz / iw;\n"
+"  vec4 col = u_gouraud != 0 ? v_cz / iw : f_c, off = u_gouraud != 0 ? v_oz / iw : f_o;\n"
 "  if (u_use_alpha == 0) col.a = 1.0;\n"
 "  vec4 px;\n"
 "  if (u_textured != 0) {\n"
-"    vec4 t = texture(u_tex, v_uv);\n"
+"    vec4 t = texture(u_tex, uv);\n"
 "    if (u_ign_ta != 0) t.a = 1.0;\n"
 "    if (u_shade == 0) px = t;\n"
 "    else if (u_shade == 1) px = vec4(t.rgb * col.rgb, t.a);\n"
@@ -240,12 +248,12 @@ static const char *fs_src =
 "  if (u_offset != 0) px.rgb = min(px.rgb + off.rgb, vec3(1.0));\n"
 "  if (u_fog != 2) {\n"
 "    float f; vec3 fc;\n"
-"    if (u_fog == 1) { fc = u_fog_vert; f = off.a; } else { fc = u_fog_ram; f = fog_alpha(gl_FragCoord.w); }\n"
+"    if (u_fog == 1) { fc = u_fog_vert; f = off.a; } else { fc = u_fog_ram; f = fog_alpha(iw); }\n"
 "    if (u_fog == 3) px = vec4(fc, f); else px.rgb = mix(px.rgb, fc, f);\n"
 "  }\n"
 "  if (u_pt != 0 && px.a < u_pt_ref) discard;\n"
 "  o_col = px;\n"
-"  gl_FragDepth = clamp((log2(max(gl_FragCoord.w, 1e-30)) + 64.0) / 128.0, 0.0, 1.0);\n"
+"  gl_FragDepth = clamp((log2(iw) + 64.0) / 128.0, 0.0, 1.0);\n"
 "}\n";
 
 static float depth_of(float invw) { float d = (log2f(fmaxf(invw, 1e-30f)) + 64.f) / 128.f; return d < 0 ? 0 : d > 1 ? 1 : d; }
