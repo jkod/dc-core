@@ -380,7 +380,7 @@ void dc_pvr_gl_render(int scale) {
     nverts = 0;
     if (f.npolys + 1 > cap_spans) { cap_spans = f.npolys + 1024; spans = realloc(spans, cap_spans * sizeof *spans); }
     float cull_small = 0; { uint32_t cv = dc_pvr_reg(0x078); memcpy(&cull_small, &cv, 4); }
-    /* widescreen HUD: 2D overlay polygons (every vertex at 1/w >= dc_pvr_gl_hud_z) in the left or
+    /* widescreen HUD: 2D overlay polygons (every vertex at the same 1/w, >= dc_pvr_gl_hud_z) in the left or
      * right third of the 4:3 picture move out to the edges of the 16:9 one; only in frames that
      * also draw a 3D scene, so full-screen 2D menus keep their layout */
     float hud_dx = 0;
@@ -397,10 +397,10 @@ void dc_pvr_gl_render(int scale) {
         const pvr_vtx *v = f.verts + p->first;
         push_dx = 0;
         if (hud_dx > 0) {
-            float zmin = 1e30f, cx = 0;
-            for (int k = 0; k < p->n; k++) { if (v[k].z < zmin) zmin = v[k].z; cx += v[k].x; }
+            float cx = 0; int flat = 1;
+            for (int k = 0; k < p->n; k++) { if (v[k].z != v[0].z) flat = 0; cx += v[k].x; }
             cx /= (float)p->n;
-            if (zmin >= dc_pvr_gl_hud_z) push_dx = cx < RW / 3.f ? -hud_dx : cx > RW * 2.f / 3.f ? hud_dx : 0;
+            if (flat && v[0].z >= dc_pvr_gl_hud_z) push_dx = cx < RW / 3.f ? -hud_dx : cx > RW * 2.f / 3.f ? hud_dx : 0;
         }
         spans[i].first = nverts;
         if (p->sprite) { tri(p, &v[0], &v[1], &v[2], 0, cull_small); tri(p, &v[0], &v[2], &v[3], 0, cull_small); }
