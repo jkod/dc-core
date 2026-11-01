@@ -241,6 +241,27 @@ int main(void) {
         CHECK(got > 400 && nonzero > got / 8 && mids > got / 2 - 20);
         CH2(5, 0x3C00 | 31); CH2(0, 0x8000 | 0x04);
     }
+    /* 10c. hblank interrupt (SPG_HBLANK_INT modes): count ISTNRM bit 5 over one field */
+    {
+        int counts[3];
+        uint32_t modes[3] = { 2u << 12, (1u << 12) | 10, (0u << 12) | 100 };
+        for (int m = 0; m < 3; m++) {
+            dc_wr32(0xA05F80C8u, modes[m]);
+            dc_wr32(0xA05F6900u, 1u << 5);                     /* clear */
+            dc_next_event = 0;
+            uint64_t start = c.cycles, n = 0, len = 200000000ull / 60;
+            for (uint64_t t = start; t < start + len; t += 500) {
+                c.cycles = t;
+                if (c.cycles >= dc_next_event) dc_events(&c);
+                if (dc_rd32(0xA05F6900u) & (1u << 5)) { n++; dc_wr32(0xA05F6900u, 1u << 5); }
+            }
+            counts[m] = (int)n;
+        }
+        dc_wr32(0xA05F80C8u, 3u << 12);                        /* off again */
+        CHECK(counts[0] >= 250 && counts[0] <= 700);
+        CHECK(counts[1] >= counts[0] / 10 - 2 && counts[1] <= counts[0] / 10 + 2);
+        CHECK(counts[2] == 1);
+    }
     /* 11. boot ROM: its system area is copied to RAM (games checksum it), vectors stay HLE */
     {
         static uint8_t rom[0x200000];

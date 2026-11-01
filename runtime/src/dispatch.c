@@ -20,7 +20,13 @@ static dc_miss_fn miss_handler;
 static dc_trap_fn trap_handler;
 static dc_call_hook call_hook;
 
+/* direct-mapped cache in front of dc_lookup (games call through registers a lot) */
+#define LCACHE 8192
+static struct { uint32_t addr; sh4fn fn; } lcache[LCACHE];
+static void lcache_clear(void) { memset(lcache, 0, sizeof lcache); }
+
 void dc_hle_register(uint32_t addr, sh4fn fn) {
+    lcache_clear();
     addr = (addr & 0x1FFFFFFFu) | 0x80000000u;
     for (int i = 0; i < hle_n; i++) if (hle[i].addr == addr) { hle[i].fn = fn; return; }
     if (hle_n < MAX_HLE) { hle[hle_n].addr = addr; hle[hle_n].fn = fn; hle_n++; }
@@ -37,6 +43,7 @@ static uint32_t img_base, img_end;
 int dc_alias_verbose = 1;
 
 void dc_alias_code(uint32_t dst, uint32_t src, uint32_t len) {
+    lcache_clear();
     dst = (dst & 0x1FFFFFFFu) | 0x80000000u; src = (src & 0x1FFFFFFFu) | 0x80000000u;
     if (alias_n < MAX_ALIAS) { alias[alias_n].dst = dst; alias[alias_n].src = src; alias[alias_n].len = len; alias_n++; }
 }
@@ -62,12 +69,19 @@ static uint32_t auto_alias(uint32_t addr) {
     return hit;
 }
 
-sh4fn dc_lookup(uint32_t addr) {
-    addr = (addr & 0x1FFFFFFFu) | 0x80000000u;   /* fold P0/P2 mirrors onto P1 */
+static sh4fn lookup_slow(uint32_t addr) {
     for (int i = 0; i < hle_n; i++) if (hle[i].addr == addr) return hle[i].fn;
     for (int i = 0; i < alias_n; i++)
         if (addr - alias[i].dst < alias[i].len) return lookup_table(alias[i].src + (addr - alias[i].dst));
     return lookup_table(addr);
+}
+sh4fn dc_lookup(uint32_t addr) {
+    addr = (addr & 0x1FFFFFFFu) | 0x80000000u;   /* fold P0/P2 mirrors onto P1 */
+    uint32_t k = (addr >> 1) & (LCACHE - 1);
+    if (lcache[k].addr == addr && lcache[k].fn) return lcache[k].fn;
+    sh4fn f = lookup_slow(addr);
+    if (f) { lcache[k].addr = addr; lcache[k].fn = f; }
+    return f;
 }
 
 static sh4fn lookup_table(uint32_t addr) {
