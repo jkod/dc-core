@@ -20,7 +20,7 @@ static uint32_t fu(float f) { uint32_t u; memcpy(&u, &f, 4); return u; }
 
 int main(void) {
     sh4ctx c; dc_init(&c);
-    dc_front_config cfg = { .title = "dc-core test", .scale = 2, .no_pacing = 1 };
+    dc_front_config cfg = { .title = "dc-core test", .scale = 2, .no_pacing = 1, .no_vmu = 1 };
     if (dc_front_open(&cfg)) { printf("FAIL: frontend did not open\n"); return 1; }
 
     pvr(0x068, 63u << 16); pvr(0x06C, 63u << 16);           /* 64x64 scene */

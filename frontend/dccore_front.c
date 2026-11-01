@@ -156,6 +156,16 @@ int dc_front_open(const dc_front_config *c) {
     if (dc_pvr_gl_init(getproc)) return -1;
     dc_pvr_sw_install();                                   /* TA collection (shared by the backends) */
     dc_maple_install();
+    if (!cfg.no_vmu) {                                     /* VMU in controller A's first slot */
+        char path[1024]; char *dir = NULL;
+        if (cfg.vmu_path) snprintf(path, sizeof path, "%s", cfg.vmu_path);
+        else if ((dir = SDL_GetPrefPath("dc-core", cfg.save_name ? cfg.save_name : "default")))
+            snprintf(path, sizeof path, "%svmu_a1.bin", dir);
+        else path[0] = 0;
+        SDL_free(dir);
+        if (!path[0] || dc_vmu_attach(0, path)) fprintf(stderr, "VMU: cannot use %s (continuing without saves)\n", path[0] ? path : "app data");
+        else fprintf(stderr, "VMU: %s\n", path);
+    }
     if (!cfg.no_audio) {
         SDL_AudioSpec want = {0}, have;
         want.freq = 44100; want.format = AUDIO_S16SYS; want.channels = 2; want.samples = 1024;

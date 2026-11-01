@@ -19,6 +19,12 @@ typedef struct {
 } dc_pad_state;
 extern dc_pad_state dc_pad[4];
 void dc_maple_install(void);   /* sets dc_hw.on_maple; port A connected by default */
+/* VMU in the first slot of controller `port`, stored in a 128 KB file (the common .bin dump
+ * layout, interchangeable with other emulators). A missing file becomes a freshly formatted
+ * card; writes go straight to the file. path NULL removes the card. 0 = ok. */
+int dc_vmu_attach(int port, const char *path);
+const uint8_t *dc_vmu_data(int port);
+void dc_vmu_format(uint8_t *data);       /* 128 KB blank, formatted card */
 #ifdef __cplusplus
 }
 #endif
