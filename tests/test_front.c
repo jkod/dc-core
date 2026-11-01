@@ -57,6 +57,27 @@ int main(void) {
     CHECK(side[1] == 255 && side[0] == 0, "left band %02X%02X%02X, want the green triangle", side[0], side[1], side[2]);
     CHECK(mid[0] == 255 && mid[1] == 0, "centre %02X%02X%02X, want the red triangle", mid[0], mid[1], mid[2]);
     CHECK(edge[2] == 255, "band background %02X%02X%02X", edge[0], edge[1], edge[2]);
+
+    /* widescreen HUD: a 2D (1/w >= 999) triangle in the left third moves to the left edge when the
+     * frame also has a 3D scene */
+    dc_pvr_gl_hud_z = 999.f;
+    pvr(0x128, 0); pvr(0x144, 0x80000000u);
+    ta(hdr);
+    for (int i = 0; i < 60; i++) {                          /* 3D: tiny triangles at the bottom right, varying 1/w */
+        uint32_t a0[8] = { 7u << 29, fu(60), fu(60), fu(1.0f + i * 0.01f), 0, 0, 0xFFFFFFFFu, 0 }, a1[8] = { 7u << 29, fu(61), fu(60), fu(1.5f), 0, 0, 0xFFFFFFFFu, 0 };
+        uint32_t a2[8] = { (7u << 29) | (1u << 28), fu(60), fu(61), fu(2.0f), 0, 0, 0xFFFFFFFFu, 0 };
+        ta(a0); ta(a1); ta(a2);
+    }
+    { uint32_t h0[8] = { 7u << 29, fu(4), fu(4), fu(1000), 0, 0, 0xFF00FF00u, 0 }, h1[8] = { 7u << 29, fu(16), fu(4), fu(1000), 0, 0, 0xFF00FF00u, 0 };
+      uint32_t h2[8] = { (7u << 29) | (1u << 28), fu(4), fu(16), fu(1000), 0, 0, 0xFF00FF00u, 0 };
+      ta(h0); ta(h1); ta(h2); }
+    ta(eol);
+    pvr(0x014, 1);
+    dc_pvr_gl_read(rgb, &w, &h);
+    const uint8_t *moved = rgb + (12 * w + 12) * 3, *old = rgb + (12 * w + 40) * 3;   /* shifted: x 8..28, 4:3 position: 29..49 (2x) */
+    CHECK(moved[1] == 255 && moved[0] == 0, "HUD at the left edge %02X%02X%02X", moved[0], moved[1], moved[2]);
+    CHECK(old[2] == 255, "HUD left its 4:3 position %02X%02X%02X", old[0], old[1], old[2]);
+    dc_pvr_gl_hud_z = 0;
     dc_pvr_gl_widescreen = 0;
     dc_front_close();
     printf(fails ? "%d frontend checks failed\n" : "frontend tests passed\n", fails);

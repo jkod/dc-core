@@ -244,6 +244,7 @@ int dc_pvr_gl_init(void *(*getproc)(const char *)) {
 }
 
 int dc_pvr_gl_widescreen;
+float dc_pvr_gl_hud_z;
 static float disp_aspect = 4.f / 3.f;
 
 static void ensure_fbo(int w, int h) {
@@ -279,10 +280,11 @@ static GLuint texture_for(uint32_t tcw, uint32_t tsp) {
 }
 
 /* ------------------------------------------------------------------ geometry */
+static float push_dx;                   /* x shift for the polygon being pushed (HUD in widescreen) */
 static void push(const pvr_vtx *v) {
     if (nverts == cap_verts) { cap_verts = cap_verts ? cap_verts * 2 : 8192; verts = realloc(verts, cap_verts * sizeof *verts); }
     gv *g = &verts[nverts++];
-    g->x = v->x; g->y = v->y; g->z = v->z; g->u = v->u; g->v = v->v; g->u1 = v->u1; g->v1 = v->v1;
+    g->x = v->x + push_dx; g->y = v->y; g->z = v->z; g->u = v->u; g->v = v->v; g->u1 = v->u1; g->v1 = v->v1;
     memcpy(g->c, v->c, 16); memcpy(g->o, v->o, 16); memcpy(g->c1, v->c1, 16); memcpy(g->o1, v->o1, 16);
 }
 /* triangle with the PVR's culling (sign of the screen area; odd strip triangles are flipped) */
@@ -378,14 +380,34 @@ void dc_pvr_gl_render(int scale) {
     nverts = 0;
     if (f.npolys + 1 > cap_spans) { cap_spans = f.npolys + 1024; spans = realloc(spans, cap_spans * sizeof *spans); }
     float cull_small = 0; { uint32_t cv = dc_pvr_reg(0x078); memcpy(&cull_small, &cv, 4); }
+    /* widescreen HUD: 2D overlay polygons (every vertex at 1/w >= dc_pvr_gl_hud_z) in the left or
+     * right third of the 4:3 picture move out to the edges of the 16:9 one; only in frames that
+     * also draw a 3D scene, so full-screen 2D menus keep their layout */
+    float hud_dx = 0;
+    if (dc_pvr_gl_widescreen && dc_pvr_gl_hud_z > 0) {
+        int n3d = 0;
+        for (int i = 0; i < f.npolys && n3d < 50; i++) {
+            const pvr_vtx *v = f.verts + f.polys[i].first;
+            if (f.polys[i].n >= 3 && v[0].z < dc_pvr_gl_hud_z && (v[0].z != v[1].z || v[0].z != v[2].z)) n3d++;
+        }
+        if (n3d >= 50) hud_dx = (WW - (float)RW) * 0.5f;
+    }
     for (int i = 0; i < f.npolys; i++) {
         const pvr_poly *p = &f.polys[i];
         const pvr_vtx *v = f.verts + p->first;
+        push_dx = 0;
+        if (hud_dx > 0) {
+            float zmin = 1e30f, cx = 0;
+            for (int k = 0; k < p->n; k++) { if (v[k].z < zmin) zmin = v[k].z; cx += v[k].x; }
+            cx /= (float)p->n;
+            if (zmin >= dc_pvr_gl_hud_z) push_dx = cx < RW / 3.f ? -hud_dx : cx > RW * 2.f / 3.f ? hud_dx : 0;
+        }
         spans[i].first = nverts;
         if (p->sprite) { tri(p, &v[0], &v[1], &v[2], 0, cull_small); tri(p, &v[0], &v[2], &v[3], 0, cull_small); }
         else for (int k = 0; k + 2 < p->n; k++) tri(p, &v[k], &v[k + 1], &v[k + 2], k & 1, cull_small);
         spans[i].count = nverts - spans[i].first;
     }
+    push_dx = 0;
     int mod_first = nverts;
     for (int i = 0; i < f.nmods; i++) {
         pvr_vtx t[3]; memset(t, 0, sizeof t);

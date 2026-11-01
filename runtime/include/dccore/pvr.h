@@ -27,6 +27,10 @@ void dc_pvr_gl_load_rgb(const uint8_t *rgb, int w, int h);   /* show a CPU-drawn
 /* 1 = render 16:9: the 4:3 picture in the middle, the sides filled with geometry the game draws
  * beyond the screen edges (games usually cull it, so a per-game camera patch gives the real thing) */
 extern int dc_pvr_gl_widescreen;
+/* widescreen HUD: polygons with every vertex at 1/w >= this are treated as 2D overlay, and those in
+ * the left / right third of the 4:3 picture move to the edges (0 = off; a per-game value, e.g. 999
+ * for Rush 2049, whose 2D sprites sit at 1000+) */
+extern float dc_pvr_gl_hud_z;
 #ifdef __cplusplus
 }
 #endif
