@@ -62,15 +62,24 @@ static void read_input(void) {
     dc_pad[0].buttons = b; dc_pad[0].jx = (uint8_t)jx; dc_pad[0].jy = (uint8_t)jy; dc_pad[0].lt = (uint8_t)lt; dc_pad[0].rt = (uint8_t)rt;
 }
 
-static void screenshot(void) {
+static Uint64 start_count; static uint64_t start_cycles;
+static void print_stats(void) {
+    double wall = (double)(SDL_GetPerformanceCounter() - start_count) / (double)SDL_GetPerformanceFrequency();
+    double emu = dc_current_ctx ? (double)(dc_current_ctx->cycles - start_cycles) / 200e6 : 0;
+    fprintf(stderr, "dc-core: %lu fields, %lu renders, %.1f s emulated in %.1f s (%.0f%% speed)\n",
+            presented, renders, emu, wall, wall > 0 ? emu / wall * 100 : 0);
+}
+static void screenshot_to(const char *path) {
     int w = 0, h = 0;
     static uint8_t *rgb; rgb = realloc(rgb, 1920 * 4 * 1440 * 4 * 3);
     dc_pvr_gl_read(rgb, &w, &h);
     if (w <= 0) return;
     SDL_Surface *s = SDL_CreateRGBSurfaceWithFormatFrom(rgb, w, h, 24, w * 3, SDL_PIXELFORMAT_RGB24);
     char name[64]; snprintf(name, sizeof name, "screenshot_%04lu.bmp", presented);
-    if (s) { SDL_SaveBMP(s, name); SDL_FreeSurface(s); fprintf(stderr, "saved %s\n", name); }
+    if (!path) path = name;
+    if (s) { SDL_SaveBMP(s, path); SDL_FreeSurface(s); fprintf(stderr, "saved %s\n", path); }
 }
+static void screenshot(void) { screenshot_to(NULL); }
 
 static void events(void) {
     SDL_Event e;
@@ -101,6 +110,12 @@ static void on_vblank(uint64_t f) {
     dc_pvr_gl_present(dw, dh, 0);
     SDL_GL_SwapWindow(win);
     presented++;
+    if (cfg.stats && presented % 300 == 0) print_stats();
+    if (cfg.exit_after && presented >= cfg.exit_after) {
+        if (cfg.shot_path) screenshot_to(cfg.shot_path);
+        if (cfg.stats) print_stats();
+        dc_front_close(); exit(0);
+    }
     if (audio) {
         static int16_t buf[4096 * 2];
         int n;
@@ -151,6 +166,7 @@ int dc_front_open(const dc_front_config *c) {
     for (int i = 0; i < SDL_NumJoysticks() && !pad; i++) if (SDL_IsGameController(i)) pad = SDL_GameControllerOpen(i);
     dc_hw.on_render = on_render;
     dc_hw.on_vblank = on_vblank;
+    start_count = SDL_GetPerformanceCounter(); start_cycles = dc_current_ctx ? dc_current_ctx->cycles : 0;
     return 0;
 }
 

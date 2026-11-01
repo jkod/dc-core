@@ -11,6 +11,7 @@ if(NOT MSVC)
 endif()
 
 set(DCCORE_DIR ${CMAKE_CURRENT_SOURCE_DIR} CACHE INTERNAL "")
+set(DCCORE_PYTHON ${Python3_EXECUTABLE} CACHE INTERNAL "")   # visible to ports calling dccore_add_recomp
 
 # Desktop frontend (window, OpenGL 3.3, audio, input): built when SDL2 is available
 find_package(SDL2 QUIET CONFIG)
@@ -43,15 +44,18 @@ function(dccore_add_recomp target)
     list(APPEND sj --setjmp ${a})
   endforeach()
   execute_process(
-    COMMAND ${Python3_EXECUTABLE} ${DCCORE_DIR}/tools/recomp/sh4recomp.py ${A_BIN}
+    COMMAND ${DCCORE_PYTHON} ${DCCORE_DIR}/tools/recomp/sh4recomp.py ${A_BIN}
             --base ${A_BASE} --funcs ${A_FUNCS} --out ${out} ${sj}
-    RESULT_VARIABLE rc)
+    RESULT_VARIABLE rc ERROR_VARIABLE err)
   if(NOT rc EQUAL 0)
-    message(FATAL_ERROR "sh4recomp failed")
+    message(FATAL_ERROR "sh4recomp failed (${rc}): ${err}")
   endif()
   file(GLOB gen_src ${out}/*.c)
   add_library(${target} STATIC ${gen_src})
   target_link_libraries(${target} PUBLIC dccore)
+  # dccore's dispatcher looks functions up in the generated table: a static-library cycle
+  target_link_libraries(dccore INTERFACE ${target})
+  set_property(TARGET dccore PROPERTY LINK_INTERFACE_MULTIPLICITY 3)
   if(NOT MSVC)
     # generated code is huge and flat; -O1 keeps compile times sane, aliasing must stay off
     target_compile_options(${target} PRIVATE -O1 -w -fno-strict-aliasing)

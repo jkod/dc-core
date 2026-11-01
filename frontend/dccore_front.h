@@ -20,6 +20,9 @@ typedef struct {
     int fullscreen;
     int no_pacing;          /* run as fast as possible (benchmarks) */
     int no_audio;
+    unsigned long exit_after;   /* quit after this many presented fields (0 = run until closed) */
+    const char *shot_path;      /* with exit_after: save the last rendered frame here (.bmp) */
+    int stats;                  /* print fields / renders / emulated vs wall time on exit and every 5 s */
 } dc_front_config;
 int  dc_front_open(const dc_front_config *cfg);   /* 0 = ok */
 void dc_front_close(void);
