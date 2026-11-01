@@ -178,6 +178,7 @@ static void gl_debug_init(void *(*getproc)(const char *)) {
     if (!dbg_log) return;
     const GLubyte *(*getstr)(GLenum) = (const GLubyte *(*)(GLenum))getproc("glGetString");
     p_getteximage = (void (*)(GLenum, GLint, GLenum, GLenum, void *))getproc("glGetTexImage");
+    fprintf(dbg_log, "dc-core GL diagnostics v3; texture read-back %s\n", p_getteximage ? "available" : "NOT available");
     if (getstr) fprintf(dbg_log, "GL_VENDOR %s\nGL_RENDERER %s\nGL_VERSION %s\nGLSL %s\n", getstr(0x1F00), getstr(0x1F01), getstr(0x1F02), getstr(0x8B8C));
     void (*cb)(gl_debug_cb, const void *) = (void (*)(gl_debug_cb, const void *))getproc("glDebugMessageCallback");
     void (*en)(GLenum) = (void (*)(GLenum))getproc("glEnable");
@@ -348,7 +349,8 @@ static GLuint texture_for(uint32_t tcw, uint32_t tsp) {
     if (dc_pvr_gl_mipmaps) p_glGenerateMipmap(GL_TEXTURE_2D);
     gtex[slot].mips = dc_pvr_gl_mipmaps;
     gtex[slot].id = ti.id; gtex[slot].name = n; gtex[slot].last = frame_no;
-    if (dbg_log) verify_upload(&ti, tcw, tsp);
+    if (dbg_log) { static int ups; if (++ups <= 5 || ups % 500 == 0) { fprintf(dbg_log, "upload %d: %dx%d tcw %08X tsp %08X\n", ups, ti.w, ti.h, tcw, tsp); fflush(dbg_log); }
+                   verify_upload(&ti, tcw, tsp); }
     return n;
 }
 
