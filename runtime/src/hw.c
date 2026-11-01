@@ -29,7 +29,9 @@ void dc_set_hw(const dc_hw_ops *ops) { if (ops) user_ops = *ops; else memset(&us
 
 /* ---------------------------------------------------------------- storage */
 static uint32_t sb[0x800];           /* 0x005F6800..0x005F7FFF, word index */
-static uint32_t pvr[0x800];          /* 0x005F8000..0x005F9FFF */
+static uint32_t pvr[0x800] = {        /* 0x005F8000..0x005F9FFF */
+    [0x11C >> 2] = 0xFF,               /* PT_ALPHA_REF power-on value: games that never write it rely on it */
+};
 #define aram dc_aram                 /* 0x00800000..0x009FFFFF sound RAM (aica.c) */
 uint8_t dc_vram[0x800000];           /* 8 MB, 64-bit layout */
 uint32_t dc_vram_gen[0x800];         /* per 4 KB page of dc_vram: bumped on every write (texture caches) */
