@@ -531,6 +531,7 @@ static void batch_add(const pvr_poly *p, int set, int mark, int blend, int first
  * edge colour: each edge strip is copied into a small texture, mipmapped on the GPU, and the bar
  * shows its blurred, darkened average (vertical gradient kept). No readback. */
 int dc_pvr_gl_side_fill = 1;
+int dc_pvr_gl_letterbox_4_3 = 1;
 static GLuint bar_prog, edge_tex[2], edge_fbo[2];
 static GLint bar_x0, bar_x1, bar_tex;
 static const char *bar_vs =
@@ -692,7 +693,8 @@ static void hud_group(const pvr_frame *f, int RW, signed char *side) {
         if (p->n < 3) continue;
         int flat = 1, near = 1; float x0 = v[0].x, x1 = v[0].x, y0 = v[0].y, y1 = v[0].y;
         for (int k = 0; k < p->n; k++) {
-            if (v[k].z != v[0].z) flat = 0;
+            /* nearly flat (within 2% in 1/w) counts as flat: Space Race's map shadow tilts a little */
+            if (fabsf(v[k].z - v[0].z) > 0.02f * v[0].z) flat = 0;
             if (v[k].z < dc_pvr_gl_hud_z || v[k].z >= hud_group_zmax) near = 0;
             if (v[k].x < x0) x0 = v[k].x; if (v[k].x > x1) x1 = v[k].x;
             if (v[k].y < y0) y0 = v[k].y; if (v[k].y > y1) y1 = v[k].y;
@@ -726,6 +728,22 @@ static void hud_group(const pvr_frame *f, int RW, signed char *side) {
         side[b[i].poly] = cx < RW / 3.f ? -1 : cx > RW * 2.f / 3.f ? 1 : 0;
     }
     free(gx0);
+}
+
+/* widescreen: a cut-scene's letterbox bar (an untextured, flat, opaque, near-black polygon across the
+ * whole 4:3 width, along the top or bottom edge, up to a third of the height). A frame with one is
+ * shown at 4:3 with black sides: the game frames such scenes (and culls them) for 4:3, and its bars
+ * stop at the 4:3 edges (Looney Tunes Space Race's intro). */
+static int letterbox_bar(const pvr_poly *p, const pvr_vtx *v, int RW, int H) {
+    if (p->n < 3 || p->list != 0 || ((p->isp >> 25) & 1)) return 0;
+    float x0 = v[0].x, x1 = v[0].x, y0 = v[0].y, y1 = v[0].y;
+    for (int k = 0; k < p->n; k++) {
+        if (v[k].z != v[0].z || v[k].c[0] > 0.06f || v[k].c[1] > 0.06f || v[k].c[2] > 0.06f) return 0;
+        if (v[k].x < x0) x0 = v[k].x; if (v[k].x > x1) x1 = v[k].x;
+        if (v[k].y < y0) y0 = v[k].y; if (v[k].y > y1) y1 = v[k].y;
+    }
+    if (x0 > 1.f || x1 < RW - 1.f || y1 - y0 < 4.f || y1 - y0 > H / 3.f) return 0;
+    return y0 <= 1.f || y1 >= H - 1.f;
 }
 
 void dc_pvr_gl_render(int scale) {
@@ -817,6 +835,9 @@ void dc_pvr_gl_render(int scale) {
         hud_group(&f, RW, hud_side);
         hud_group_zmax = 1e30f;
     }
+    int lbox = 0;
+    if (dc_pvr_gl_widescreen && dc_pvr_gl_letterbox_4_3)
+        for (int i = 0; i < f.npolys && !lbox; i++) lbox = letterbox_bar(&f.polys[i], f.verts + f.polys[i].first, RW, f.height);
     float cx0 = 1e30f, cx1 = -1e30f;                        /* x extent of the textured picture (side bars) */
     split_wide = 0;
     if (dc_pvr_gl_widescreen && dc_pvr_gl_split_panel_x > 0 && dc_pvr_gl_split_panel_x < f.width)
@@ -936,6 +957,7 @@ void dc_pvr_gl_render(int scale) {
     p_glClearColor(0, 0, 0, 1);
     p_glClear(GL_COLOR_BUFFER_BIT);
     { int sx0 = dc_pvr_gl_widescreen ? 0 : (int)((f.clip_x0 * (float)fb_w) / f.width), sx1 = dc_pvr_gl_widescreen ? fb_w : (int)(((f.clip_x1 + 1) * (float)fb_w) / f.width);
+      if (lbox) { float o = (WW - (float)RW) * 0.5f, k = (float)fb_w / WW; sx0 = (int)ceilf(o * k); sx1 = (int)floorf((o + (float)RW) * k); }
       int sy0 = f.clip_y0 * scale, sy1 = (f.clip_y1 + 1) * scale;
       p_glEnable(GL_SCISSOR_TEST);
       sc_x = sx0; sc_y = fb_h - sy1; sc_w = sx1 - sx0; sc_h = sy1 - sy0; sc_set[2] = -1;
@@ -1025,7 +1047,7 @@ void dc_pvr_gl_render(int scale) {
     p_glDisable(GL_BLEND);
     p_glDisable(GL_SCISSOR_TEST);
     p_glDepthMask(1);
-    if (dc_pvr_gl_widescreen && dc_pvr_gl_side_fill && hud_dx == 0) {   /* not in races (their HUD is out there) */
+    if (dc_pvr_gl_widescreen && dc_pvr_gl_side_fill && hud_dx == 0 && !lbox) {   /* not in races (their HUD is out there) */
         /* bars start where the picture's textured content ends (Rush's title image stops 3 pixels short
          * of the right edge, which left a black line), never inside the middle third */
         if (cx0 > cx1 || cx0 > RW * 0.33f) cx0 = 0;

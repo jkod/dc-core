@@ -663,6 +663,11 @@ int dc_pvr_sw_render(void) {
         fprintf(stderr, "pvr: %dx%d bg %.2f %.2f %.2f z %g, %d polys\n", RW, RH, bg[0], bg[1], bg[2], bz, npl);
         for (int i = 0; i < npl; i++) { const vtx *v = vt + pl[i].first;
             uint32_t ta = (pl[i].tcw & 0x1FFFFF) << 3;
+            float bx0 = 1e30f, bx1 = -1e30f, by0 = 1e30f, by1 = -1e30f, bz0 = 1e30f, bz1 = -1e30f;
+            for (int k = 0; k < pl[i].n; k++) {
+                if (v[k].x < bx0) bx0 = v[k].x; if (v[k].x > bx1) bx1 = v[k].x; if (v[k].y < by0) by0 = v[k].y; if (v[k].y > by1) by1 = v[k].y;
+                if (v[k].z < bz0) bz0 = v[k].z; if (v[k].z > bz1) bz1 = v[k].z; }
+            fprintf(stderr, " box x %.1f..%.1f y %.1f..%.1f z %g..%g\n", bx0, bx1, by0, by1, bz0, bz1);
             fprintf(stderr, " poly list %d n %d sprite %d isp %08X tsp %08X tcw %08X v0 %.1f,%.1f,%.2f uv %.3f,%.3f c %.2f %.2f %.2f %.2f tex@%06X: %02X%02X %02X%02X %02X%02X\n", pl[i].list, pl[i].n, pl[i].sprite,
                     pl[i].isp, pl[i].tsp, pl[i].tcw, v->x, v->y, v->z, v->u, v->v, v->c[0], v->c[1], v->c[2], v->c[3], ta,
                     dc_vram[ta + 1], dc_vram[ta], dc_vram[ta + 3], dc_vram[ta + 2], dc_vram[ta + 0x401], dc_vram[ta + 0x400]); }
