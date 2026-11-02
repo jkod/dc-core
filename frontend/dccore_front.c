@@ -186,23 +186,37 @@ static void read_input(void) {
         #undef JB
     }
 #endif
-    /* debugging: DC_PRESS="field:buttons[:fields],..." holds Dreamcast buttons (DC_BTN_* mask, hex)
-     * from that presented field on, for `fields` fields (default 10); extra bits 16 L trigger,
-     * 17 R trigger, 18 stick left, 19 stick right */
+    /* debugging: DC_PRESS="[P/]field:buttons[:fields],..." holds Dreamcast buttons (DC_BTN_* mask, hex)
+     * from that presented field on, for `fields` fields (default 10), on port P (A-D, default A; a port
+     * named here counts as connected); extra bits 16 L trigger, 17 R trigger, 18 stick left, 19 stick right */
     {
         static const char *press = (const char *)1;
-        if (press == (const char *)1) press = getenv("DC_PRESS");
+        if (press == (const char *)1) {
+            press = getenv("DC_PRESS");
+            for (const char *q = press; q && *q; q++)
+                if (*q >= 'A' && *q <= 'D' && q[1] == '/') dc_pad[*q - 'A'].connected = 1;
+        }
         for (const char *q = press; q && *q; ) {
-            char *e;
+            char *e; int port = 0;
+            if (*q >= 'A' && *q <= 'D' && q[1] == '/') { port = *q - 'A'; q += 2; }
             unsigned long f = strtoul(q, &e, 0), m = 0, d = 10; q = e;
             if (*q == ':') { m = strtoul(q + 1, &e, 16); q = e; }
             if (*q == ':') { d = strtoul(q + 1, &e, 0); q = e; }
             if (presented >= f && presented < f + d) {
-                b |= (uint16_t)m;
-                if (m & (1ul << 16)) lt = 255;
-                if (m & (1ul << 17)) rt = 255;
-                if (m & (1ul << 18)) jx = 0;
-                if (m & (1ul << 19)) jx = 255;
+                if (port == 0) {
+                    b |= (uint16_t)m;
+                    if (m & (1ul << 16)) lt = 255;
+                    if (m & (1ul << 17)) rt = 255;
+                    if (m & (1ul << 18)) jx = 0;
+                    if (m & (1ul << 19)) jx = 255;
+                } else {
+                    dc_pad_state *ps = &dc_pad[port];
+                    ps->buttons |= (uint16_t)m;
+                    if (m & (1ul << 16)) ps->lt = 255;
+                    if (m & (1ul << 17)) ps->rt = 255;
+                    if (m & (1ul << 18)) ps->jx = 0;
+                    if (m & (1ul << 19)) ps->jx = 255;
+                }
             }
             while (*q && *q != ',') q++;
             if (*q == ',') q++;
