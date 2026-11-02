@@ -6,6 +6,7 @@ find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
 add_library(dccore STATIC runtime/src/dispatch.c runtime/src/disc.c runtime/src/bios_hle.c runtime/src/hw.c runtime/src/ta.c runtime/src/arm7.c runtime/src/aica.c runtime/src/coro.c runtime/src/pvr_sw.c runtime/src/maple.c runtime/src/pvr_gl.c runtime/src/interp.c)
 target_include_directories(dccore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/runtime/include)
+set(DCCORE_MSVC_JOBS 4 CACHE STRING "MSVC: generated files compiled at the same time (/MP)")
 if(MSVC)
   target_compile_definitions(dccore PUBLIC _CRT_SECURE_NO_WARNINGS)
 else()
@@ -123,8 +124,10 @@ function(dccore_add_recomp target)
   if(MSVC)
     # generated code is huge and flat: many sections per object, warnings off; functions of 4 KB or
     # more are built without optimisation (sh4recomp.py: MSVC takes many minutes on them otherwise)
-    # /MP: compile the generated files in parallel (one cl.exe batch is otherwise serial)
-    target_compile_options(${target} PRIVATE /bigobj /w /MP)
+    # /MP: compile the generated files in parallel (one cl.exe batch is otherwise serial), at most
+    # DCCORE_MSVC_JOBS at a time: with one compiler per core, large generated files (Tennis 2K2's)
+    # ran out of memory and the build stopped with D8040
+    target_compile_options(${target} PRIVATE /bigobj /w /MP${DCCORE_MSVC_JOBS})
   else()
     # -O1 keeps compile times sane, aliasing must stay off
     target_compile_options(${target} PRIVATE -O1 -w -fno-strict-aliasing)
