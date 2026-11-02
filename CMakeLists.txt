@@ -121,8 +121,10 @@ function(dccore_add_recomp target)
   target_link_libraries(dccore INTERFACE ${target})
   set_property(TARGET dccore PROPERTY LINK_INTERFACE_MULTIPLICITY 3)
   if(MSVC)
-    # generated code is huge and flat: many sections per object, warnings off
-    target_compile_options(${target} PRIVATE /bigobj /w)
+    # generated code is huge and flat: many sections per object, warnings off; functions of 4 KB or
+    # more are built without optimisation (sh4recomp.py: MSVC takes many minutes on them otherwise)
+    # /MP: compile the generated files in parallel (one cl.exe batch is otherwise serial)
+    target_compile_options(${target} PRIVATE /bigobj /w /MP)
   else()
     # -O1 keeps compile times sane, aliasing must stay off
     target_compile_options(${target} PRIVATE -O1 -w -fno-strict-aliasing)

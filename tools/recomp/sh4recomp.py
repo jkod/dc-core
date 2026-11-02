@@ -663,6 +663,7 @@ def main():
     if args.write_funcs:
         open(args.write_funcs, "w").write("".join("%08x\n" % f for f in funcs))
     ranges = []
+    MSVC_NOOPT_BYTES = 0x1000
     for k, s in enumerate(funcs):
         e = funcs[k + 1] if k + 1 < len(funcs) else base + len(data)
         e = min(e, s + args.max_func_bytes)
@@ -678,7 +679,13 @@ def main():
     for g, rs in sorted(groups.items()):
         out = ['#include "dccore/sh4.h"', ""]
         for s_, e_ in rs:
-            tr.emit_function(s_, e_, funcs, out); out.append("")
+            # MSVC's optimizer takes many minutes (or hangs) on very large generated functions; build
+            # those without optimisation there (GCC/Clang at -O1 are fine)
+            big = e_ - s_ >= MSVC_NOOPT_BYTES
+            if big: out += ["#if defined(_MSC_VER) && !defined(__clang__)", '#pragma optimize("", off)', "#endif"]
+            tr.emit_function(s_, e_, funcs, out)
+            if big: out += ["#if defined(_MSC_VER) && !defined(__clang__)", '#pragma optimize("", on)', "#endif"]
+            out.append("")
         fn = os.path.join(args.out, "recomp_%08X.c" % (g << 14))
         text = "\n".join(out)
         if not (os.path.exists(fn) and open(fn).read() == text):
