@@ -134,6 +134,21 @@ int main(void) {
         CHECK((t2 & 0xFF) == 0xFF && ((t2 >> 16) & 0xFF) == 0, "texture rewrite not picked up %06X", t2);
     }
 
+    /* ---- untextured intensity polygon with the Offset bit set: the header is 32 bytes (type 1),
+     * face colour green, vertex intensity 1.0 -> a green triangle */
+    {
+        uint32_t eolx[8] = {0};
+        pvr(0x144, 0x80000000u);
+        uint32_t ih[8] = { (4u << 29) | (0u << 24) | (2u << 4) | (1u << 2) | (1u << 1), (7u << 29) | (1u << 24), (1u << 29), 0,
+                           fu(1), fu(0), fu(1), fu(0) };
+        uint32_t i0[8] = { 7u << 29, fu(4), fu(4), fu(1), 0, 0, fu(1), 0 };
+        uint32_t i1[8] = { 7u << 29, fu(40), fu(4), fu(1), 0, 0, fu(1), 0 };
+        uint32_t i2[8] = { (7u << 29) | (1u << 28), fu(4), fu(40), fu(1), 0, 0, fu(1), 0 };
+        ta(ih); ta(i0); ta(i1); ta(i2); ta(eolx);
+        pvr(0x014, 1);
+        CHECK(fb_px(8, 8) == 0x00FF00, "untextured intensity+offset triangle %06X", fb_px(8, 8));
+    }
+
     /* ---- modifier volumes: a red quad (Shadow bit) under one volume triangle in front of it
      * (darkened, cheap shadow 0.5) and one behind it (no effect) */
     uint32_t eol8[8] = {0};

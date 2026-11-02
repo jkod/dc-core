@@ -302,6 +302,8 @@ static void on_vblank(uint64_t f) {
         need_present = 0;
     }
     presented++;
+    { static long dbg = -2; if (dbg == -2) { const char *e = getenv("DC_PVRDBG"); dbg = e ? atol(e) : -1; }
+      if (dbg >= 0 && presented == (unsigned long)dbg) dc_pvr_sw_debug = 1; }   /* debugging: describe that frame's polygons (with DC_SW_RENDER=1) */
     if (cfg.stats && presented % 300 == 0) print_stats();
     {   /* debugging: DC_SHOTS="every[:dir]" saves the picture every `every` fields as dir/fNNNNN.bmp */
         static long every = -1; static char dir[512];

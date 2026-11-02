@@ -28,7 +28,10 @@ void dc_ta_reset(void) { ta.list = -1; ta.pending = 0; ta.vtx64 = 0; if (sink) s
 /* polygon global parameter size and vertex size from the parameter control word */
 static void poly_format(uint32_t pcw, int *hdr64, int *vtx64) {
     int tex = (pcw >> 3) & 1, col = (pcw >> 4) & 3, vol = (pcw >> 6) & 1, uv16 = pcw & 1, ofs = (pcw >> 2) & 1;
-    *hdr64 = (col == 2 && (vol || ofs));                        /* polygon types 2 and 4 */
+    /* polygon types 2 (intensity + offset colour) and 4 (intensity, two volumes). The offset bit
+     * only counts for textured polygons: an untextured intensity polygon with it set is type 1
+     * (32 bytes); reading 64 swallowed its first vertex (Looney Tunes Space Race's characters) */
+    *hdr64 = (col == 2 && (vol || (ofs && tex)));
     if (!tex) *vtx64 = 0;
     else if (!vol) *vtx64 = (col == 1);                         /* textured float colour: types 5/6 */
     else *vtx64 = 1;                                            /* two volumes, textured: 11..14 */
