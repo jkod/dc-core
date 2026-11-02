@@ -133,6 +133,7 @@ static void on_render(void) {
     static long from = -2;                                 /* DC_RENDER_FROM=field: draw every frame from then on */
     if (from == -2) { const char *e = getenv("DC_RENDER_FROM"); from = e ? atol(e) : -1; }
     if (skip > 1 && (from < 0 || (long)presented < from) && renders % (unsigned long)skip) { renders++; last_render_frame = (unsigned long)vblanks; return; }
+    if (dc_front_fast && renders % 8) { renders++; last_render_frame = (unsigned long)vblanks; return; }   /* fast-forward: draw every 8th frame */
     static int sw = -1;                                    /* DC_SW_RENDER=1: software renderer (diagnosing GPU issues) */
     if (sw < 0) { const char *e = getenv("DC_SW_RENDER"); sw = e && *e == '1'; }
     if (sw) {
@@ -327,6 +328,8 @@ static FILE *wav_file(void) {
     return wav;
 }
 
+int dc_front_fast;
+
 /* ------------------------------------------------------------------ per field */
 static void on_vblank(uint64_t f) {
     vblanks = f;
@@ -334,7 +337,7 @@ static void on_vblank(uint64_t f) {
         static uint8_t rgb[1280 * 1024 * 3]; int w, h;
         if (dc_pvr_display(rgb, 1280, 1024, &w, &h) == 0) { dc_pvr_gl_load_rgb(rgb, w, h); need_present = 1; }
     }
-    if (need_present) {                                    /* only when the picture changed (or the window) */
+    if (need_present && (!dc_front_fast || presented % 8 == 0)) {   /* only when the picture changed (or the window) */
         int dw, dh; SDL_GL_GetDrawableSize(win, &dw, &dh);
         if (cfg.widescreen && dh > 0) dc_pvr_gl_aspect = (float)dw / (float)dh;   /* the next frame fills the window */
         dc_pvr_gl_present(dw, dh, 0);
@@ -370,6 +373,7 @@ static void on_vblank(uint64_t f) {
     }
     events();
     /* pacing: emulated SH-4 time (200 MHz) against the wall clock */
+    if (dc_front_fast) { paced = 0; return; }              /* fast-forward: no pacing, resynchronised after */
     if (!cfg.no_pacing && dc_current_ctx) {
         Uint64 freq = SDL_GetPerformanceFrequency(), now = SDL_GetPerformanceCounter();
         if (!paced) { t0_count = now; t0_cycles = dc_current_ctx->cycles; paced = 1; return; }

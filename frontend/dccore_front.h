@@ -34,6 +34,9 @@ int  dc_front_open(const dc_front_config *cfg);   /* 0 = ok */
 void dc_front_close(void);
 /* frames presented so far / whether the window was closed (for tests and headless runs) */
 unsigned long dc_front_frames(void);
+/* non-zero: fast-forward (no pacing to the wall clock, every 8th field shown). A port sets it while
+ * the game shows a loading screen that waits on fields rather than on the disc. */
+extern int dc_front_fast;
 #ifdef __cplusplus
 }
 #endif
