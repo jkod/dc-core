@@ -532,6 +532,7 @@ static void batch_add(const pvr_poly *p, int set, int mark, int blend, int first
  * shows its blurred, darkened average (vertical gradient kept). No readback. */
 int dc_pvr_gl_side_fill = 1;
 int dc_pvr_gl_letterbox_4_3 = 1;
+int dc_pvr_gl_show_4_3;
 static GLuint bar_prog, edge_tex[2], edge_fbo[2];
 static GLint bar_x0, bar_x1, bar_tex;
 static const char *bar_vs =
@@ -835,7 +836,7 @@ void dc_pvr_gl_render(int scale) {
         hud_group(&f, RW, hud_side);
         hud_group_zmax = 1e30f;
     }
-    int lbox = 0;
+    int lbox = dc_pvr_gl_widescreen && dc_pvr_gl_show_4_3;
     if (dc_pvr_gl_widescreen && dc_pvr_gl_letterbox_4_3)
         for (int i = 0; i < f.npolys && !lbox; i++) lbox = letterbox_bar(&f.polys[i], f.verts + f.polys[i].first, RW, f.height);
     float cx0 = 1e30f, cx1 = -1e30f;                        /* x extent of the textured picture (side bars) */

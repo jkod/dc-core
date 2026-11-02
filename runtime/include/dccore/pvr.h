@@ -26,6 +26,8 @@ void dc_pvr_gl_read(uint8_t *rgb, int *w, int *h);
 extern int dc_pvr_gl_fill_lines;    /* show only the lines the game draws, filling the window height (default 1) */
 extern int dc_pvr_gl_side_fill;     /* widescreen: fill empty side bars with the picture's edge colour (default 1) */
 extern int dc_pvr_gl_letterbox_4_3;  /* widescreen: frames with cut-scene letterbox bars are shown at 4:3, black sides (default 1) */
+extern int dc_pvr_gl_show_4_3;       /* widescreen: set by a port for screens framed for 4:3 (e.g. a 2D title picture over a 3D
+                                      * scene): drawn at 4:3 with black sides, the HUD left in place (default 0) */
 void dc_pvr_gl_load_rgb(const uint8_t *rgb, int w, int h);   /* show a CPU-drawn framebuffer instead */
 /* 1 = render 16:9: the 4:3 picture in the middle, the sides filled with geometry the game draws
  * beyond the screen edges (games usually cull it, so a per-game camera patch gives the real thing) */
