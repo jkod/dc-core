@@ -280,7 +280,9 @@ static int step(sh4ctx *c, uint32_t pc, uint32_t op) {
 /* the delay slot of the branch at pc */
 static void slot(sh4ctx *c, uint32_t pc) {
     uint32_t sp = pc + 2;
-    int k = step(c, sp, dc_rd16(sp));
+    uint16_t op = dc_rd16(sp);
+    if (op == 0x0000) return;             /* a no-op on the hardware (jmp @rn ; .word 0 in C++ thunks) */
+    int k = step(c, sp, op);
     if (k == 0) dc_trap(c, sp, "branch in delay slot");
     else if (k < 0) dc_trap(c, sp, "illegal instruction in delay slot");
 }
