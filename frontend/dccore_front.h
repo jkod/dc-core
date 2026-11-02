@@ -20,6 +20,8 @@ typedef struct {
     int fullscreen;
     int widescreen;         /* 16:9 (dc_pvr_gl_widescreen) */
     int no_pacing;          /* run as fast as possible (benchmarks) */
+    int arrows_stick_only;  /* keyboard arrows move only the analog stick (d-pad on I/J/K/L): for games
+                               where the d-pad does something else while driving (Rush: camera) */
     int no_audio;
     unsigned long exit_after;   /* quit after this many presented fields (0 = run until closed) */
     const char *shot_path;      /* with exit_after: save the last rendered frame here (.bmp) */

@@ -92,10 +92,15 @@ static void read_input(void) {
     }
     const Uint8 *k = SDL_GetKeyboardState(NULL);
     uint16_t b = 0; int jx = 128, jy = 128, lt = 0, rt = 0;
-    if (k[SDL_SCANCODE_UP]) { b |= DC_BTN_UP; jy = 0; }
-    if (k[SDL_SCANCODE_DOWN]) { b |= DC_BTN_DOWN; jy = 255; }
-    if (k[SDL_SCANCODE_LEFT]) { b |= DC_BTN_LEFT; jx = 0; }
-    if (k[SDL_SCANCODE_RIGHT]) { b |= DC_BTN_RIGHT; jx = 255; }
+    int dp = !cfg.arrows_stick_only;                       /* arrows also press the d-pad */
+    if (k[SDL_SCANCODE_UP]) { if (dp) b |= DC_BTN_UP; jy = 0; }
+    if (k[SDL_SCANCODE_DOWN]) { if (dp) b |= DC_BTN_DOWN; jy = 255; }
+    if (k[SDL_SCANCODE_LEFT]) { if (dp) b |= DC_BTN_LEFT; jx = 0; }
+    if (k[SDL_SCANCODE_RIGHT]) { if (dp) b |= DC_BTN_RIGHT; jx = 255; }
+    if (k[SDL_SCANCODE_I]) b |= DC_BTN_UP;
+    if (k[SDL_SCANCODE_K]) b |= DC_BTN_DOWN;
+    if (k[SDL_SCANCODE_J]) b |= DC_BTN_LEFT;
+    if (k[SDL_SCANCODE_L]) b |= DC_BTN_RIGHT;
     if (k[SDL_SCANCODE_Z] || k[SDL_SCANCODE_SPACE]) b |= DC_BTN_A;
     if (k[SDL_SCANCODE_X] || k[SDL_SCANCODE_LCTRL]) b |= DC_BTN_B;
     if (k[SDL_SCANCODE_C] || k[SDL_SCANCODE_LSHIFT]) b |= DC_BTN_X;
