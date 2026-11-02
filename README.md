@@ -39,9 +39,6 @@ generated code as a static library.
 
 ## Status
 
-- Tennis 2K2 (US v1.009): 7,018 functions recompile and build. The ball physics run
-  natively and match the original to float rounding.
-- Rush 2049 (PAL): waiting on a complete disc image.
 - Next: PowerVR2 renderer (Vulkan/Metal/GL), AICA audio, Maple input, VMU saves, Switch build.
 
 ## Tests
