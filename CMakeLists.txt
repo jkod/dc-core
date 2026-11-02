@@ -80,7 +80,7 @@ endif()
 # Recompiles the player's own executable at configure time and builds it as a static
 # library. The generated C is derived from the game and stays in the build directory.
 function(dccore_add_recomp target)
-  cmake_parse_arguments(A "" "BIN;FUNCS;BASE" "SETJMP" ${ARGN})
+  cmake_parse_arguments(A "" "BIN;FUNCS;BASE;MAX_FUNC_BYTES" "SETJMP" ${ARGN})
   if(NOT A_BASE)
     set(A_BASE 0x8C010000)
   endif()
@@ -92,6 +92,11 @@ function(dccore_add_recomp target)
   foreach(a ${A_SETJMP})
     list(APPEND sj --setjmp ${a})
   endforeach()
+  # MAX_FUNC_BYTES: cap a function's span (default 0x40000); a lower cap keeps data that follows the
+  # last function before a gap from turning into huge generated files
+  if(A_MAX_FUNC_BYTES)
+    list(APPEND sj --max-func-bytes ${A_MAX_FUNC_BYTES})
+  endif()
   execute_process(
     COMMAND ${DCCORE_PYTHON} ${DCCORE_DIR}/tools/recomp/sh4recomp.py ${A_BIN}
             --base ${A_BASE} --funcs ${A_FUNCS} --out ${out} ${sj}
