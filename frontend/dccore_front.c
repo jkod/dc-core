@@ -242,12 +242,14 @@ static void events(void) {
             }
             if (e.key.keysym.sym == SDLK_F12) screenshot();
         }
+#ifndef __SWITCH__
         if (e.type == SDL_JOYDEVICEADDED) {
             fprintf(stderr, "joystick added: %s%s\n", SDL_JoystickNameForIndex(e.jdevice.which),
                     SDL_IsGameController(e.jdevice.which) ? " (gamepad)" : " (not a known gamepad: opened as a generic one)");
             if (!SDL_IsGameController(e.jdevice.which)) raw_open(e.jdevice.which);
         }
         if (e.type == SDL_JOYDEVICEREMOVED) raw_close((SDL_JoystickID)e.jdevice.which);
+#endif
         if (e.type == SDL_CONTROLLERDEVICEADDED) pad_open(e.cdevice.which);                 /* device index */
         if (e.type == SDL_CONTROLLERDEVICEREMOVED) pad_close((SDL_JoystickID)e.cdevice.which); /* instance id */
     }
