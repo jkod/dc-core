@@ -10,5 +10,6 @@ if command -v sdl2-config >/dev/null; then
   SDL_VIDEODRIVER=offscreen SDL_AUDIODRIVER=dummy "$T/front"
 else echo "(no SDL2: frontend test skipped)"; fi
 cc -O1 -w -I"$ROOT/runtime/include" "$ROOT/tests/test_disc.c" "$ROOT/runtime/src/disc.c" -o "$T/disc" && "$T/disc"
+cc -O1 -w -I"$ROOT/runtime/include" "$ROOT/tests/test_cdda.c" "$ROOT"/runtime/src/*.c -lm -o "$T/cdda" && (cd "$T" && ./cdda)
 python3 "$ROOT/tests/test_recomp.py" | tail -1
 if python3 -c "import keystone" 2>/dev/null; then python3 "$ROOT/tests/test_arm7.py" | tail -1; else echo "(no keystone: ARM7 tests skipped)"; fi

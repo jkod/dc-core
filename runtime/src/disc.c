@@ -133,6 +133,24 @@ int dc_disc_read(uint32_t lba, uint32_t count, uint8_t *dst) {
     return 0;
 }
 
+/* raw 2352-byte sectors (CD audio: 588 stereo 16-bit little-endian frames each) */
+int dc_disc_read_raw(uint32_t lba, uint32_t count, uint8_t *dst) {
+    for (uint32_t k = 0; k < count; k++, lba++, dst += 2352) {
+        track_t *t = NULL;
+        for (int i = 0; i < ntrk; i++) if (trk[i].lba <= lba && (!t || trk[i].lba > t->lba)) t = &trk[i];
+        if (!t || t->sector != 2352 || lba - t->lba >= t->sectors - t->skip) return -1;
+        if (!t->f && !(t->f = fopen(t->path, "rb"))) return -1;
+        long long off = (long long)(lba - t->lba + t->skip) * 2352;
+#ifdef _WIN32
+        _fseeki64(t->f, off, SEEK_SET);
+#else
+        fseeko(t->f, (off_t)off, SEEK_SET);
+#endif
+        if (fread(dst, 1, 2352, t->f) != 2352) return -1;
+    }
+    return 0;
+}
+
 /* ---------------------------------------------------------------- ISO9660 lookup (HD area) */
 static int find_in_dir(uint32_t lba, uint32_t size, const char *name, size_t nlen, uint32_t *elba, uint32_t *esize, int *is_dir) {
     uint8_t *d = (uint8_t *)malloc(size + 2048);

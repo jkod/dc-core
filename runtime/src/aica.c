@@ -7,6 +7,7 @@
  * Mixing/audio output hooks onto the same channel state (dc_aica_render, TODO).
  */
 #include "dccore/aica.h"
+#include "dccore/bios.h"
 #include "dccore/arm7.h"
 #include "dccore/hw.h"
 #include <string.h>
@@ -327,6 +328,19 @@ static void mix_sample(void) {
         if (pan == 15) { if (efpan & 16) gr = 0; else gl = 0; }
         else if (efpan & 16) gl *= gain(32 * pan); else gr *= gain(32 * pan);
         l += gl; r += gr;
+    }
+    {                                                                /* CD audio: external inputs 16 (L), 17 (R) */
+        int16_t cl, cr;
+        if (dc_cdda_frame(&cl, &cr))
+            for (int i = 0; i < 2; i++) {
+                uint32_t e = R(0x2000 + (16 + i) * 4) & 0xFFFF, efsdl = (e >> 8) & 15, efpan = e & 31;
+                if (!efsdl) continue;
+                float g = gain(32 * (int)(15 - efsdl)) * (float)(i ? cr : cl) / 32768.f, gl = g, gr = g;
+                int pan = (int)(efpan & 15);
+                if (pan == 15) { if (efpan & 16) gr = 0; else gl = 0; }
+                else if (efpan & 16) gl *= gain(32 * pan); else gr *= gain(32 * pan);
+                l += gl; r += gr;
+            }
     }
     float mv = gain(32 * (int)(15 - (R(0x2800) & 15))) * 32767.f * 0.5f;   /* headroom for many voices */
     l *= mv; r *= mv;

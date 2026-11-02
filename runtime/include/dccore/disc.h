@@ -9,6 +9,8 @@ int  dc_disc_open(const char *path);
 void dc_disc_close(void);
 /* Read `count` 2048-byte user-data sectors starting at image LBA `lba` (no +150 offset). */
 int  dc_disc_read(uint32_t lba, uint32_t count, uint8_t *dst);
+/* Read raw 2352-byte sectors (CD audio tracks) starting at image LBA `lba`. */
+int  dc_disc_read_raw(uint32_t lba, uint32_t count, uint8_t *dst);
 int  dc_disc_track_count(void);
 int  dc_disc_track_info(int i, uint32_t *lba, int *is_data, uint32_t *sectors);
 /* ISO9660 file in the high-density area ("1ST_READ.BIN", "DATA/X.BIN"; case-insensitive) */

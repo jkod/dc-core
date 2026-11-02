@@ -102,11 +102,57 @@ static uint32_t last_lba;
  * drawing for good after the car select). */
 int dc_gd_dma_irq;
 
+/* ---- CD audio: image LBAs [cur, end), `repeat` more times (15 = forever) from `start` */
+static struct { int playing, paused; uint32_t start, cur, end; int repeat; uint8_t buf[2352]; int pos; } cdda;
+static void cdda_play(uint32_t start, uint32_t end, int repeat) {
+    cdda.start = cdda.cur = start; cdda.end = end; cdda.repeat = repeat & 15;
+    cdda.playing = end > start; cdda.paused = 0; cdda.pos = 588;
+    TR("bios: cdda play lba %u..%u repeat %d\n", start, end, cdda.repeat);
+}
+int dc_cdda_frame(int16_t *l, int16_t *r) {
+    if (!cdda.playing || cdda.paused) return 0;
+    if (cdda.pos >= 588) {
+        if (cdda.cur >= cdda.end) {
+            if (!cdda.repeat) { cdda.playing = 0; return 0; }
+            if (cdda.repeat != 15) cdda.repeat--;
+            cdda.cur = cdda.start;
+        }
+        if (dc_disc_read_raw(cdda.cur, 1, cdda.buf)) { cdda.playing = 0; return 0; }
+        cdda.cur++; cdda.pos = 0;
+    }
+    const uint8_t *b = cdda.buf + cdda.pos++ * 4;
+    *l = (int16_t)(b[0] | b[1] << 8); *r = (int16_t)(b[2] | b[3] << 8);
+    return 1;
+}
+/* track number (1-based) -> image LBA of its start / end */
+static int track_span(uint32_t t, uint32_t *start, uint32_t *end) {
+    uint32_t lba, secs; int data;
+    if (t < 1 || dc_disc_track_info((int)t - 1, &lba, &data, &secs)) return -1;
+    if (start) *start = lba;
+    if (end) *end = lba + secs;
+    return 0;
+}
+
 static uint32_t toc_entry(uint32_t lba, int is_data) { return ((is_data ? 4u : 0u) << 28) | (1u << 24) | (lba + 150); }
 
 static int gd_exec(int cmd, uint32_t *p) {
     switch (cmd) {
-    case 16: case 17: case 32: case 34: {   /* PIOREAD / DMAREAD (+ stream variants) */
+    case 34:                                 /* GETSCD(format, size, buffer): CD audio status (Q subcode) */
+        if (p[0] <= 2) {
+            uint32_t buf = p[2], n = p[1] ? p[1] : 14, fad = (cdda.playing ? cdda.cur : last_lba) + 150, rel = fad;
+            int track = 1;
+            for (int i = 0; i < dc_disc_track_count(); i++) {
+                uint32_t lba; dc_disc_track_info(i, &lba, NULL, NULL);
+                if (lba + 150 <= fad) { track = i + 1; rel = fad - (lba + 150); }
+            }
+            uint8_t b[14] = { 0, (uint8_t)(cdda.playing ? (cdda.paused ? 0x12 : 0x11) : 0x15), 0, 14,
+                              0x01, (uint8_t)track, 1, (uint8_t)(rel >> 16), (uint8_t)(rel >> 8), (uint8_t)rel, 0,
+                              (uint8_t)(fad >> 16), (uint8_t)(fad >> 8), (uint8_t)fad };
+            if (DC_IS_RAM(buf)) for (uint32_t i = 0; i < n && i < 14; i++) dc_wr8(buf + i, b[i]);
+            return 0;
+        }
+        /* fall through - a read on discs that use 34 that way */
+    case 16: case 17: case 32: {             /* PIOREAD / DMAREAD (+ stream variants) */
         uint32_t lba = p[0] - 150, n = p[1], dst = p[2];
         TR("bios: gd read lba %u x%u -> %08X\n", lba, n, dst);
         if (dc_bios_read_hook) dc_bios_read_hook(lba, n, dst);
@@ -135,7 +181,19 @@ static int gd_exec(int cmd, uint32_t *p) {
         TR("bios: gd toc area %u: tracks %d..%d\n", area, first, last);
         return 0;
     }
-    case 24: case 27: case 22: case 23: case 20: case 21: case 40:   /* INIT, SEEK, PAUSE, RELEASE, PLAY... */
+    case 20: {                               /* PLAY tracks p[0]..p[1], p[2] repeats */
+        uint32_t a, b;
+        if (track_span(p[0], &a, NULL) || track_span(p[1] ? p[1] : p[0], NULL, &b)) return 0;
+        cdda_play(a, b, (int)p[2]);
+        return 0;
+    }
+    case 21:                                 /* PLAY2: FAD p[0]..p[1] (FAD = LBA + 150), p[2] repeats */
+        cdda_play(p[0] - 150, p[1] - 150, (int)p[2]);
+        return 0;
+    case 22: cdda.paused = 1; return 0;      /* PAUSE */
+    case 23: cdda.paused = 0; return 0;      /* RELEASE: resume */
+    case 27: case 24: cdda.playing = 0; return 0;   /* SEEK (stops audio), INIT */
+    case 40:
         return 0;
     default:
         TR("bios: gd cmd %d (ignored)\n", cmd);
@@ -205,7 +263,7 @@ static uint32_t h_gdrom(sh4ctx *c) {
         int k = c->r[4] % MAX_REQ;
         if (c->r[5]) {
             dc_wr32(c->r[5], req[k].status ? 1 : 0);  /* error code */
-            int rd = req[k].cmd == 16 || req[k].cmd == 17 || req[k].cmd == 32 || req[k].cmd == 34;
+            int rd = req[k].cmd == 16 || req[k].cmd == 17 || req[k].cmd == 32 || (req[k].cmd == 34 && req[k].p[0] > 2);
             dc_wr32(c->r[5] + 4, 0);
             dc_wr32(c->r[5] + 8, rd && !req[k].status ? req[k].p[1] * 2048u : 0);   /* bytes transferred */
             dc_wr32(c->r[5] + 12, 0);
@@ -214,7 +272,9 @@ static uint32_t h_gdrom(sh4ctx *c) {
         break;
     }
     case 4:                                           /* get_drv_stat(status[2]) */
-        if (c->r[4]) { dc_wr32(c->r[4], 2); dc_wr32(c->r[4] + 4, 0x80); }  /* standby, GD-ROM */
+        if (c->r[4]) {                                /* standby / playing / paused, GD-ROM */
+            dc_wr32(c->r[4], cdda.playing ? (cdda.paused ? 1 : 3) : 2); dc_wr32(c->r[4] + 4, 0x80);
+        }
         c->r[0] = 0;
         break;
     case 10:                                          /* change_data_type(params[4]) */

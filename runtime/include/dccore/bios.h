@@ -9,6 +9,9 @@ extern "C" {
 int dc_bios_install(sh4ctx *c, char region);
 extern int dc_bios_trace;
 extern int dc_gd_dma_irq;          /* 1: GD DMA reads raise the GD-DMA end interrupt (Tennis 2K2) */
+/* CD audio (GD commands PLAY / PLAY2 / PAUSE / RELEASE / SEEK / STOP): the next stereo frame at
+ * 44.1 kHz, 0 when nothing plays. The AICA mixes it as its external inputs (EFSDL/EFPAN 16, 17). */
+int dc_cdda_frame(int16_t *l, int16_t *r);
 extern void (*dc_bios_read_hook)(uint32_t lba, uint32_t count, uint32_t dst);   /* before each GD read */
 /* Optional: the player's own boot ROM (dc_boot.bin, 2 MB) and flash (dc_flash.bin, 128 KB).
  * The ROM is mapped at 0x00000000 (reads through NULL pointers see it, like on hardware) and
