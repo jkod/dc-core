@@ -38,6 +38,8 @@ extern float dc_pvr_gl_anisotropy;
  * overlay, and those in the left / right third of the 4:3 picture move to the edges (0 = off; a
  * per-game value: Rush 2049 draws its HUD at 1/w 1.0 (panels) and 1000+ (sprites), so 1.0) */
 extern float dc_pvr_gl_hud_z;
+extern int dc_pvr_gl_hud_move;        /* widescreen: HUD pieces move out to the screen edges (default 1) */
+extern int dc_pvr_gl_hud_sharp;       /* HUD textures (flat polygons at >= dc_pvr_gl_hud_z) get a bicubic filter (default 1) */
 #ifdef __cplusplus
 }
 #endif
