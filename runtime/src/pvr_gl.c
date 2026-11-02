@@ -251,7 +251,7 @@ static const char *fs_src =
 "    if (u_fog == 1) { fc = u_fog_vert; f = off.a; } else { fc = u_fog_ram; f = fog_alpha(iw); }\n"
 "    if (u_fog == 3) px = vec4(fc, f); else px.rgb = mix(px.rgb, fc, f);\n"
 "  }\n"
-"  if (u_pt != 0 && px.a < u_pt_ref) discard;\n"
+"  if (u_pt != 0 && px.a * 255.0 + 0.5 < u_pt_ref * 255.0) discard;\n"   /* in 8-bit steps like the PVR: colours divided by the interpolated 1/w can land a hair below 1.0 (NVIDIA), which dropped whole letters of Rush's text */
 "  o_col = px;\n"
 "  gl_FragDepth = clamp((log2(iw) + 64.0) / 128.0, 0.0, 1.0);\n"
 "}\n";
