@@ -1120,10 +1120,12 @@ void dc_pvr_gl_render(int scale) {
         }
     }
     if (dc_pvr_gl_widescreen && dc_pvr_gl_side_fill && hud_dx == 0 && !lbox) {   /* not in races (their HUD is out there) */
-        /* bars start where the picture's textured content ends (Rush's title image stops 3 pixels short
-         * of the right edge, which left a black line), never inside the middle third */
-        if (cx0 > cx1 || cx0 > RW * 0.33f) cx0 = 0;
-        if (cx0 > cx1 || cx1 < RW * 0.67f) cx1 = (float)RW;
+        /* bars start where the picture's textured content ends when that is just short of the edge
+         * (Rush's title image stops 3 pixels short of the right edge, which left a black line); content
+         * that ends further in is a picture on an untextured background (Bomberman Online's logos on
+         * the grey background plane), whose bars start at the edge */
+        if (cx0 > cx1 || cx0 > 16.f) cx0 = 0;
+        if (cx0 > cx1 || cx1 < (float)RW - 16.f) cx1 = (float)RW;
         if (cx0 < 0) cx0 = 0;
         if (cx1 > (float)RW) cx1 = (float)RW;
         float off = (WW - (float)RW) * 0.5f, k = (float)fb_w / WW;
