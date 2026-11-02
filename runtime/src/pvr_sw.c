@@ -88,6 +88,7 @@ static struct {
     int mod_inst;                                  /* modifier volume instruction of the last header */
     int open;                                      /* index of the strip being filled, -1 none */
     int sprite;                                    /* the last header was a sprite header */
+    int ux0, uy0, ux1, uy1;                        /* last user tile clip rectangle (scene pixels) */
 } cur = { .open = -1 };
 
 static vtx *new_vtx(void) {
@@ -101,6 +102,8 @@ static poly *new_poly(int list, int sprite) {
     p->isp = cur.isp; p->tsp = cur.tsp; p->tcw = cur.tcw; p->tsp1 = cur.tsp1; p->tcw1 = cur.tcw1;
     p->list = list; p->first = nvt; p->n = 0; p->sprite = sprite;
     p->twovol = !sprite && ((cur.pcw >> 6) & 1); p->shadow = (cur.pcw >> 7) & 1;
+    p->uclip = (int)((cur.pcw >> 16) & 3); if (p->uclip == 1) p->uclip = 0;
+    p->ux0 = cur.ux0; p->uy0 = cur.uy0; p->ux1 = cur.ux1; p->uy1 = cur.uy1;
     return p;
 }
 
@@ -125,7 +128,11 @@ static uint32_t isp_from_pcw(uint32_t isp, uint32_t pcw) { return (isp & ~(0xFu 
 
 static void sink(int kind, int list, const uint32_t *w, int words) {
     switch (kind) {
-    case -1: list_init(); cur.open = -1; cur.pcw = 0; cur.sprite = 0; return;
+    case -1: list_init(); cur.open = -1; cur.pcw = 0; cur.sprite = 0; cur.ux0 = cur.uy0 = 0; cur.ux1 = cur.uy1 = 4096; return;
+    case 1:                                           /* user tile clip: tile (32x32) min/max, inclusive */
+        cur.ux0 = (int)(w[4] & 63) * 32; cur.uy0 = (int)(w[5] & 31) * 32;
+        cur.ux1 = ((int)(w[6] & 63) + 1) * 32; cur.uy1 = ((int)(w[7] & 31) + 1) * 32;
+        return;
     case 4:                                           /* polygon header (or modifier volume) */
         cur.open = -1;
         cur.sprite = 0;
@@ -487,11 +494,16 @@ static void draw_tri(const poly *p, const vtx *a, const vtx *b, const vtx *c, in
     int x0 = (int)floorf(fminf(ax, fminf(bx, cx))), x1 = (int)ceilf(fmaxf(ax, fmaxf(bx, cx)));
     int y0 = (int)floorf(fminf(ay, fminf(by, cy))), y1 = (int)ceilf(fmaxf(ay, fmaxf(by, cy)));
     if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0; if (x1 > RW) x1 = RW; if (y1 > RH) y1 = RH;
+    if (p->uclip == 2) {                                   /* user tile clip: only inside the rectangle */
+        if (x0 < p->ux0) x0 = p->ux0; if (y0 < p->uy0) y0 = p->uy0;
+        if (x1 > p->ux1) x1 = p->ux1; if (y1 > p->uy1) y1 = p->uy1;
+    }
     float inv = 1.f / area;
     float pt_ref = (REG(0x11C) & 255) / 255.f;
     int ia = (int)(a - vt), ib = (int)(b - vt), ic = (int)(c - vt);
     for (int y = y0; y < y1; y++)
         for (int x = x0; x < x1; x++) {
+            if (p->uclip == 3 && x >= p->ux0 && x < p->ux1 && y >= p->uy0 && y < p->uy1) continue;
             float px = x + 0.5f, py = y + 0.5f, w0, w1, w2;
             if (!inside(ax, ay, bx, by, cx, cy, px, py, inv, &w0, &w1, &w2)) continue;
             float z = w0 * a->z + w1 * b->z + w2 * c->z;

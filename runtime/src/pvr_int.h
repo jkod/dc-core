@@ -12,6 +12,8 @@ typedef struct {
     uint32_t isp, tsp, tcw, tsp1, tcw1;
     int list, first, n, sprite;         /* list: 0 opaque, 2 translucent, 4 punch-through */
     int twovol, shadow;                 /* PCW Volume / Shadow bits */
+    int uclip;                          /* user tile clip: 0 off, 2 draw inside, 3 draw outside the rectangle */
+    int ux0, uy0, ux1, uy1;             /* that rectangle in scene pixels, exclusive end */
 } pvr_poly;
 typedef struct { float x[3], y[3], z[3]; int inst, list; } pvr_modtri;
 

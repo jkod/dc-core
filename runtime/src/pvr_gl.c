@@ -433,22 +433,43 @@ static int cmp_sort(const void *a, const void *b) {
 
 /* Draw batching: consecutive polygons with the same render state go out in one call (menus can
  * have thousands of small polygons, and per-call overhead dominates). Draw order is unchanged. */
-typedef struct { uint32_t isp, tsp, tcw; int list, set, mark, blend; } bkey;
+typedef struct { uint32_t isp, tsp, tcw; int list, set, mark, blend, uclip, ux0, uy0, ux1, uy1; } bkey;
+/* scissor: the frame's clip rectangle, narrowed per polygon by the PVR's user tile clip (split screen) */
+static int sc_x, sc_y, sc_w, sc_h, sc_set[4];
+static float sc_off, sc_k, sc_kx; static int sc_scale, sc_rw;
+static void scissor(int x, int y, int w, int h) {
+    if (w < 0) w = 0; if (h < 0) h = 0;
+    if (sc_set[0] == x && sc_set[1] == y && sc_set[2] == w && sc_set[3] == h) return;
+    sc_set[0] = x; sc_set[1] = y; sc_set[2] = w; sc_set[3] = h;
+    p_glScissor(x, y, w, h);
+}
+static void scissor_for(const pvr_poly *p) {
+    if (p->uclip != 2) { scissor(sc_x, sc_y, sc_w, sc_h); return; }
+    /* a rectangle at the picture's left or right edge reaches the edge of the (widescreen) target */
+    int x0 = p->ux0 <= 0 ? 0 : (int)floorf((sc_off + (float)p->ux0 * sc_kx) * sc_k);
+    int x1 = p->ux1 >= sc_rw ? 1 << 20 : (int)ceilf((sc_off + (float)p->ux1 * sc_kx) * sc_k);
+    int y0 = fb_h - p->uy1 * sc_scale, y1 = fb_h - p->uy0 * sc_scale;     /* GL rows go up */
+    if (x0 < sc_x) x0 = sc_x; if (x1 > sc_x + sc_w) x1 = sc_x + sc_w;
+    if (y0 < sc_y) y0 = sc_y; if (y1 > sc_y + sc_h) y1 = sc_y + sc_h;
+    scissor(x0, y0, x1 - x0, y1 - y0);
+}
 static struct { bkey key; int valid; GLint *first; GLsizei *count; int n, cap; } B;
 static void batch_flush(void) {
     if (B.n == 1) p_glDrawArrays(GL_TRIANGLES, B.first[0], B.count[0]);
     else if (B.n > 1) p_glMultiDrawArrays(GL_TRIANGLES, B.first, B.count, B.n);
     B.n = 0;
 }
-static void batch_reset(void) { batch_flush(); B.valid = 0; }
+static void batch_reset(void) { batch_flush(); B.valid = 0; scissor(sc_x, sc_y, sc_w, sc_h); }
 /* mark: stencil reference (-1 = leave the stencil state alone); blend: set the blend function */
 static void batch_add(const pvr_poly *p, int set, int mark, int blend, int first, int count) {
     if (!count) return;
-    bkey k = { p->isp, set ? p->tsp1 : p->tsp, set ? p->tcw1 : p->tcw, p->list, set, mark, blend };
+    bkey k = { p->isp, set ? p->tsp1 : p->tsp, set ? p->tcw1 : p->tcw, p->list, set, mark, blend,
+               p->uclip, p->uclip ? p->ux0 : 0, p->uclip ? p->uy0 : 0, p->uclip ? p->ux1 : 0, p->uclip ? p->uy1 : 0 };
     if (!B.valid || memcmp(&k, &B.key, sizeof k)) {
         batch_flush();
         if (mark >= 0) p_glStencilFunc(GL_ALWAYS, mark, 0xFF);
         set_poly_state(p, set);
+        scissor_for(p);
         if (set) { p_glDepthFunc(GL_EQUAL); p_glDepthMask(0); }
         if (blend) p_glBlendFunc(blend_src((p->tsp >> 29) & 7), blend_dst((p->tsp >> 26) & 7));
         B.key = k; B.valid = 1;
@@ -707,7 +728,11 @@ void dc_pvr_gl_render(int scale) {
                 for (int k = 0; k < f.polys[i].n && !wide3d; k++) if (v[k].x < -2.f || v[k].x > RW + 2.f) wide3d = 1;
             }
         }
-        if (n3d >= 50 && wide3d) hud_dx = (WW - (float)RW) * 0.5f;
+        /* split screen (user tile clip on part of the picture): the HUD belongs to its view, it stays */
+        int split = 0;
+        for (int i = 0; i < f.npolys && !split; i++)
+            if (f.polys[i].uclip == 2 && (f.polys[i].uy1 - f.polys[i].uy0 < f.height * 3 / 4 || f.polys[i].ux1 - f.polys[i].ux0 < f.width * 3 / 4)) split = 1;
+        if (n3d >= 50 && wide3d && !split) hud_dx = (WW - (float)RW) * 0.5f;
     }
     /* HUD pieces are grouped first (pieces that touch or nearly touch: the letters of a line, the
      * parts of a panel), then each group moves as a whole by where its centre is, so centred text
@@ -772,7 +797,9 @@ void dc_pvr_gl_render(int scale) {
     { int sx0 = dc_pvr_gl_widescreen ? 0 : (int)((f.clip_x0 * (float)fb_w) / f.width), sx1 = dc_pvr_gl_widescreen ? fb_w : (int)(((f.clip_x1 + 1) * (float)fb_w) / f.width);
       int sy0 = f.clip_y0 * scale, sy1 = (f.clip_y1 + 1) * scale;
       p_glEnable(GL_SCISSOR_TEST);
-      p_glScissor(sx0, fb_h - sy1, sx1 - sx0, sy1 - sy0); }
+      sc_x = sx0; sc_y = fb_h - sy1; sc_w = sx1 - sx0; sc_h = sy1 - sy0; sc_set[2] = -1;
+      sc_off = (WW - (float)RW) * 0.5f; sc_k = (float)fb_w / WW; sc_kx = (float)RW / (float)f.width; sc_scale = scale; sc_rw = f.width;
+      scissor(sc_x, sc_y, sc_w, sc_h); }
     p_glClearColor(f.bg[0], f.bg[1], f.bg[2], 1.f);
     p_glClearDepth(depth_of(f.bgz)); p_glClearStencil(0);
     p_glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
