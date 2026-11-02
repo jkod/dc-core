@@ -244,7 +244,7 @@ static const char *fs_src =
 "  r = clamp(r, 0.0, 1.0);\n"
 /* plus a light unsharp mask against the half-resolution mip (a 2x2 texel average) */
 "  vec4 blur = textureLod(u_tex, uv, 1.0);\n"
-"  return clamp(r + 0.6 * (r - blur), 0.0, 1.0);\n"
+"  return clamp(r + 1.0 * (r - blur), 0.0, 1.0);\n"
 "}\n"
 "float fog_alpha(float invw) {\n"
 "  float fw = clamp(u_fog_den * invw, 1.0, 255.999985);\n"
@@ -531,11 +531,13 @@ static const char *bar_fs =
 "#version 330 core\n"
 "in float v_y; uniform sampler2D u_tex; out vec4 o_col;\n"
 "void main() {\n"
+
 "  vec3 c = textureLod(u_tex, vec2(0.5, v_y), 3.0).rgb;\n"
-"  float l = dot(c, vec3(0.299, 0.587, 0.114));\n"
-/* dark pictures (the logo and legal screens: black with some text or a logo near the edge) keep
- * black bars instead of a faint grey smear; colourful ones get the blurred, darkened edge colour */
-"  o_col = vec4(c * 0.75 * smoothstep(0.08, 0.2, l), 1.0);\n"
+"  float l = max(c.r, max(c.g, c.b));\n"
+/* near-black pictures (the logo and legal screens: black with some text near the edge) keep black
+ * bars instead of a faint grey smear; others, dark blue panels included, get the blurred, darkened
+ * edge colour */
+"  o_col = vec4(c * 0.75 * smoothstep(0.06, 0.16, l), 1.0);\n"
 "}\n";
 #define EDGE_W 16
 #define EDGE_H 64
@@ -560,7 +562,7 @@ static void bars_init(void) {
     p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 /* side = 0 left, 1 right; picture columns [px0, px1) of the FBO, rows [y0, y1) */
-static void draw_bars(int px0, int px1, int y0, int y1) {
+static void draw_bars(int px0, int px1, int y0, int y1, int left, int right) {
     if (!bar_prog || px0 <= 0 || y1 <= y0) return;
     if (px1 >= fb_w || px1 - px0 < 8) return;
     int strip = (px1 - px0) / 40 > 2 ? (px1 - px0) / 40 : 2;
@@ -578,6 +580,7 @@ static void draw_bars(int px0, int px1, int y0, int y1) {
     p_glUniform1i(bar_tex, 0); p_glActiveTexture(GL_TEXTURE0);
     p_glBindVertexArray(vao);
     for (int i = 0; i < 2; i++) {
+        if (!(i ? right : left)) continue;
         float a = i ? (float)(px1 - 1) : 0.f, b = i ? (float)fb_w : (float)(px0 + 1);   /* cover the edge pixel */
         p_glUniform1f(bar_x0, a / fb_w * 2.f - 1.f); p_glUniform1f(bar_x1, b / fb_w * 2.f - 1.f);
         p_glBindTexture(GL_TEXTURE_2D, edge_tex[i]);
@@ -784,7 +787,6 @@ void dc_pvr_gl_render(int scale) {
         memset(hud_side, 0, (size_t)f.npolys);
         hud_group(&f, RW, hud_side);
     }
-    int beyond = 0;                                        /* anything drawn outside the 4:3 picture */
     float cx0 = 1e30f, cx1 = -1e30f;                        /* x extent of the textured picture (side bars) */
     for (int i = 0; i < f.npolys; i++) {
         const pvr_poly *p = &f.polys[i];
@@ -795,7 +797,6 @@ void dc_pvr_gl_render(int scale) {
         if (p->sprite) { tri(p, &v[0], &v[1], &v[2], 0, cull_small); tri(p, &v[0], &v[2], &v[3], 0, cull_small); }
         else for (int k = 0; k + 2 < p->n; k++) tri(p, &v[k], &v[k + 1], &v[k + 2], k & 1, cull_small);
         spans[i].count = nverts - spans[i].first;
-        if (!beyond) for (int k = 0; k < p->n; k++) if (v[k].x < -2.f || v[k].x > RW + 2.f) { beyond = 1; break; }
         if ((p->isp >> 25) & 1) for (int k = 0; k < p->n; k++) { if (v[k].x < cx0) cx0 = v[k].x; if (v[k].x > cx1) cx1 = v[k].x; }
     }
     push_dx = 0;
@@ -925,7 +926,7 @@ void dc_pvr_gl_render(int scale) {
     p_glDisable(GL_BLEND);
     p_glDisable(GL_SCISSOR_TEST);
     p_glDepthMask(1);
-    if (dc_pvr_gl_widescreen && dc_pvr_gl_side_fill && !beyond) {
+    if (dc_pvr_gl_widescreen && dc_pvr_gl_side_fill && hud_dx == 0) {   /* not in races (their HUD is out there) */
         /* bars start where the picture's textured content ends (Rush's title image stops 3 pixels short
          * of the right edge, which left a black line), never inside the middle third */
         if (cx0 > cx1 || cx0 > RW * 0.33f) cx0 = 0;
@@ -934,7 +935,22 @@ void dc_pvr_gl_render(int scale) {
         if (cx1 > (float)RW) cx1 = (float)RW;
         float off = (WW - (float)RW) * 0.5f, k = (float)fb_w / WW;
         int px0 = (int)ceilf((off + cx0) * k), px1 = (int)floorf((off + cx1) * k);
-        draw_bars(px0, px1, fb_h - (f.clip_y1 + 1) * scale, fb_h - f.clip_y0 * scale);
+        /* a side band the game drew into (a 3D scene past the picture) keeps it; an empty (black) one gets
+         * a bar: menus, the title, the panel beside Rush's split-screen views. One pixel column each,
+         * just outside the picture. */
+        int y0 = fb_h - (f.clip_y1 + 1) * scale, y1 = fb_h - f.clip_y0 * scale, fill[2] = { 0, 0 };
+        if (y1 > y0 && px0 > 4 && px1 < fb_w - 4) {
+            static uint8_t *col; static int cap_col;
+            if (y1 - y0 > cap_col) { cap_col = y1 - y0; col = realloc(col, (size_t)cap_col * 4); }
+            p_glBindFramebuffer(GL_FRAMEBUFFER, fbo); p_glPixelStorei(GL_PACK_ALIGNMENT, 1);
+            for (int sd = 0; sd < 2; sd++) {
+                p_glReadPixels(sd ? px1 + 2 : px0 - 3, y0, 1, y1 - y0, GL_RGBA, GL_UNSIGNED_BYTE, col);
+                int lit = 0;
+                for (int y = 0; y < y1 - y0; y++) if (col[y * 4] + col[y * 4 + 1] + col[y * 4 + 2] > 24) lit++;
+                fill[sd] = lit * 20 < y1 - y0;                       /* under 5% of the column drawn */
+            }
+        }
+        if (fill[0] || fill[1]) draw_bars(px0, px1, y0, y1, fill[0], fill[1]);
     }
     pic_offy = ((float)(f.height - 1 - f.clip_y1) - (float)f.clip_y0) * 0.5f / (float)f.height;
     pic_y0 = fb_h - (f.clip_y1 + 1) * scale; pic_y1 = fb_h - f.clip_y0 * scale;
