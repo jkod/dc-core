@@ -754,6 +754,32 @@ static int letterbox_bar(const pvr_poly *p, const pvr_vtx *v, int RW, int H) {
     return y0 <= 1.f || y1 >= H - 1.f;
 }
 
+/* a full-screen card: an opaque textured quad, nearly flat, that covers the whole 4:3 picture with
+ * a 3D scene behind it (20+ polygons wholly farther away). In 4:3 the scene is hidden; in widescreen
+ * it would show past the card's edges (Looney Tunes Space Race's title over its studio set), so
+ * such a frame counts as 2D for dc_pvr_gl_clip_2d. */
+static int backdrop_card(const pvr_frame *f, int RW) {
+    for (int i = 0; i < f->npolys; i++) {
+        const pvr_poly *p = &f->polys[i]; const pvr_vtx *v = f->verts + p->first;
+        if (p->n < 3 || p->n > 4 || (p->list != 0 && p->list != 4) || !((p->isp >> 25) & 1)) continue;
+        float x0 = v[0].x, x1 = v[0].x, y0 = v[0].y, y1 = v[0].y, z0 = v[0].z, z1 = v[0].z;
+        for (int k = 1; k < p->n; k++) {
+            if (v[k].x < x0) x0 = v[k].x; if (v[k].x > x1) x1 = v[k].x; if (v[k].y < y0) y0 = v[k].y; if (v[k].y > y1) y1 = v[k].y;
+            if (v[k].z < z0) z0 = v[k].z; if (v[k].z > z1) z1 = v[k].z;
+        }
+        if (x0 > 1.f || x1 < RW - 1.f || y0 > 1.f || y1 < f->height - 1.f || z1 - z0 > 0.1f * z1) continue;
+        int behind = 0;
+        for (int j = 0; j < f->npolys && behind < 20; j++) {
+            const pvr_poly *q = &f->polys[j]; const pvr_vtx *w = f->verts + q->first;
+            if (q->n < 3) continue;
+            float zm = w[0].z; for (int k = 1; k < q->n; k++) if (w[k].z > zm) zm = w[k].z;
+            if (zm < z0) behind++;
+        }
+        if (behind >= 20) return 1;
+    }
+    return 0;
+}
+
 void dc_pvr_gl_render(int scale) {
     if (!ready) return;
     if (scale < 1) scale = 1;
@@ -1109,7 +1135,7 @@ void dc_pvr_gl_render(int scale) {
             n3d++;
             for (int k = 0; k < f.polys[i].n && !wide3d; k++) if (v[k].x < -2.f || v[k].x > RW + 2.f) wide3d = 1;
         }
-        if (!(n3d >= 50 && wide3d)) {
+        if (!(n3d >= 50 && wide3d) || backdrop_card(&f, RW)) {
             float off = (WW - (float)RW) * 0.5f, k = (float)fb_w / WW;
             int l = (int)floorf(off * k), r = (int)ceilf((off + (float)RW) * k);
             p_glBindFramebuffer(GL_FRAMEBUFFER, fbo);
