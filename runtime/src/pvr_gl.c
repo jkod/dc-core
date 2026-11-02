@@ -925,10 +925,16 @@ void dc_pvr_gl_render(int scale) {
                 for (int k = 0; k < f.polys[i].n && !wide3d; k++) if (v[k].x < -2.f || v[k].x > RW + 2.f) wide3d = 1;
             }
         }
-        /* split screen (user tile clip on part of the picture): the HUD belongs to its view, it stays */
+        /* split screen (user tile clip on part of the picture): the HUD belongs to its view, it stays. A
+         * view rendered as its own band of lines (see band above) is the whole picture of that render:
+         * its HUD moves out like a single player's */
         int split = 0;
         for (int i = 0; i < f.npolys && !split; i++)
-            if (f.polys[i].uclip == 2 && (f.polys[i].uy1 - f.polys[i].uy0 < f.height * 3 / 4 || f.polys[i].ux1 - f.polys[i].ux0 < f.width * 3 / 4)) split = 1;
+            if (f.polys[i].uclip == 2) {
+                /* the rectangle's part inside this render's lines (one that misses them draws nothing) */
+                int y0 = f.polys[i].uy0 > f.clip_y0 ? f.polys[i].uy0 : f.clip_y0, y1 = f.polys[i].uy1 < f.clip_y1 + 1 ? f.polys[i].uy1 : f.clip_y1 + 1;
+                if (y1 > y0 && (y1 - y0 < (f.clip_y1 - f.clip_y0 + 1) * 3 / 4 || f.polys[i].ux1 - f.polys[i].ux0 < f.width * 3 / 4)) split = 1;
+            }
         if (n3d >= 50 && wide3d && !split) hud_dx = (WW - (float)RW) * 0.5f;
     }
     /* HUD pieces are grouped first (pieces that touch or nearly touch: the letters of a line, the
