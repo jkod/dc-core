@@ -48,6 +48,9 @@ extern float dc_pvr_gl_hud_zmax;
 /* widescreen: frames without a 3D scene reaching past the 4:3 picture (2D menus) are cut to the 4:3
  * picture, so the side bars replace what the game draws beyond its edges (default 0) */
 extern int dc_pvr_gl_clip_2d;
+/* render to texture (FB_W_SOF1 bit 24) in widescreen: also draw the pass at full width, for
+ * full-screen quads that show that texture later (call at STARTRENDER, with dc_pvr_sw_render) */
+void dc_pvr_gl_capture(int scale);
 extern int dc_pvr_gl_split_panel_x;   /* widescreen: split-screen views clipped to [0, x) beside a side panel become full width (0 = off) */
 extern int dc_pvr_gl_hud_move;        /* widescreen: HUD pieces move out to the screen edges (default 1) */
 extern int dc_pvr_gl_hud_sharp;       /* HUD textures (flat polygons at >= dc_pvr_gl_hud_z) get a bicubic filter (default 1) */

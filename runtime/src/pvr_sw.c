@@ -643,6 +643,21 @@ void pvr_get_texture(uint32_t tcw, uint32_t tsp, pvr_texinfo *ti) {
 }
 float pvr_fog_alpha(float invw) { return fog_table(invw); }
 
+/* the area the region array (REGION_BASE) lists tiles for, in pixels: what the PVR actually renders.
+ * Entries are 5 words, or 6 with FPU_PARAM_CFG bit 21; the control word holds the tile's x (bits 2-7),
+ * y (8-13) and "last region" (31). 0 when there is no usable array. */
+static void region_extent(int *w, int *h) {
+    uint32_t a = REG(0x02C) & 0x7FFFFC, words = (REG(0x07C) >> 21) & 1 ? 6 : 5;
+    int mx = -1, my = -1;
+    for (int i = 0; i < 4096; i++, a += words * 4) {
+        uint32_t o = vram32_ofs(a), c = (uint32_t)dc_vram[o] | (uint32_t)dc_vram[o + 1] << 8 | (uint32_t)dc_vram[o + 2] << 16 | (uint32_t)dc_vram[o + 3] << 24;
+        int tx = (c >> 2) & 63, ty = (c >> 8) & 63;
+        if (tx > mx) mx = tx; if (ty > my) my = ty;
+        if (c >> 31) break;
+    }
+    *w = (mx + 1) * 32; *h = (my + 1) * 32;
+}
+
 int dc_pvr_sw_render(void) {
     ctx_t *saved = ta_ctx, *rc = render_ctx();
     ta_ctx = rc;
@@ -694,9 +709,14 @@ int dc_pvr_sw_render(void) {
     uint32_t sof = REG(0x060) & 0x7FFFFF, stride = (REG(0x04C) & 0x1FF) * 8, ctrl = REG(0x048), mode = ctrl & 7;
     uint32_t athr = (ctrl >> 8) & 255;
     int bpp = mode <= 3 ? 2 : mode == 4 ? 3 : 4, tex = (REG(0x060) >> 24) & 1;
-    int WO = W;                                            /* no wider than a line (a 1024 clip into a 640-pixel texture) */
+    int WO = W, HO = H;                                    /* no wider than a line (a 1024 clip into a 640-pixel texture) */
     if (stride && WO * bpp > (int)stride) WO = (int)stride / bpp;
-    for (int y = 0; y < H; y++)
+    if (tex) {                                             /* a texture: only the tiles the region array lists, so the */
+        int rw, rh; region_extent(&rw, &rh);               /* lines past them (other textures) stay as they are */
+        if (rw > 0 && rw < WO) WO = rw;
+        if (rh > 0 && rh < HO) HO = rh;
+    }
+    for (int y = 0; y < HO; y++)
         for (int x = 0; x < WO; x++) {
             float c[4];
             if (hscale) { const float *p0 = cbuf + (y * RW + 2 * x) * 4, *p1 = p0 + 4; for (int k = 0; k < 4; k++) c[k] = (p0[k] + p1[k]) * 0.5f; }
@@ -717,7 +737,7 @@ int dc_pvr_sw_render(void) {
             else for (int k = 0; k < bpp; k++) wr8_area32(o + k, (uint8_t)(v >> (8 * k)));
         }
     if (tex)                                               /* the texture cache sees the new contents */
-        for (uint32_t pg = sof >> 12; pg <= ((sof + (uint32_t)H * stride) >> 12) && pg < 0x800; pg++) dc_vram_gen[pg]++;
+        for (uint32_t pg = sof >> 12; pg <= ((sof + (uint32_t)HO * stride) >> 12) && pg < 0x800; pg++) dc_vram_gen[pg]++;
     int n = npl;
     ta_ctx = saved;
     return n;

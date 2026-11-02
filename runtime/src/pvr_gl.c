@@ -352,6 +352,7 @@ float dc_pvr_gl_hud_z;
 float dc_pvr_gl_hud_zmax;
 int dc_pvr_gl_clip_2d;
 static float disp_aspect = 4.f / 3.f;
+static float last_ww, last_rw, last_rh;   /* the last render's target width and picture size, console units */
 
 static void ensure_fbo(int w, int h) {
     if (fbo && w == fb_w && h == fb_h) return;
@@ -399,12 +400,24 @@ static GLuint texture_for(uint32_t tcw, uint32_t tsp) {
 static float push_dx;                   /* x shift for the polygon being pushed (HUD in widescreen) */
 static float push_wide;                 /* > 0: a full-screen quad, its edges pushed out this far */
 static float push_rw;
+/* widescreen render to texture (dc_pvr_gl_capture): the pass is also drawn with GL at the screen's
+ * full width; a full-screen quad that later shows that texture draws the wide capture instead, its
+ * texture coordinates taken from where each corner lands on the screen */
+#define NCAP 4
+static struct { GLuint fbo, tex, depth; int w, h; uint32_t addr; float ww, rw, rh; unsigned long frame; } cap[NCAP];
+static int capturing;                   /* drawing a render-to-texture pass */
+static int cap_uv = -1;                 /* >= 0: the polygon being pushed shows capture cap_uv */
+static unsigned char *poly_cap;         /* per polygon: capture + 1, or 0 */
 static void push(const pvr_vtx *v) {
     if (nverts == cap_verts) { cap_verts = cap_verts ? cap_verts * 2 : 8192; verts = realloc(verts, cap_verts * sizeof *verts); }
     gv *g = &verts[nverts++];
     g->x = v->x + push_dx;
     if (push_wide > 0) { if (v->x <= 1.f) g->x -= push_wide; else if (v->x >= push_rw - 1.f) g->x += push_wide; } g->y = v->y; g->z = v->z; g->u = v->u; g->v = v->v; g->u1 = v->u1; g->v1 = v->v1;
     memcpy(g->c, v->c, 16); memcpy(g->o, v->o, 16); memcpy(g->c1, v->c1, 16); memcpy(g->o1, v->o1, 16);
+    if (cap_uv >= 0) {                  /* the capture spans [-(ww - rw) / 2, rw + (ww - rw) / 2] x [0, rh], rows up */
+        g->u = (g->x + (cap[cap_uv].ww - cap[cap_uv].rw) * 0.5f) / cap[cap_uv].ww;
+        g->v = 1.f - g->y / cap[cap_uv].rh;
+    }
 }
 /* triangle with the PVR's culling (sign of the screen area; odd strip triangles are flipped) */
 static void tri(const pvr_poly *p, const pvr_vtx *a, const pvr_vtx *b, const pvr_vtx *c, int flip, float cull_small) {
@@ -418,6 +431,7 @@ static void tri(const pvr_poly *p, const pvr_vtx *a, const pvr_vtx *b, const pvr
     push(a); push(b); push(c);
 }
 
+static unsigned char *poly_hud; static const pvr_poly *poly_base;
 static void set_poly_state(const pvr_poly *p, int set) {
     uint32_t tsp = set ? p->tsp1 : p->tsp, tcw = set ? p->tcw1 : p->tcw;
     int tex = (p->isp >> 25) & 1;
@@ -426,7 +440,12 @@ static void set_poly_state(const pvr_poly *p, int set) {
     p_glUniform1i(U.shade, (tsp >> 6) & 3); p_glUniform1i(U.use_alpha, (tsp >> 20) & 1); p_glUniform1i(U.ign_ta, (tsp >> 19) & 1);
     p_glUniform1i(U.fog, (tsp >> 22) & 3); p_glUniform1i(U.pt, p->list == 4);
     if (tex) {
-        p_glActiveTexture(GL_TEXTURE0); p_glBindTexture(GL_TEXTURE_2D, texture_for(tcw, tsp));
+        int ci = poly_cap && poly_base ? poly_cap[p - poly_base] : 0;
+        p_glActiveTexture(GL_TEXTURE0); p_glBindTexture(GL_TEXTURE_2D, ci ? cap[ci - 1].tex : texture_for(tcw, tsp));
+        if (ci) {
+            p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        } else {
         int filt = ((tsp >> 13) & 3) ? GL_LINEAR : GL_NEAREST;
         int minf = filt == GL_LINEAR && dc_pvr_gl_mipmaps ? GL_LINEAR_MIPMAP_LINEAR : filt;   /* point-sampled stays sharp */
         p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, minf); p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, filt);
@@ -436,6 +455,7 @@ static void set_poly_state(const pvr_poly *p, int set) {
         int cu = (tsp >> 16) & 1, cv = (tsp >> 15) & 1, fu = (tsp >> 18) & 1, fv = (tsp >> 17) & 1;
         p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, cu ? GL_CLAMP_TO_EDGE : fu ? GL_MIRRORED_REPEAT : GL_REPEAT);
         p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, cv ? GL_CLAMP_TO_EDGE : fv ? GL_MIRRORED_REPEAT : GL_REPEAT);
+        }
     }
     static const GLenum depth_fn[8] = { GL_NEVER, 0x0201, GL_EQUAL, 0x0203, 0x0204, 0x0205, GL_GEQUAL, GL_ALWAYS };
     int zmode = (p->isp >> 29) & 7;
@@ -464,11 +484,10 @@ static int cmp_sort(const void *a, const void *b) {
 
 /* Draw batching: consecutive polygons with the same render state go out in one call (menus can
  * have thousands of small polygons, and per-call overhead dominates). Draw order is unchanged. */
-typedef struct { uint32_t isp, tsp, tcw; int list, set, mark, blend, uclip, ux0, uy0, ux1, uy1, hud; float ub[4]; } bkey;
+typedef struct { uint32_t isp, tsp, tcw; int list, set, mark, blend, uclip, ux0, uy0, ux1, uy1, hud; float ub[4]; int cap; } bkey;
 /* HUD polygons (flat, at or above dc_pvr_gl_hud_z) get the sharper texture filter */
 int dc_pvr_gl_hud_sharp = 1;
 int dc_pvr_gl_hud_move = 1;
-static unsigned char *poly_hud; static const pvr_poly *poly_base;
 static int is_hud(const pvr_poly *p) { return poly_hud && poly_base ? poly_hud[p - poly_base] : 0; }
 static float (*poly_uvbox)[4];          /* per polygon: its UV range (2D overlay pieces that sample clamped to it) */
 /* scissor: the frame's clip rectangle, narrowed per polygon by the PVR's user tile clip (split screen) */
@@ -510,7 +529,7 @@ static void batch_add(const pvr_poly *p, int set, int mark, int blend, int first
     if (!count) return;
     bkey k = { p->isp, set ? p->tsp1 : p->tsp, set ? p->tcw1 : p->tcw, p->list, set, mark, blend,
                p->uclip, p->uclip ? p->ux0 : 0, p->uclip ? p->uy0 : 0, p->uclip ? p->ux1 : 0, p->uclip ? p->uy1 : 0,
-               ((p->tsp >> 13) & 3) ? is_hud(p) : (is_hud(p) & 2), {0, 0, 0, 0} }; /* bicubic for bilinear-filtered HUD textures only */
+               ((p->tsp >> 13) & 3) ? is_hud(p) : (is_hud(p) & 2), {0, 0, 0, 0}, poly_cap && poly_base ? poly_cap[p - poly_base] : 0 }; /* bicubic for bilinear-filtered HUD textures only */
     if (k.hud & 2) memcpy(k.ub, poly_uvbox[p - poly_base], sizeof k.ub);
     if (!B.valid || memcmp(&k, &B.key, sizeof k)) {
         batch_flush();
@@ -795,9 +814,16 @@ void dc_pvr_gl_render(int scale) {
     frame_no++;
     pvr_frame f;
     pvr_get_frame(&f);
+    if (capturing) {                    /* a texture target: no wider than its lines (a 1024 clip into 640) */
+        uint32_t stride = (dc_pvr_reg(0x04C) & 0x1FF) * 8, mode = dc_pvr_reg(0x048) & 7;
+        int bpp = mode <= 3 ? 2 : mode == 4 ? 3 : 4;
+        if (stride && f.width * bpp > (int)stride) f.width = (int)stride / bpp;
+        if (f.clip_x1 >= f.width) f.clip_x1 = f.width - 1;
+    }
     int RW = f.width * (f.hscale ? 2 : 1), RH = f.height;
+    last_rw = (float)RW; last_rh = (float)RH;
     {   static int cap_hud;
-        if (f.npolys > cap_hud) { cap_hud = f.npolys + 1024; poly_hud = realloc(poly_hud, (size_t)cap_hud); poly_uvbox = realloc(poly_uvbox, (size_t)cap_hud * sizeof *poly_uvbox); }
+        if (f.npolys > cap_hud) { cap_hud = f.npolys + 1024; poly_hud = realloc(poly_hud, (size_t)cap_hud); poly_uvbox = realloc(poly_uvbox, (size_t)cap_hud * sizeof *poly_uvbox); poly_cap = realloc(poly_cap, (size_t)cap_hud); }
         poly_base = f.polys;
         for (int i = 0; i < f.npolys; i++) {
             const pvr_poly *p = &f.polys[i]; const pvr_vtx *v = f.verts + p->first;
@@ -822,6 +848,23 @@ void dc_pvr_gl_render(int scale) {
      * console's 4:3 picture in the middle; the sides show what the game draws beyond the screen edges.
      * WW is the target width in console x units: the shown lines (only the drawn ones with
      * dc_pvr_gl_fill_lines) fill the window height at the console's 4:3 pixel shape. */
+    /* full-screen quads showing a texture captured at full width (dc_pvr_gl_capture) */
+    for (int i = 0; i < f.npolys; i++) {
+        const pvr_poly *p = &f.polys[i]; const pvr_vtx *v = f.verts + p->first;
+        poly_cap[i] = 0;
+        if (capturing || !dc_pvr_gl_widescreen || !((p->isp >> 25) & 1) || p->n < 3) continue;
+        uint32_t addr = (p->tcw & 0x1FFFFF) << 3; int c = 0;
+        while (c < NCAP && !(cap[c].tex && cap[c].addr == addr)) c++;
+            if (c == NCAP) continue;
+        float x0 = v[0].x, x1 = v[0].x, y0 = v[0].y, y1 = v[0].y; int flat = 1;
+        for (int k = 1; k < p->n; k++) {
+            if (v[k].x < x0) x0 = v[k].x; if (v[k].x > x1) x1 = v[k].x;
+            if (v[k].y < y0) y0 = v[k].y; if (v[k].y > y1) y1 = v[k].y;
+            if (v[k].z != v[0].z) flat = 0;
+        }
+        if (flat && x0 <= 1.f && x1 >= RW - 1.f && y0 <= 1.f && y1 >= RH - 1.f && cap[c].rw == (float)RW && cap[c].rh >= (float)RH)
+            { poly_cap[i] = (unsigned char)(c + 1); poly_hud[i] = 0; }   /* plain bilinear over the whole capture */
+    }
     float aspect = 4.f / 3.f, WW = (float)RW;
     if (dc_pvr_gl_widescreen) {
         aspect = dc_pvr_gl_aspect > 0 ? dc_pvr_gl_aspect : 16.f / 9.f;
@@ -836,6 +879,7 @@ void dc_pvr_gl_render(int scale) {
     ensure_fbo((int)(WW / (float)RW * (float)(f.width * scale) + 0.5f), f.height * scale);
     gl_selftest();
     disp_aspect = aspect;
+    last_ww = WW;
 
     /* geometry: every polygon's triangles, then volume triangles, then a full-screen quad */
     nverts = 0;
@@ -998,11 +1042,12 @@ void dc_pvr_gl_render(int scale) {
             else if (mnx >= panel_x + 2.f) push_dx = panel_dx;      /* map, timer (the views' coin icons start just left of it) */
             else if (flat && v[0].z >= dc_pvr_gl_hud_z && dc_pvr_gl_hud_z > 0) push_dx = view_dx + out * side_dx;   /* the views' HUD (drawn unclipped) */
         }
+        if (poly_cap[i]) { push_dx = 0; push_wide = WW; push_rw = (float)RW; cap_uv = poly_cap[i] - 1; }
         spans[i].first = nverts;
         if (p->sprite) { tri(p, &v[0], &v[1], &v[2], 0, cull_small); tri(p, &v[0], &v[2], &v[3], 0, cull_small); }
         else for (int k = 0; k + 2 < p->n; k++) tri(p, &v[k], &v[k + 1], &v[k + 2], k & 1, cull_small);
         spans[i].count = nverts - spans[i].first;
-        push_wide = 0;
+        push_wide = 0; cap_uv = -1;
         if ((p->isp >> 25) & 1) for (int k = 0; k < p->n; k++) { if (v[k].x < cx0) cx0 = v[k].x; if (v[k].x > cx1) cx1 = v[k].x; }
     }
     push_dx = 0;
@@ -1199,6 +1244,37 @@ void dc_pvr_gl_read(uint8_t *rgb, int *w, int *h) {
     for (int y = 0; y < fb_h; y++)                         /* GL rows are bottom-up */
         for (int x = 0; x < fb_w; x++) memcpy(rgb + ((size_t)y * fb_w + x) * 3, tmp + ((size_t)(fb_h - 1 - y) * fb_w + x) * 4, 3);
     free(tmp);
+}
+
+/* render to texture in widescreen: the pass (its lists are the current ones) is drawn with GL into a
+ * capture at the screen's full width; full-screen quads that show that texture later draw the
+ * capture instead, so a crossfade over a captured frame (Tennis 2K2's replays) covers the 16:9
+ * picture. The texture in VRAM (dc_pvr_sw_render) stays as it is for everything else. */
+void dc_pvr_gl_capture(int scale) {
+    if (!ready || !dc_pvr_gl_widescreen) return;
+    uint32_t addr = dc_pvr_reg(0x060) & 0x7FFFFF;
+    int c = 0, old = 0;
+    while (c < NCAP && !(cap[c].tex && cap[c].addr == addr)) { if (cap[c].frame < cap[old].frame) old = c; c++; }
+    if (c == NCAP) c = old;
+    /* swap the screen's target for the capture's, draw, swap back (with what the present uses) */
+    GLuint sf = fbo, st = color_tex, sd = depth_rb; int sw = fb_w, sh = fb_h;
+    float sa = disp_aspect, so = pic_offy, sww = last_ww, srw = last_rw, srh = last_rh; int sy0 = pic_y0, sy1 = pic_y1;
+    fbo = cap[c].fbo; color_tex = cap[c].tex; depth_rb = cap[c].depth; fb_w = cap[c].w; fb_h = cap[c].h;
+    capturing = 1;
+    dc_pvr_gl_render(scale);
+    capturing = 0;
+    {   /* the texture's alpha: RGB565 / 555 / 888 targets have none (opaque); ARGB4444 / 1555 / 8888 keep the drawn one */
+        uint32_t mode = dc_pvr_reg(0x048) & 7;
+        if (mode == 1 || mode == 4 || mode == 5) {
+            p_glBindFramebuffer(GL_FRAMEBUFFER, fbo); p_glDisable(GL_SCISSOR_TEST);
+            p_glColorMask(0, 0, 0, 1); p_glClearColor(0, 0, 0, 1); p_glClear(GL_COLOR_BUFFER_BIT); p_glColorMask(1, 1, 1, 1);
+        }
+    }
+    cap[c].fbo = fbo; cap[c].tex = color_tex; cap[c].depth = depth_rb; cap[c].w = fb_w; cap[c].h = fb_h;
+    cap[c].addr = addr; cap[c].ww = last_ww; cap[c].rw = last_rw; cap[c].rh = last_rh; cap[c].frame = frame_no;
+    fbo = sf; color_tex = st; depth_rb = sd; fb_w = sw; fb_h = sh;
+    disp_aspect = sa; pic_offy = so; pic_y0 = sy0; pic_y1 = sy1; last_ww = sww; last_rw = srw; last_rh = srh;
+    p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
 void dc_pvr_gl_present(int win_w, int win_h, int stretch) {
