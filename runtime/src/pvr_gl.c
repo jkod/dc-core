@@ -221,16 +221,17 @@ static const char *fs_src =
 "uniform int u_quad; uniform vec4 u_quad_col;\n"
 "uniform int u_textured, u_shade, u_use_alpha, u_ign_ta, u_offset, u_gouraud, u_fog, u_pt;\n"
 "uniform float u_pt_ref; uniform vec3 u_fog_ram, u_fog_vert; uniform float u_fog_den; uniform vec2 u_fog_tab[128];\n"
-"uniform int u_hud;\n"
+"uniform int u_hud; uniform vec4 u_uvbox;\n"
 "out vec4 o_col;\n"
 /* HUD art (low resolution, magnified several times): Catmull-Rom bicubic instead of bilinear keeps
  * digits and outlines crisp; 9 bilinear taps, clamped (the kernel overshoots at hard edges) */
-"vec4 tex_cr(vec2 uv) {\n"
+"vec4 tex_cr(vec2 uv, bool edge) {\n"
 "  vec2 ts = vec2(textureSize(u_tex, 0)), p = uv * ts - 0.5, i = floor(p), f = p - i;\n"
 "  vec2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f)), w1 = 1.0 + f * f * (-2.5 + 1.5 * f);\n"
 "  vec2 w2 = f * (0.5 + f * (2.0 - 1.5 * f)), w3 = f * f * (-0.5 + 0.5 * f);\n"
 "  vec2 w12 = w1 + w2, o12 = w2 / w12;\n"
 "  vec2 t0 = (i - 0.5) / ts, t3 = (i + 2.5) / ts, t12 = (i + 0.5 + o12) / ts;\n"
+"  if (edge) { vec2 lo = u_uvbox.xy + 0.5 / ts, hi = max(u_uvbox.zw - 0.5 / ts, lo); t0 = clamp(t0, lo, hi); t3 = clamp(t3, lo, hi); t12 = clamp(t12, lo, hi); }\n"
 "  vec4 r = vec4(0.0);\n"
 "  r += textureLod(u_tex, vec2(t0.x, t0.y), 0.0) * w0.x * w0.y;\n"
 "  r += textureLod(u_tex, vec2(t12.x, t0.y), 0.0) * w12.x * w0.y;\n"
@@ -262,7 +263,8 @@ static const char *fs_src =
 "  if (u_use_alpha == 0) col.a = 1.0;\n"
 "  vec4 px;\n"
 "  if (u_textured != 0) {\n"
-"    vec4 t = u_hud != 0 ? tex_cr(uv) : texture(u_tex, uv);\n"
+"    if ((u_hud & 2) != 0) { vec2 h = 0.5 / vec2(textureSize(u_tex, 0)), lo = u_uvbox.xy + h, hi = max(u_uvbox.zw - h, lo); uv = clamp(uv, lo, hi); }\n"
+"    vec4 t = (u_hud & 1) != 0 ? tex_cr(uv, (u_hud & 2) != 0) : texture(u_tex, uv);\n"
 "    if (u_ign_ta != 0) t.a = 1.0;\n"
 "    if (u_shade == 0) px = t;\n"
 "    else if (u_shade == 1) px = vec4(t.rgb * col.rgb, t.a);\n"
@@ -287,7 +289,7 @@ typedef struct { float x, y, z, u, v, u1, v1, c[4], o[4], c1[4], o1[4]; } gv;
 static GLuint prog, vao, vbo, fbo, color_tex, depth_rb;
 static int fb_w, fb_h, ready;
 static struct { GLint scale, offx, set, quad, quad_col, tex, textured, shade, use_alpha, ign_ta, offset, gouraud, fog, pt, pt_ref,
-                fog_ram, fog_vert, fog_den, fog_tab, hud; } U;
+                fog_ram, fog_vert, fog_den, fog_tab, hud, uvbox; } U;
 static gv *verts; static int nverts, cap_verts;
 typedef struct { int first, count; } span;
 static span *spans; static int cap_spans;
@@ -327,7 +329,7 @@ int dc_pvr_gl_init(void *(*getproc)(const char *)) {
 #define UL(f, n) U.f = p_glGetUniformLocation(prog, n)
     UL(scale, "u_scale"); UL(offx, "u_offx"); UL(set, "u_set"); UL(quad, "u_quad"); UL(quad_col, "u_quad_col"); UL(tex, "u_tex");
     UL(textured, "u_textured"); UL(shade, "u_shade"); UL(use_alpha, "u_use_alpha"); UL(ign_ta, "u_ign_ta"); UL(offset, "u_offset");
-    UL(gouraud, "u_gouraud"); UL(fog, "u_fog"); UL(pt, "u_pt"); UL(pt_ref, "u_pt_ref"); UL(hud, "u_hud"); UL(fog_ram, "u_fog_ram");
+    UL(gouraud, "u_gouraud"); UL(fog, "u_fog"); UL(pt, "u_pt"); UL(pt_ref, "u_pt_ref"); UL(hud, "u_hud"); UL(uvbox, "u_uvbox"); UL(fog_ram, "u_fog_ram");
     UL(fog_vert, "u_fog_vert"); UL(fog_den, "u_fog_den"); UL(fog_tab, "u_fog_tab");
 #undef UL
     p_glGenVertexArrays(1, &vao); p_glBindVertexArray(vao);
@@ -462,12 +464,13 @@ static int cmp_sort(const void *a, const void *b) {
 
 /* Draw batching: consecutive polygons with the same render state go out in one call (menus can
  * have thousands of small polygons, and per-call overhead dominates). Draw order is unchanged. */
-typedef struct { uint32_t isp, tsp, tcw; int list, set, mark, blend, uclip, ux0, uy0, ux1, uy1, hud; } bkey;
+typedef struct { uint32_t isp, tsp, tcw; int list, set, mark, blend, uclip, ux0, uy0, ux1, uy1, hud; float ub[4]; } bkey;
 /* HUD polygons (flat, at or above dc_pvr_gl_hud_z) get the sharper texture filter */
 int dc_pvr_gl_hud_sharp = 1;
 int dc_pvr_gl_hud_move = 1;
 static unsigned char *poly_hud; static const pvr_poly *poly_base;
 static int is_hud(const pvr_poly *p) { return poly_hud && poly_base ? poly_hud[p - poly_base] : 0; }
+static float (*poly_uvbox)[4];          /* per polygon: its UV range (2D overlay pieces that sample clamped to it) */
 /* scissor: the frame's clip rectangle, narrowed per polygon by the PVR's user tile clip (split screen) */
 static int sc_x, sc_y, sc_w, sc_h, sc_set[4];
 static float sc_off, sc_k, sc_kx; static int sc_scale, sc_rw;
@@ -507,13 +510,15 @@ static void batch_add(const pvr_poly *p, int set, int mark, int blend, int first
     if (!count) return;
     bkey k = { p->isp, set ? p->tsp1 : p->tsp, set ? p->tcw1 : p->tcw, p->list, set, mark, blend,
                p->uclip, p->uclip ? p->ux0 : 0, p->uclip ? p->uy0 : 0, p->uclip ? p->ux1 : 0, p->uclip ? p->uy1 : 0,
-               is_hud(p) && ((p->tsp >> 13) & 3) };                /* bilinear-filtered HUD textures only */
+               ((p->tsp >> 13) & 3) ? is_hud(p) : (is_hud(p) & 2), {0, 0, 0, 0} }; /* bicubic for bilinear-filtered HUD textures only */
+    if (k.hud & 2) memcpy(k.ub, poly_uvbox[p - poly_base], sizeof k.ub);
     if (!B.valid || memcmp(&k, &B.key, sizeof k)) {
         batch_flush();
         if (mark >= 0) p_glStencilFunc(GL_ALWAYS, mark, 0xFF);
         set_poly_state(p, set);
         scissor_for(p);
         p_glUniform1i(U.hud, k.hud);
+        if (k.hud & 2) p_glUniform4f(U.uvbox, k.ub[0], k.ub[1], k.ub[2], k.ub[3]);
         if (set) { p_glDepthFunc(GL_EQUAL); p_glDepthMask(0); }
         if (blend) p_glBlendFunc(blend_src((p->tsp >> 29) & 7), blend_dst((p->tsp >> 26) & 7));
         B.key = k; B.valid = 1;
@@ -757,13 +762,25 @@ void dc_pvr_gl_render(int scale) {
     pvr_get_frame(&f);
     int RW = f.width * (f.hscale ? 2 : 1), RH = f.height;
     {   static int cap_hud;
-        if (f.npolys > cap_hud) { cap_hud = f.npolys + 1024; poly_hud = realloc(poly_hud, (size_t)cap_hud); }
+        if (f.npolys > cap_hud) { cap_hud = f.npolys + 1024; poly_hud = realloc(poly_hud, (size_t)cap_hud); poly_uvbox = realloc(poly_uvbox, (size_t)cap_hud * sizeof *poly_uvbox); }
         poly_base = f.polys;
         for (int i = 0; i < f.npolys; i++) {
             const pvr_poly *p = &f.polys[i]; const pvr_vtx *v = f.verts + p->first;
-            int h = dc_pvr_gl_hud_sharp && dc_pvr_gl_hud_z > 0 && p->n >= 3 && ((p->isp >> 25) & 1);
-            for (int k = 0; k < p->n && h; k++) if (v[k].z != v[0].z || v[k].z < dc_pvr_gl_hud_z) h = 0;
-            poly_hud[i] = (unsigned char)h;
+            int flat = dc_pvr_gl_hud_z > 0 && p->n >= 3 && ((p->isp >> 25) & 1);
+            for (int k = 0; k < p->n && flat; k++) if (v[k].z != v[0].z || v[k].z < dc_pvr_gl_hud_z) flat = 0;
+            /* a 2D overlay piece that maps part of one copy of its texture (UVs within 0..1) samples
+             * clamped to its own UV range: at 1:1 on the console every pixel lands on a texel centre,
+             * but scaled up, bilinear filtering at the piece's edge also reads the texel next to it.
+             * Art cut into pieces (Bomberman Online's PAUSE logo: two halves stacked in one texture)
+             * otherwise gets a dark seam where the pieces meet */
+            int one = flat;
+            float *ub = poly_uvbox[i]; ub[0] = ub[1] = 1e30f; ub[2] = ub[3] = -1e30f;
+            for (int k = 0; k < p->n && one; k++) {
+                if (v[k].u < 0.f || v[k].u > 1.f || v[k].v < 0.f || v[k].v > 1.f) one = 0;
+                if (v[k].u < ub[0]) ub[0] = v[k].u; if (v[k].v < ub[1]) ub[1] = v[k].v;
+                if (v[k].u > ub[2]) ub[2] = v[k].u; if (v[k].v > ub[3]) ub[3] = v[k].v;
+            }
+            poly_hud[i] = (unsigned char)((flat && dc_pvr_gl_hud_sharp ? 1 : 0) | (one ? 2 : 0));
         }
     }
     /* widescreen: a target as wide as the window (16:9 until the frontend reports its shape) with the
