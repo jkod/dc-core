@@ -478,7 +478,13 @@ static const char *bar_vs =
 static const char *bar_fs =
 "#version 330 core\n"
 "in float v_y; uniform sampler2D u_tex; out vec4 o_col;\n"
-"void main() { o_col = vec4(textureLod(u_tex, vec2(0.5, v_y), 3.0).rgb * 0.75, 1.0); }\n";
+"void main() {\n"
+"  vec3 c = textureLod(u_tex, vec2(0.5, v_y), 3.0).rgb;\n"
+"  float l = dot(c, vec3(0.299, 0.587, 0.114));\n"
+/* dark pictures (the logo and legal screens: black with some text or a logo near the edge) keep
+ * black bars instead of a faint grey smear; colourful ones get the blurred, darkened edge colour */
+"  o_col = vec4(c * 0.75 * smoothstep(0.08, 0.2, l), 1.0);\n"
+"}\n";
 #define EDGE_W 16
 #define EDGE_H 64
 static void bars_init(void) {
