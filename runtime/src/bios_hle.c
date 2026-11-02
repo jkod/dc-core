@@ -68,6 +68,10 @@ static const uint32_t part_len[5] = {0x02000, 0x02000, 0x04000, 0x08000, 0x10000
 static struct { int cmd; uint32_t p[4]; int status; } req[MAX_REQ];
 static uint32_t next_req = 1;
 static uint32_t last_lba;
+/* DMA reads raise the GD-DMA end interrupt (ISTNRM bit 14). Off by default: it is raised at once,
+ * which Tennis 2K2's file system needs and Rush 2049's track loader does not survive (it stops
+ * drawing for good after the car select). */
+int dc_gd_dma_irq;
 
 static uint32_t toc_entry(uint32_t lba, int is_data) { return ((is_data ? 4u : 0u) << 28) | (1u << 24) | (lba + 150); }
 
@@ -81,7 +85,7 @@ static int gd_exec(int cmd, uint32_t *p) {
         if (DC_RAM_OFS(dst) + n * 2048 > 0x1000000) return -1;
         last_lba = lba + n;
         if (dc_disc_read(lba, n, dc_ram + DC_RAM_OFS(dst))) return -1;
-        if (cmd == 17 || cmd == 34) dc_raise(1u << 14);   /* a DMA read ends with the GD-DMA end interrupt */
+        if (dc_gd_dma_irq && (cmd == 17 || cmd == 34)) dc_raise(1u << 14);   /* GD-DMA end interrupt (opt-in) */
         return 0;
     }
     case 18: case 19: {                      /* GETTOC / GETTOC2: p[0] session area, p[1] buffer */

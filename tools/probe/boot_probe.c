@@ -237,6 +237,7 @@ int main(int argc, char **argv) {
     if (getenv("DC_HWSTATS")) dc_hw_read_hook = hw_read;
     dc_hw.on_vblank = on_vblank;
     if (getenv("DC_CABLE")) dc_cable = atoi(getenv("DC_CABLE"));
+    if (getenv("DC_GD_DMA_IRQ")) dc_gd_dma_irq = 1;   /* Tennis 2K2 */
     if (!getenv("DC_NOPAD")) dc_maple_install();   /* a standard controller on port A */
     if (getenv("DC_CALLCOST")) dc_call_cost = (uint32_t)atoi(getenv("DC_CALLCOST"));
     if (getenv("DC_FPS")) dc_hw.on_render = on_render_count;

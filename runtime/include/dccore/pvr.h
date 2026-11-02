@@ -29,6 +29,7 @@ void dc_pvr_gl_load_rgb(const uint8_t *rgb, int w, int h);   /* show a CPU-drawn
 /* 1 = render 16:9: the 4:3 picture in the middle, the sides filled with geometry the game draws
  * beyond the screen edges (games usually cull it, so a per-game camera patch gives the real thing) */
 extern int dc_pvr_gl_widescreen;
+extern float dc_pvr_gl_aspect;        /* widescreen: the window's width / height, so the picture fills it (0 = 16:9) */
 /* enhancements beyond the console (off by default): mipmaps for every bilinear-filtered texture,
  * and anisotropic filtering up to this many samples where the driver supports it */
 extern int dc_pvr_gl_mipmaps;

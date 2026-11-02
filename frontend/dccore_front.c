@@ -57,6 +57,42 @@ static void pad_close(SDL_JoystickID id) {
 }
 #ifdef __SWITCH__
 static SDL_Joystick *joy;
+#else
+/* a joystick SDL has no gamepad mapping for: buttons 0-3 = A B X Y, 7 or 9 = Start, axes 0/1 = stick,
+ * axes 2/5 or 4/5 = triggers, hat 0 = d-pad (the usual XInput/DirectInput layout); it drives the
+ * first port without a gamepad */
+static SDL_Joystick *raw;
+static void raw_open(int device_index) {
+    if (raw) return;
+    raw = SDL_JoystickOpen(device_index);
+    if (raw) fprintf(stderr, "generic joystick %s: %d axes, %d buttons, %d hats\n", SDL_JoystickName(raw),
+                     SDL_JoystickNumAxes(raw), SDL_JoystickNumButtons(raw), SDL_JoystickNumHats(raw));
+}
+static void raw_close(SDL_JoystickID id) {
+    if (raw && SDL_JoystickInstanceID(raw) == id) { SDL_JoystickClose(raw); raw = NULL; fprintf(stderr, "generic joystick removed\n"); }
+}
+static void read_raw(uint16_t *b, int *jx, int *jy, int *lt, int *rt) {
+    if (!raw) return;
+    static const uint16_t bm[4] = { DC_BTN_A, DC_BTN_B, DC_BTN_X, DC_BTN_Y };
+    int nb = SDL_JoystickNumButtons(raw), na = SDL_JoystickNumAxes(raw);
+    for (int i = 0; i < 4 && i < nb; i++) if (SDL_JoystickGetButton(raw, i)) *b |= bm[i];
+    if ((nb > 7 && SDL_JoystickGetButton(raw, 7)) || (nb > 9 && SDL_JoystickGetButton(raw, 9))) *b |= DC_BTN_START;
+    if (SDL_JoystickNumHats(raw) > 0) {
+        Uint8 h = SDL_JoystickGetHat(raw, 0);
+        if (h & SDL_HAT_UP) *b |= DC_BTN_UP; if (h & SDL_HAT_DOWN) *b |= DC_BTN_DOWN;
+        if (h & SDL_HAT_LEFT) *b |= DC_BTN_LEFT; if (h & SDL_HAT_RIGHT) *b |= DC_BTN_RIGHT;
+    }
+    if (na >= 2) {
+        Sint16 ax = SDL_JoystickGetAxis(raw, 0), ay = SDL_JoystickGetAxis(raw, 1);
+        if (ax < -4000 || ax > 4000) *jx = (ax + 32768) >> 8;
+        if (ay < -4000 || ay > 4000) *jy = (ay + 32768) >> 8;
+    }
+    if (na >= 6) {                                      /* triggers rest at -32768 */
+        int tl = (SDL_JoystickGetAxis(raw, 4) + 32768) >> 8, tr = (SDL_JoystickGetAxis(raw, 5) + 32768) >> 8;
+        if (tl > *lt) *lt = tl > 255 ? 255 : tl;
+        if (tr > *rt) *rt = tr > 255 ? 255 : tr;
+    }
+}
 #endif
 static dc_front_config cfg;
 static unsigned long presented, renders, last_render_frame;
@@ -124,6 +160,13 @@ static void read_input(void) {
     if (k[SDL_SCANCODE_A]) lt = 255;
     if (k[SDL_SCANCODE_S]) rt = 255;
     if (pads[0]) read_pad(pads[0], &b, &jx, &jy, &lt, &rt);
+#ifndef __SWITCH__
+    else read_raw(&b, &jx, &jy, &lt, &rt);
+    {   /* first input from any pad, logged once: shows whether the controller reaches the game */
+        static int seen;
+        if (!seen && (pads[0] || raw) && (b & ~0u) ) { seen = 1; fprintf(stderr, "input: first button press from the controller on port A\n"); }
+    }
+#endif
 #ifdef __SWITCH__
     /* Joy-Cons / Pro Controller as SDL joystick 0, buttons in libnx order. Mapped by position:
      * B (bottom) = A, A (right) = B, Y (left) = X, X (top) = Y; ZL/ZR = triggers; + = Start;
@@ -199,6 +242,12 @@ static void events(void) {
             }
             if (e.key.keysym.sym == SDLK_F12) screenshot();
         }
+        if (e.type == SDL_JOYDEVICEADDED) {
+            fprintf(stderr, "joystick added: %s%s\n", SDL_JoystickNameForIndex(e.jdevice.which),
+                    SDL_IsGameController(e.jdevice.which) ? " (gamepad)" : " (not a known gamepad: opened as a generic one)");
+            if (!SDL_IsGameController(e.jdevice.which)) raw_open(e.jdevice.which);
+        }
+        if (e.type == SDL_JOYDEVICEREMOVED) raw_close((SDL_JoystickID)e.jdevice.which);
         if (e.type == SDL_CONTROLLERDEVICEADDED) pad_open(e.cdevice.which);                 /* device index */
         if (e.type == SDL_CONTROLLERDEVICEREMOVED) pad_close((SDL_JoystickID)e.cdevice.which); /* instance id */
     }
@@ -236,6 +285,7 @@ static void on_vblank(uint64_t f) {
     }
     if (need_present) {                                    /* only when the picture changed (or the window) */
         int dw, dh; SDL_GL_GetDrawableSize(win, &dw, &dh);
+        if (cfg.widescreen && dh > 0) dc_pvr_gl_aspect = (float)dw / (float)dh;   /* the next frame fills the window */
         dc_pvr_gl_present(dw, dh, 0);
         SDL_GL_SwapWindow(win);
         need_present = 0;
@@ -279,13 +329,14 @@ static void on_vblank(uint64_t f) {
 int dc_front_open(const dc_front_config *c) {
     cfg = *c;
 #ifdef _WIN32
-    /* started without a console (double-click, shortcut): messages go to <save_name>.log next to the exe */
-    if (!GetConsoleWindow()) {
+    /* messages go to <save_name>.log next to the exe (DC_LOG=console keeps them in the console) */
+    { const char *lg = getenv("DC_LOG"); if (!(lg && !strcmp(lg, "console"))) {
         char *base = SDL_GetBasePath(), path[1024];
         snprintf(path, sizeof path, "%s%s.log", base ? base : "", cfg.save_name ? cfg.save_name : "dc-core");
         if (base) SDL_free(base);
+        fprintf(stderr, "log: %s\n", path);
         if (freopen(path, "w", stderr)) setvbuf(stderr, NULL, _IONBF, 0);
-    }
+    } }
 #endif
     if (cfg.scale <= 0) cfg.scale = 2;
 #ifdef __SWITCH__
@@ -295,6 +346,9 @@ int dc_front_open(const dc_front_config *c) {
     if (!cfg.height) cfg.height = cfg.widescreen ? cfg.width * 9 / 16 : cfg.width * 3 / 4;
     dc_pvr_gl_widescreen = cfg.widescreen;
     SDL_SetMainReady();                                    /* ports use a plain main(), not SDL_main */
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");   /* pads work while a console window has focus */
+    { SDL_version v; SDL_GetVersion(&v); fprintf(stderr, "SDL %d.%d.%d\n", v.major, v.minor, v.patch); }
+    { const char *ig = getenv("SDL_GAMECONTROLLER_IGNORE_DEVICES"); if (ig) fprintf(stderr, "note: SDL_GAMECONTROLLER_IGNORE_DEVICES=%s\n", ig); }
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER | (cfg.no_audio ? 0 : SDL_INIT_AUDIO)) != 0) {
         fprintf(stderr, "SDL: %s\n", SDL_GetError()); return -1;
     }
@@ -336,6 +390,7 @@ int dc_front_open(const dc_front_config *c) {
 #ifdef __SWITCH__
     if (SDL_NumJoysticks() > 0) joy = SDL_JoystickOpen(0);
 #else
+    fprintf(stderr, "joysticks: %d\n", SDL_NumJoysticks());
     for (int i = 0; i < SDL_NumJoysticks(); i++)          /* what the system reports, for diagnosing input */
         fprintf(stderr, "joystick %d: %s%s, player %d\n", i, SDL_JoystickNameForIndex(i),
                 SDL_IsGameController(i) ? " (gamepad)" : " (not a known gamepad: ignored)", SDL_JoystickGetDevicePlayerIndex(i) + 1);
@@ -350,6 +405,9 @@ int dc_front_open(const dc_front_config *c) {
 void dc_front_close(void) {
     wav_close();
     for (int k = 0; k < 4; k++) if (pads[k]) SDL_GameControllerClose(pads[k]);
+#ifndef __SWITCH__
+    if (raw) { SDL_JoystickClose(raw); raw = NULL; }
+#endif
 #ifdef __SWITCH__
     if (joy) SDL_JoystickClose(joy);
     joy = NULL;

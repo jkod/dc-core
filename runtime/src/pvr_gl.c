@@ -321,6 +321,7 @@ int dc_pvr_gl_init(void *(*getproc)(const char *)) {
 }
 
 int dc_pvr_gl_widescreen;
+float dc_pvr_gl_aspect;                /* window width / height for the widescreen target (0 = 16:9) */
 float dc_pvr_gl_hud_z;
 static float disp_aspect = 4.f / 3.f;
 
@@ -503,9 +504,10 @@ static void bars_init(void) {
 /* side = 0 left, 1 right; picture columns [px0, px1) of the FBO, rows [y0, y1) */
 static void draw_bars(int px0, int px1, int y0, int y1) {
     if (!bar_prog || px0 <= 0 || y1 <= y0) return;
+    if (px1 >= fb_w || px1 - px0 < 8) return;
     int strip = (px1 - px0) / 40 > 2 ? (px1 - px0) / 40 : 2;
     for (int i = 0; i < 2; i++) {
-        int sx = i ? px1 - strip : px0;
+        int sx = i ? px1 - 1 - strip : px0 + 1;         /* inside the picture, past its (often dark) edge pixel */
         p_glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo); p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, edge_fbo[i]);
         p_glBlitFramebuffer(sx, y0, sx + strip, y1, 0, 0, EDGE_W, EDGE_H, GL_COLOR_BUFFER_BIT, GL_LINEAR);
         p_glBindTexture(GL_TEXTURE_2D, edge_tex[i]); p_glGenerateMipmap(GL_TEXTURE_2D);
@@ -518,7 +520,7 @@ static void draw_bars(int px0, int px1, int y0, int y1) {
     p_glUniform1i(bar_tex, 0); p_glActiveTexture(GL_TEXTURE0);
     p_glBindVertexArray(vao);
     for (int i = 0; i < 2; i++) {
-        float a = i ? (float)px1 : 0.f, b = i ? (float)fb_w : (float)px0;
+        float a = i ? (float)(px1 - 1) : 0.f, b = i ? (float)fb_w : (float)(px0 + 1);   /* cover the edge pixel */
         p_glUniform1f(bar_x0, a / fb_w * 2.f - 1.f); p_glUniform1f(bar_x1, b / fb_w * 2.f - 1.f);
         p_glBindTexture(GL_TEXTURE_2D, edge_tex[i]);
         p_glDrawArrays(GL_TRIANGLES, quad_first, 6);
@@ -660,12 +662,24 @@ void dc_pvr_gl_render(int scale) {
     pvr_frame f;
     pvr_get_frame(&f);
     int RW = f.width * (f.hscale ? 2 : 1), RH = f.height;
-    /* widescreen: a 16:9 target with the console's 4:3 picture in the middle; the sides show what
-     * the game draws beyond the screen edges */
-    float WW = dc_pvr_gl_widescreen ? RW * 4.f / 3.f : (float)RW;
-    ensure_fbo(dc_pvr_gl_widescreen ? (f.width * scale * 4 + 2) / 3 : f.width * scale, f.height * scale);
+    /* widescreen: a target as wide as the window (16:9 until the frontend reports its shape) with the
+     * console's 4:3 picture in the middle; the sides show what the game draws beyond the screen edges.
+     * WW is the target width in console x units: the shown lines (only the drawn ones with
+     * dc_pvr_gl_fill_lines) fill the window height at the console's 4:3 pixel shape. */
+    float aspect = 4.f / 3.f, WW = (float)RW;
+    if (dc_pvr_gl_widescreen) {
+        aspect = dc_pvr_gl_aspect > 0 ? dc_pvr_gl_aspect : 16.f / 9.f;
+        if (aspect < 4.f / 3.f) aspect = 4.f / 3.f;
+        if (aspect > 4.f) aspect = 4.f;
+        int lines = f.height;
+        if (dc_pvr_gl_fill_lines && f.clip_y1 > f.clip_y0 && f.clip_y1 < f.height && (f.clip_y1 - f.clip_y0 + 1) * 2 >= f.height)
+            lines = f.clip_y1 - f.clip_y0 + 1;
+        WW = aspect * (float)lines * (float)RW / (4.f / 3.f * (float)f.height);
+        if (WW < (float)RW) WW = (float)RW;
+    }
+    ensure_fbo((int)(WW / (float)RW * (float)(f.width * scale) + 0.5f), f.height * scale);
     gl_selftest();
-    disp_aspect = dc_pvr_gl_widescreen ? 16.f / 9.f : 4.f / 3.f;
+    disp_aspect = aspect;
 
     /* geometry: every polygon's triangles, then volume triangles, then a full-screen quad */
     nverts = 0;
@@ -699,6 +713,7 @@ void dc_pvr_gl_render(int scale) {
         hud_group(&f, RW, hud_side);
     }
     int beyond = 0;                                        /* anything drawn outside the 4:3 picture */
+    float cx0 = 1e30f, cx1 = -1e30f;                        /* x extent of the textured picture (side bars) */
     for (int i = 0; i < f.npolys; i++) {
         const pvr_poly *p = &f.polys[i];
         const pvr_vtx *v = f.verts + p->first;
@@ -709,6 +724,7 @@ void dc_pvr_gl_render(int scale) {
         else for (int k = 0; k + 2 < p->n; k++) tri(p, &v[k], &v[k + 1], &v[k + 2], k & 1, cull_small);
         spans[i].count = nverts - spans[i].first;
         if (!beyond) for (int k = 0; k < p->n; k++) if (v[k].x < -2.f || v[k].x > RW + 2.f) { beyond = 1; break; }
+        if ((p->isp >> 25) & 1) for (int k = 0; k < p->n; k++) { if (v[k].x < cx0) cx0 = v[k].x; if (v[k].x > cx1) cx1 = v[k].x; }
     }
     push_dx = 0;
     int mod_first = nverts;
@@ -836,8 +852,15 @@ void dc_pvr_gl_render(int scale) {
     p_glDisable(GL_SCISSOR_TEST);
     p_glDepthMask(1);
     if (dc_pvr_gl_widescreen && dc_pvr_gl_side_fill && !beyond) {
-        int px0 = (int)((WW - (float)RW) * 0.5f / WW * (float)fb_w + 0.5f);
-        draw_bars(px0, fb_w - px0, fb_h - (f.clip_y1 + 1) * scale, fb_h - f.clip_y0 * scale);
+        /* bars start where the picture's textured content ends (Rush's title image stops 3 pixels short
+         * of the right edge, which left a black line), never inside the middle third */
+        if (cx0 > cx1 || cx0 > RW * 0.33f) cx0 = 0;
+        if (cx0 > cx1 || cx1 < RW * 0.67f) cx1 = (float)RW;
+        if (cx0 < 0) cx0 = 0;
+        if (cx1 > (float)RW) cx1 = (float)RW;
+        float off = (WW - (float)RW) * 0.5f, k = (float)fb_w / WW;
+        int px0 = (int)ceilf((off + cx0) * k), px1 = (int)floorf((off + cx1) * k);
+        draw_bars(px0, px1, fb_h - (f.clip_y1 + 1) * scale, fb_h - f.clip_y0 * scale);
     }
     pic_offy = ((float)(f.height - 1 - f.clip_y1) - (float)f.clip_y0) * 0.5f / (float)f.height;
     pic_y0 = fb_h - (f.clip_y1 + 1) * scale; pic_y1 = fb_h - f.clip_y0 * scale;
