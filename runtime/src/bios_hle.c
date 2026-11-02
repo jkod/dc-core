@@ -47,6 +47,35 @@ int dc_bios_load(const char *boot, const char *flashp) {
     return ok;
 }
 
+/* User partition (0x1C000, 256 blocks of 64 bytes) as a console leaves it once its clock has been
+ * set: block 0 the "KATANA_FLASH____" header, the last block the allocation bitmap (bit 7 of byte 0
+ * = block 1; a cleared bit = in use). A data block is a 16-bit ID, data, and a CRC-16 (CCITT,
+ * inverted) of its first 62 bytes. The one block here is the system settings (ID 5): clock,
+ * language, stereo, auto-start. Bomberman Online's flash manager waits for it on a black screen. */
+static uint16_t flash_crc(const uint8_t *p, int n) {
+    uint32_t crc = 0xFFFF;
+    for (int i = 0; i < n; i++) {
+        crc ^= (uint32_t)p[i] << 8;
+        for (int b = 0; b < 8; b++) crc = (crc & 0x8000) ? (crc << 1) ^ 0x1021 : crc << 1;
+    }
+    return (uint16_t)~crc;
+}
+static void flash_user_init(void) {
+    uint8_t *u = flash + 0x1C000, *b = u + 0x40;
+    memset(u, 0xFF, 0x4000);
+    memcpy(u, "KATANA_FLASH____", 16);
+    u[16] = 2; u[17] = 0;                                 /* partition 2 */
+    uint32_t t = 2240611200u;                             /* 2021-01-01 00:00, in seconds since 1950 */
+    b[0] = 0x05; b[1] = 0x00;                             /* block ID: system settings */
+    b[2] = t & 0xFF; b[3] = (t >> 8) & 0xFF; b[4] = (t >> 16) & 0xFF; b[5] = t >> 24;
+    b[7] = 1;                                             /* language: English */
+    b[8] = 0;                                             /* stereo */
+    b[9] = 1;                                             /* auto-start discs */
+    uint16_t crc = flash_crc(b, 62);
+    b[62] = crc & 0xFF; b[63] = crc >> 8;
+    u[0x4000 - 0x40] = 0x7F;                              /* bitmap: block 1 in use */
+}
+
 static void flash_init(char region) {
     memset(flash, 0xFF, sizeof flash);
     /* factory partition 0x1A000 (mirrored at 0x1A0A0): "00" region language broadcast, then
@@ -57,7 +86,7 @@ static void flash_init(char region) {
     }
     (void)region;
     memset(flash + 0x1A056, 0x00, 8);  /* machine id */
-    memset(flash + 0x1C000, 0xFF, 0x4000); /* user/system blocks: blank (no saved settings) */
+    flash_user_init();
 }
 
 static const uint32_t part_ofs[5] = {0x1A000, 0x18000, 0x1C000, 0x10000, 0x00000};
