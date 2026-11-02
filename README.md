@@ -1,8 +1,6 @@
 # dc-core
 
-Shared foundation for native ports of Dreamcast games. It's used by
-[rush2049-dc-port](https://github.com/jkod/rush2049-dc-port) and the Quake III port, and it serves
-as the reference oracle for the Tennis 2K2 rebuild.
+Shared foundation for native ports of Dreamcast games.
 
 Nothing here contains game data. Every tool works on the player's own disc image.
 
