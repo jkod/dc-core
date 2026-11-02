@@ -4,6 +4,7 @@
  * points those vectors at addresses that dispatch to native code and fills the RAM areas the
  * boot ROM normally leaves behind (IP.BIN at 0x8C008000, machine ID, ...).
  */
+#include "dccore/hw.h"
 #include "dccore/runtime.h"
 #include "dccore/disc.h"
 #include "dccore/bios.h"
@@ -79,7 +80,9 @@ static int gd_exec(int cmd, uint32_t *p) {
         if (!DC_IS_RAM(dst)) return -1;
         if (DC_RAM_OFS(dst) + n * 2048 > 0x1000000) return -1;
         last_lba = lba + n;
-        return dc_disc_read(lba, n, dc_ram + DC_RAM_OFS(dst)) ? -1 : 0;
+        if (dc_disc_read(lba, n, dc_ram + DC_RAM_OFS(dst))) return -1;
+        if (cmd == 17 || cmd == 34) dc_raise(1u << 14);   /* a DMA read ends with the GD-DMA end interrupt */
+        return 0;
     }
     case 18: case 19: {                      /* GETTOC / GETTOC2: p[0] session area, p[1] buffer */
         uint32_t buf = p[1], area = p[0];
@@ -169,7 +172,10 @@ static uint32_t h_gdrom(sh4ctx *c) {
         int k = c->r[4] % MAX_REQ;
         if (c->r[5]) {
             dc_wr32(c->r[5], req[k].status ? 1 : 0);  /* error code */
-            dc_wr32(c->r[5] + 4, 0); dc_wr32(c->r[5] + 8, 0); dc_wr32(c->r[5] + 12, 0);
+            int rd = req[k].cmd == 16 || req[k].cmd == 17 || req[k].cmd == 32 || req[k].cmd == 34;
+            dc_wr32(c->r[5] + 4, 0);
+            dc_wr32(c->r[5] + 8, rd && !req[k].status ? req[k].p[1] * 2048u : 0);   /* bytes transferred */
+            dc_wr32(c->r[5] + 12, 0);
         }
         c->r[0] = req[k].status ? (uint32_t)-1 : 2;   /* 2 = completed */
         break;
