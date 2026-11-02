@@ -742,6 +742,15 @@ static void hud_group(const pvr_frame *f, int RW, signed char *side) {
  * whole 4:3 width, along the top or bottom edge, up to a third of the height). A frame with one is
  * shown at 4:3 with black sides: the game frames such scenes (and culls them) for 4:3, and its bars
  * stop at the 4:3 edges (Looney Tunes Space Race's intro). */
+/* could be a screen shade: untextured, or a texture modulated by black vertex colours (Re-Volt's pause
+ * shade is a textured quad drawn black at half alpha) */
+static int shade_poly(const pvr_poly *p, const pvr_vtx *v) {
+    if (!((p->isp >> 25) & 1)) return 1;
+    if (!(((p->tsp >> 6) & 3) & 1)) return 0;                /* modulate (or modulate alpha) */
+    for (int k = 0; k < p->n; k++) if (v[k].c[0] > .05f || v[k].c[1] > .05f || v[k].c[2] > .05f) return 0;
+    return 1;
+}
+
 static int letterbox_bar(const pvr_poly *p, const pvr_vtx *v, int RW, int H) {
     if (p->n < 3 || p->list != 0 || ((p->isp >> 25) & 1)) return 0;
     float x0 = v[0].x, x1 = v[0].x, y0 = v[0].y, y1 = v[0].y;
@@ -864,7 +873,7 @@ void dc_pvr_gl_render(int scale) {
     if (dc_pvr_gl_widescreen && dc_pvr_gl_hud_z > 0)
         for (int i = 0; i < f.npolys; i++) {
             const pvr_poly *p = &f.polys[i]; const pvr_vtx *v = f.verts + p->first;
-            if (p->n < 3 || ((p->isp >> 25) & 1) || v[0].z < dc_pvr_gl_hud_z) continue;
+            if (p->n < 3 || !shade_poly(p, v) || v[0].z < dc_pvr_gl_hud_z) continue;
             float x0 = 1e30f, x1 = -1e30f, y0 = 1e30f, y1 = -1e30f; int flat = 1;
             for (int k = 0; k < p->n; k++) {
                 if (v[k].x < x0) x0 = v[k].x; if (v[k].x > x1) x1 = v[k].x;
@@ -881,7 +890,7 @@ void dc_pvr_gl_render(int scale) {
         const float big = (float)RW * (float)f.height / 20.f;
         for (int i = 0; i < f.npolys; i++) {
             const pvr_poly *p = &f.polys[i]; const pvr_vtx *v = f.verts + p->first;
-            if (p->n != 4 || ((p->isp >> 25) & 1) || v[0].z < dc_pvr_gl_hud_z || v[0].z >= ovl_z) continue;
+            if (p->n != 4 || !shade_poly(p, v) || v[0].z < dc_pvr_gl_hud_z || v[0].z >= ovl_z) continue;
             float x0 = 1e30f, x1 = -1e30f, y0 = 1e30f, y1 = -1e30f; int rect = 1;
             for (int k = 0; k < 4; k++) {
                 if (v[k].x < x0) x0 = v[k].x; if (v[k].x > x1) x1 = v[k].x;
