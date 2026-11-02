@@ -689,11 +689,15 @@ int dc_pvr_sw_render(void) {
     for (int i = 0; i < nt; i++) draw_poly(&pl[s[i].idx]);
     free(s);
     /* write the framebuffer: FB_W_SOF1, FB_W_LINESTRIDE (64-bit units), FB_W_CTRL packing */
+    /* FB_W_SOF1 bit 24: render to texture, written in the 64-bit (texture) layout, not the 32-bit
+     * framebuffer one (Tennis 2K2 captures frames this way for its crossfades) */
     uint32_t sof = REG(0x060) & 0x7FFFFF, stride = (REG(0x04C) & 0x1FF) * 8, ctrl = REG(0x048), mode = ctrl & 7;
     uint32_t athr = (ctrl >> 8) & 255;
-    int bpp = mode <= 3 ? 2 : mode == 4 ? 3 : 4;
+    int bpp = mode <= 3 ? 2 : mode == 4 ? 3 : 4, tex = (REG(0x060) >> 24) & 1;
+    int WO = W;                                            /* no wider than a line (a 1024 clip into a 640-pixel texture) */
+    if (stride && WO * bpp > (int)stride) WO = (int)stride / bpp;
     for (int y = 0; y < H; y++)
-        for (int x = 0; x < W; x++) {
+        for (int x = 0; x < WO; x++) {
             float c[4];
             if (hscale) { const float *p0 = cbuf + (y * RW + 2 * x) * 4, *p1 = p0 + 4; for (int k = 0; k < 4; k++) c[k] = (p0[k] + p1[k]) * 0.5f; }
             else memcpy(c, cbuf + (y * RW + x) * 4, 16);
@@ -709,8 +713,11 @@ int dc_pvr_sw_render(void) {
             default: v = a << 24 | r << 16 | g << 8 | b; break;
             }
             uint32_t o = sof + y * stride + x * bpp;
-            for (int k = 0; k < bpp; k++) wr8_area32(o + k, (uint8_t)(v >> (8 * k)));
+            if (tex) { o &= 0x7FFFFF; for (int k = 0; k < bpp; k++) dc_vram[(o + k) & 0x7FFFFF] = (uint8_t)(v >> (8 * k)); }
+            else for (int k = 0; k < bpp; k++) wr8_area32(o + k, (uint8_t)(v >> (8 * k)));
         }
+    if (tex)                                               /* the texture cache sees the new contents */
+        for (uint32_t pg = sof >> 12; pg <= ((sof + (uint32_t)H * stride) >> 12) && pg < 0x800; pg++) dc_vram_gen[pg]++;
     int n = npl;
     ta_ctx = saved;
     return n;

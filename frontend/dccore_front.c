@@ -125,6 +125,9 @@ static int shows_render(void) {
 }
 
 static void on_render(void) {
+    /* render to texture (FB_W_SOF1 bit 24): the frame goes into VRAM as a texture the game draws later
+     * (Tennis 2K2's crossfades), not to the screen; the software renderer writes it there */
+    if ((dc_pvr_reg(0x060) >> 24) & 1) { dc_pvr_sw_render(); return; }
     static long skip = -1;                                 /* debugging: DC_RENDER_EVERY=n draws every nth frame */
     if (skip < 0) { const char *e = getenv("DC_RENDER_EVERY"); skip = e ? atol(e) : 1; if (skip < 1) skip = 1; }
     static long from = -2;                                 /* DC_RENDER_FROM=field: draw every frame from then on */

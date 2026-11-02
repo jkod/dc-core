@@ -847,6 +847,37 @@ void dc_pvr_gl_render(int scale) {
             }
             if (flat && x0 <= 1.f && x1 >= RW - 1.f && y1 - y0 > f.height * 0.8f && v[0].z < ovl_z) ovl_z = v[0].z;
         }
+    /* the same shade drawn as tiles (Tennis 2K2's pause: four quarter-screen quads): large flat
+     * rectangles at one depth that together cover the whole picture once */
+    if (dc_pvr_gl_widescreen && dc_pvr_gl_hud_z > 0) {
+        enum { NT = 16 };
+        struct { float z, x0, x1, y0, y1, area; int n; } t[NT]; int nt = 0;
+        const float big = (float)RW * (float)f.height / 20.f;
+        for (int i = 0; i < f.npolys; i++) {
+            const pvr_poly *p = &f.polys[i]; const pvr_vtx *v = f.verts + p->first;
+            if (p->n != 4 || ((p->isp >> 25) & 1) || v[0].z < dc_pvr_gl_hud_z || v[0].z >= ovl_z) continue;
+            float x0 = 1e30f, x1 = -1e30f, y0 = 1e30f, y1 = -1e30f; int rect = 1;
+            for (int k = 0; k < 4; k++) {
+                if (v[k].x < x0) x0 = v[k].x; if (v[k].x > x1) x1 = v[k].x;
+                if (v[k].y < y0) y0 = v[k].y; if (v[k].y > y1) y1 = v[k].y;
+                if (v[k].z != v[0].z) rect = 0;
+            }
+            for (int k = 0; k < 4 && rect; k++)            /* axis-aligned: every corner on the box */
+                if ((fabsf(v[k].x - x0) > .5f && fabsf(v[k].x - x1) > .5f) || (fabsf(v[k].y - y0) > .5f && fabsf(v[k].y - y1) > .5f)) rect = 0;
+            float a = (x1 - x0) * (y1 - y0);
+            if (!rect || a < big || x0 < -1.f || x1 > RW + 1.f) continue;
+            int j = 0; while (j < nt && t[j].z != v[0].z) j++;
+            if (j == nt) { if (nt == NT) continue; nt++; t[j].z = v[0].z; t[j].x0 = x0; t[j].x1 = x1; t[j].y0 = y0; t[j].y1 = y1; t[j].area = 0; t[j].n = 0; }
+            if (x0 < t[j].x0) t[j].x0 = x0; if (x1 > t[j].x1) t[j].x1 = x1;
+            if (y0 < t[j].y0) t[j].y0 = y0; if (y1 > t[j].y1) t[j].y1 = y1;
+            t[j].area += a; t[j].n++;
+        }
+        for (int j = 0; j < nt; j++) {
+            float box = (t[j].x1 - t[j].x0) * (t[j].y1 - t[j].y0);
+            if (t[j].n >= 2 && t[j].x0 <= 1.f && t[j].x1 >= RW - 1.f && t[j].y1 - t[j].y0 > f.height * 0.8f
+                && t[j].area > box * 0.98f && t[j].area < box * 1.02f && t[j].z < ovl_z) ovl_z = t[j].z;
+        }
+    }
     static signed char *hud_side; static int cap_side;
     if (hud_dx > 0) {
         if (f.npolys > cap_side) { cap_side = f.npolys + 1024; hud_side = realloc(hud_side, (size_t)cap_side); }
