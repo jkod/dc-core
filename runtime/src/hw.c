@@ -37,6 +37,8 @@ uint8_t dc_vram[0x800000];           /* 8 MB, 64-bit layout */
 uint32_t dc_vram_gen[0x800];         /* per 4 KB page of dc_vram: bumped on every write (texture caches) */
 uint32_t dc_pal_gen;                 /* bumped on palette RAM writes */
 #define VRAM_TOUCH(o) (dc_vram_gen[((o) & 0x7FFFFF) >> 12]++)
+uint32_t dc_vram32_gen[0x800];       /* per 4 KB of the 32-bit area: bumped on writes through it (framebuffers) */
+#define VRAM32_TOUCH(o) (dc_vram32_gen[((o) & 0x7FFFFF) >> 12]++)
 static uint32_t p4[32][64];          /* SH-4 on-chip registers, by module */
 static uint32_t sq[2][8];            /* store queues */
 static uint8_t  ocram[0x2000];
@@ -322,7 +324,7 @@ static void ta_area_write(uint32_t m, const uint8_t *p, uint32_t len) {
     int lm32 = (sub >= 0x03000000u) ? (SBR(0x6888) & 1) : (SBR(0x6884) & 1);           /* LMMODE1 / LMMODE0 */
     for (uint32_t i = 0; i < len; i += 4) {
         uint32_t o = (sub + i) & 0x7FFFFF;
-        if (lm32) { memcpy(dc_vram + vram32(o), p + i, 4); VRAM_TOUCH(vram32(o)); } else { memcpy(dc_vram + o, p + i, 4); VRAM_TOUCH(o); }
+        if (lm32) { memcpy(dc_vram + vram32(o), p + i, 4); VRAM_TOUCH(vram32(o)); VRAM32_TOUCH(o); } else { memcpy(dc_vram + o, p + i, 4); VRAM_TOUCH(o); }
     }
 }
 
@@ -530,7 +532,7 @@ static void wr(uint32_t a, uint32_t v, int size) {
     if (m >= 0x00700000u && m < 0x00710000u) { dc_aica_advance(now_cycles()); dc_aica_write(m, v, size); if (dc_hw.on_aica_write) dc_hw.on_aica_write(m, v); dc_next_event = 0; return; }
     if (m >= 0x00800000u && m < 0x00A00000u) { memcpy(aram + (m & 0x1FFFFF), &v, size); if (dc_hw.on_aica_write) dc_hw.on_aica_write(m, v); return; }
     if ((m >> 24) == 0x04 || (m >> 24) == 0x06) { memcpy(dc_vram + (m & 0x7FFFFF), &v, size); VRAM_TOUCH(m); return; }
-    if ((m >> 24) == 0x05 || (m >> 24) == 0x07) { memcpy(dc_vram + (vram32(m) | (m & 3)), &v, size); VRAM_TOUCH(vram32(m)); return; }
+    if ((m >> 24) == 0x05 || (m >> 24) == 0x07) { memcpy(dc_vram + (vram32(m) | (m & 3)), &v, size); VRAM_TOUCH(vram32(m)); VRAM32_TOUCH(m); return; }
     if ((m >> 26) == 0x04) {                                                                  /* 0x10000000.. TA FIFO */
         static uint32_t blk[8]; static int nb;
         if (dc_hw.on_ta_write) dc_hw.on_ta_write(m, v);

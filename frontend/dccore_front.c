@@ -102,6 +102,28 @@ static Uint64 t0_count; static uint64_t t0_cycles; static int paced;
 
 static void *getproc(const char *n) { return SDL_GL_GetProcAddress(n); }
 
+/* The PVR's render targets and the VRAM write count over each when it was drawn: a displayed
+ * framebuffer that is one of them and unchanged since is the picture already shown (the OpenGL
+ * renderer does not write VRAM), so the framebuffer fallback below must not replace it. */
+static struct { uint32_t addr, gen; int used; } rtarget[4];
+static uint32_t fb_gen(uint32_t a) {                       /* a: 32-bit-area offset; 640x480 at 32 bpp, at most */
+    uint32_t g = 0;
+    for (uint32_t p = a >> 12; p <= ((a + 640u * 480u * 4u - 1) >> 12) && p < 0x800; p++) g += dc_vram32_gen[p] * (p | 1);
+    return g;
+}
+static void note_render_target(void) {
+    uint32_t a = dc_pvr_reg(0x060) & 0x7FFFFFu;
+    int k = 0;
+    while (k < 3 && rtarget[k].addr != a) k++;
+    memmove(rtarget + 1, rtarget, (size_t)k * sizeof *rtarget);
+    rtarget[0].addr = a; rtarget[0].gen = fb_gen(a); rtarget[0].used = 1;
+}
+static int shows_render(void) {
+    uint32_t d = dc_pvr_reg(0x050) & 0x7FFFFFu;
+    for (int k = 0; k < 4; k++) if (rtarget[k].used && rtarget[k].addr == d) return rtarget[k].gen == fb_gen(d);
+    return 0;
+}
+
 static void on_render(void) {
     static long skip = -1;                                 /* debugging: DC_RENDER_EVERY=n draws every nth frame */
     if (skip < 0) { const char *e = getenv("DC_RENDER_EVERY"); skip = e ? atol(e) : 1; if (skip < 1) skip = 1; }
@@ -115,6 +137,7 @@ static void on_render(void) {
         dc_pvr_sw_render();
         if (dc_pvr_display(rgb, 1280, 1024, &w, &h) == 0) dc_pvr_gl_load_rgb(rgb, w, h);
     } else dc_pvr_gl_render(cfg.scale);
+    note_render_target();
     need_present = 1;
     renders++; last_render_frame = (unsigned long)vblanks;
 }
@@ -304,7 +327,7 @@ static FILE *wav_file(void) {
 /* ------------------------------------------------------------------ per field */
 static void on_vblank(uint64_t f) {
     vblanks = f;
-    if (vblanks - last_render_frame > 3) {                 /* nothing drawn by the PVR: show the framebuffer */
+    if (vblanks - last_render_frame > 3 && !shows_render()) {   /* nothing drawn by the PVR: show the framebuffer */
         static uint8_t rgb[1280 * 1024 * 3]; int w, h;
         if (dc_pvr_display(rgb, 1280, 1024, &w, &h) == 0) { dc_pvr_gl_load_rgb(rgb, w, h); need_present = 1; }
     }

@@ -46,7 +46,7 @@ static uint32_t rd32_area32(uint32_t o) {
 }
 static void wr8_area32(uint32_t o, uint8_t v) {
     uint32_t so = vram32_ofs(o);
-    if ((o & 0xFFF) == 0 || (o & 3) == 0) dc_vram_gen[so >> 12]++;    /* framebuffer writes invalidate textures there */
+    if ((o & 0xFFF) == 0 || (o & 3) == 0) { dc_vram_gen[so >> 12]++; dc_vram32_gen[(o & 0x7FFFFF) >> 12]++; }   /* framebuffer writes invalidate textures there */
     dc_vram[so] = v;
 }
 static uint16_t tex16(uint32_t o) { o &= 0x7FFFFE; return (uint16_t)(dc_vram[o] | dc_vram[o + 1] << 8); }
