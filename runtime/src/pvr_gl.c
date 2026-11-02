@@ -892,7 +892,9 @@ void dc_pvr_gl_render(int scale) {
         if (aspect < 4.f / 3.f) aspect = 4.f / 3.f;
         if (aspect > 4.f) aspect = 4.f;
         int lines = f.height;
-        if (dc_pvr_gl_fill_lines && f.clip_y1 > f.clip_y0 && f.clip_y1 < f.height && (f.clip_y1 - f.clip_y0 + 1) * 2 >= f.height)
+        /* at least 3/4 of the picture: a render of one band (a split-screen view, half the height) is
+         * part of a larger picture, not the picture with unused lines (Re-Volt's 2-player race) */
+        if (dc_pvr_gl_fill_lines && f.clip_y1 > f.clip_y0 && f.clip_y1 < f.height && (f.clip_y1 - f.clip_y0 + 1) * 4 >= f.height * 3)
             lines = f.clip_y1 - f.clip_y0 + 1;
         WW = aspect * (float)lines * (float)RW / (4.f / 3.f * (float)f.height);
         if (WW < (float)RW) WW = (float)RW;
@@ -1268,7 +1270,7 @@ void dc_pvr_gl_render(int scale) {
     }
     pic_offy = ((float)(f.height - 1 - f.clip_y1) - (float)f.clip_y0) * 0.5f / (float)f.height;
     pic_y0 = fb_h - (f.clip_y1 + 1) * scale; pic_y1 = fb_h - f.clip_y0 * scale;
-    if (pic_y0 < 0 || pic_y1 > fb_h || pic_y1 - pic_y0 < fb_h / 2) pic_y0 = pic_y1 = 0;   /* odd clip: whole picture */
+    if (pic_y0 < 0 || pic_y1 > fb_h || (pic_y1 - pic_y0) * 4 < fb_h * 3) pic_y0 = pic_y1 = 0;   /* odd clip or one band: whole picture */
     p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
