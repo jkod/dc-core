@@ -28,8 +28,11 @@ static void lcache_clear(void) { memset(lcache, 0, sizeof lcache); }
 void dc_hle_register(uint32_t addr, sh4fn fn) {
     lcache_clear();
     addr = (addr & 0x1FFFFFFFu) | 0x80000000u;
-    for (int i = 0; i < hle_n; i++) if (hle[i].addr == addr) { hle[i].fn = fn; return; }
-    if (hle_n < MAX_HLE) { hle[hle_n].addr = addr; hle[hle_n].fn = fn; hle_n++; }
+    for (int i = 0; i < hle_n; i++) if (hle[i].addr == addr) {
+        if (fn) hle[i].fn = fn; else hle[i] = hle[--hle_n];      /* NULL: remove the override */
+        return;
+    }
+    if (fn && hle_n < MAX_HLE) { hle[hle_n].addr = addr; hle[hle_n].fn = fn; hle_n++; }
 }
 void dc_set_miss_handler(dc_miss_fn f) { miss_handler = f; }
 void dc_set_trap_handler(dc_trap_fn f) { trap_handler = f; }

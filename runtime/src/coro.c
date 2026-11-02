@@ -166,12 +166,15 @@ void dc_coro_setjmp_done(sh4ctx *c, jmp_buf *jb) {
     s->r15 = c->r[15]; s->pr = c->pr; s->owner = cur; s->used = 1; cur->refs++;
 }
 
+static jmp_buf *leave_jb;             /* dc_coro_reset: where the main stack continues */
+static uint32_t lj_hooked;            /* the longjmp address dc_coro_install hooked */
 static void switch_to(coro *to) {
     coro *from = cur;
     cur = to;
     hctx_switch(&from->uc, &to->uc);
-    /* resumed: someone longjmp'd into one of our setjmps */
     cur = from;
+    if (leave_jb && from == &main_coro) { jmp_buf *j = leave_jb; leave_jb = NULL; DC_LONGJMP(*j, 1); }
+    /* resumed: someone longjmp'd into one of our setjmps */
     slot *s = from->pending; from->pending = NULL;
     if (s) DC_LONGJMP(s->jb, 1);
 }
@@ -232,6 +235,7 @@ void dc_coro_install(uint32_t setjmp_addr, uint32_t lj_addr, size_t host_stack) 
     longjmp_addr = lj_addr;
     dc_coro_setjmp_addr = setjmp_addr;
     dc_hle_register(lj_addr, h_longjmp);
+    lj_hooked = lj_addr;
 }
 
 /* ---- task switches that swap stacks and end with rte (dc_coro_add_switch) ----
@@ -288,4 +292,21 @@ void dc_coro_add_switch(uint32_t addr) {
     if (!f || nsw == MAX_SW) { fprintf(stderr, "dc-core: cannot hook task switch at %08X\n", addr); return; }
     sw[nsw].addr = addr; sw[nsw].orig = f; nsw++;
     dc_hle_register(addr, h_switch);
+}
+
+/* ---- leaving a whole executable (dc_coro_reset) */
+void dc_coro_reset(jmp_buf *jb) {
+    for (int i = 0; i < nsw; i++) dc_hle_register(sw[i].addr, NULL);
+    nsw = 0;
+    if (lj_hooked) dc_hle_register(lj_hooked, NULL);
+    lj_hooked = 0; longjmp_addr = 0; orig_longjmp = NULL; dc_coro_setjmp_addr = 0;
+    for (int i = 0; i < MAX_SLOTS; i++) slots[i].used = 0;
+    for (int i = 0; i < ncoros; i++) { coros[i].refs = 0; coros[i].sp_waiting = 0; coros[i].pending = NULL; }
+    main_coro.refs = 0; main_coro.sp_waiting = 0; main_coro.pending = NULL;
+    if (cur == &main_coro) DC_LONGJMP(*jb, 1);
+    leave_jb = jb;                       /* on a coroutine: the main stack takes the jump (fibers can't share one) */
+    coro *from = cur;
+    cur = &main_coro;
+    hctx_switch(&from->uc, &main_coro.uc);
+    abort();                             /* not reached */
 }

@@ -1,6 +1,7 @@
 /* dc-core runtime tests (no game code): TA parser, DMA engines, maple, delayed interrupts.
  *   cc -Iruntime/include tests/test_runtime.c runtime/src/*.c -lm -o test_runtime && ./test_runtime */
 #include "dccore/runtime.h"
+#include "dccore/coro.h"
 #include "dccore/hw.h"
 #include "dccore/ta.h"
 #include "dccore/aica.h"
@@ -24,6 +25,7 @@ static void blk(uint32_t pcw) { uint32_t b[8] = {pcw}; dc_ta_write32(b); }
 
 /* a second executable's table (dc_use_code): one function at 8C010000 that sets r0 = 77 */
 static uint32_t second_fn(sh4ctx *c) { c->r[0] = 77; return 0; }
+static uint32_t hle_99(sh4ctx *c) { c->r[0] = 99; return 0; }
 static const dc_fn_entry second_table[1] = {{0x8C010000u, 0x8C010010u, second_fn}};
 
 int main(void) {
@@ -291,7 +293,18 @@ int main(void) {
     dc_use_code(second_table, 1);
     c.r[0] = 0; c.pr = 0; dc_call(&c, 0x8C010000u);
     if (c.r[0] != 77) { printf("FAIL: dc_use_code: r0=%u\n", c.r[0]); fails++; }
+    /* an HLE override wins over the table; removing it (NULL) uncovers the table again */
+    dc_hle_register(0x8C010000u, hle_99);
+    c.r[0] = 0; c.pr = 0; dc_call(&c, 0x8C010000u);
+    if (c.r[0] != 99) { printf("FAIL: hle override: r0=%u\n", c.r[0]); fails++; }
+    dc_hle_register(0x8C010000u, NULL);
+    c.r[0] = 0; c.pr = 0; dc_call(&c, 0x8C010000u);
+    if (c.r[0] != 77) { printf("FAIL: hle removal: r0=%u\n", c.r[0]); fails++; }
     dc_use_code(dc_fn_table, dc_fn_count);
+    /* dc_coro_reset from the main stack: continues at the setjmp */
+    { static jmp_buf jb; static volatile int back; back = 0;
+      if (!setjmp(jb)) dc_coro_reset(&jb); else back = 1;
+      if (!back) { printf("FAIL: dc_coro_reset\n"); fails++; } }
     printf(fails ? "%d runtime test(s) FAILED\n" : "runtime tests passed\n", fails);
     return fails != 0;
 }
