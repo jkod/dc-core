@@ -609,14 +609,17 @@ static void hud_group(const pvr_frame *f, int RW, signed char *side) {
     for (int i = 0; i < f->npolys; i++) {
         const pvr_poly *p = &f->polys[i];
         const pvr_vtx *v = f->verts + p->first;
-        if (p->n < 3 || v[0].z < dc_pvr_gl_hud_z) continue;
-        int flat = 1; float x0 = v[0].x, x1 = v[0].x, y0 = v[0].y, y1 = v[0].y;
-        for (int k = 1; k < p->n; k++) {
+        if (p->n < 3) continue;
+        int flat = 1, near = 1; float x0 = v[0].x, x1 = v[0].x, y0 = v[0].y, y1 = v[0].y;
+        for (int k = 0; k < p->n; k++) {
             if (v[k].z != v[0].z) flat = 0;
+            if (v[k].z < dc_pvr_gl_hud_z) near = 0;
             if (v[k].x < x0) x0 = v[k].x; if (v[k].x > x1) x1 = v[k].x;
             if (v[k].y < y0) y0 = v[k].y; if (v[k].y > y1) y1 = v[k].y;
         }
-        if (!flat || x1 - x0 > RW * 0.9f) continue;          /* full-width bars and fades stay */
+        if (!near) continue;
+        if (!flat && x1 - x0 > RW * 0.15f) continue;         /* small 3D HUD models (Rush's spinning coins) count */
+        if (x1 - x0 > RW * 0.9f) continue;                    /* full-width bars and fades stay */
         if (n == cap) { cap = cap ? cap * 2 : 1024; b = realloc(b, (size_t)cap * sizeof *b); }
         b[n].x0 = x0; b[n].y0 = y0; b[n].x1 = x1; b[n].y1 = y1; b[n].poly = i; b[n].parent = n; n++;
     }
