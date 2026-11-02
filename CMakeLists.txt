@@ -75,12 +75,13 @@ if(DCCORE_DEMO AND TARGET dccore_front)
   dccore_add_player(dccore_demo SOURCES examples/demo.c TITLE "dc-core demo" VERSION "0.1")
 endif()
 
-# dccore_add_recomp(<target> BIN <1ST_READ.BIN> FUNCS <funcs.txt> [BASE 0x8C010000] [SETJMP addr...])
+# dccore_add_recomp(<target> BIN <1ST_READ.BIN> FUNCS <funcs.txt> [BASE 0x8C010000] [SETJMP addr...]
+#                   [MAX_FUNC_BYTES n] [NO_DISCOVER])
 #
 # Recompiles the player's own executable at configure time and builds it as a static
 # library. The generated C is derived from the game and stays in the build directory.
 function(dccore_add_recomp target)
-  cmake_parse_arguments(A "" "BIN;FUNCS;BASE;MAX_FUNC_BYTES" "SETJMP" ${ARGN})
+  cmake_parse_arguments(A "NO_DISCOVER" "BIN;FUNCS;BASE;MAX_FUNC_BYTES" "SETJMP" ${ARGN})
   if(NOT A_BASE)
     set(A_BASE 0x8C010000)
   endif()
@@ -96,6 +97,11 @@ function(dccore_add_recomp target)
   # last function before a gap from turning into huge generated files
   if(A_MAX_FUNC_BYTES)
     list(APPEND sj --max-func-bytes ${A_MAX_FUNC_BYTES})
+  endif()
+  # NO_DISCOVER: FUNCS is complete (e.g. pruned of data that decodes as code); don't add call
+  # targets found by scanning, which would bring back starts inside data areas
+  if(A_NO_DISCOVER)
+    list(APPEND sj --no-discover)
   endif()
   execute_process(
     COMMAND ${DCCORE_PYTHON} ${DCCORE_DIR}/tools/recomp/sh4recomp.py ${A_BIN}

@@ -147,6 +147,27 @@ t("coro_setjmp_threads", {
   "dc_wr32(0x8C100100u, 0x8C0F0000u); dc_wr32(0x8C100104u, %du); dc_wr32(0x8C100200u, 0);"
   "dc_coro_install(%du, %du, 0);" % (T, S, L),
   "c.r[0] == 3 && dc_coro_count() == 1")
+# the same threads, but the caller of setjmp is split right after the call (a function start at
+# 0x0C, e.g. a discovered branch target): it must still resume in a live host frame
+MAIN = [0x4F22, 0xE903, 0xD408, 0xD109, 0x410B, 0x0009, 0x2008, 0x8B03,
+        0xD407, 0xD108, 0x410B, 0xE501, 0x4910, 0x8BF3, 0xD106, 0x6012,
+        0x4F26, 0x000B, 0x0009, 0x0009] + lw(0x8C100000) + lw(S) + lw(0x8C100100) + lw(L) + lw(0x8C100200)
+t("coro_setjmp_split_caller", {
+    0x00: MAIN[:6], 0x0C: MAIN[6:],
+    0x80: [0xD107, 0x6012, 0x7001, 0x2102, 0xD406, 0xD107, 0x410B, 0x0009,
+           0x2008, 0x8BF5, 0xD405, 0xD106, 0x410B, 0xE501, 0x0009, 0x0009]
+          + lw(0x8C100200) + lw(0x8C100100) + lw(S) + lw(0x8C100000) + lw(L),
+    0x100: [0x24F2, 0x002A, 0x1401, 0x14E2, 0x1483, 0x000B, 0xE000],
+    0x140: [0x6F42, 0x5041, 0x402A, 0x5E42, 0x5843, 0x000B, 0x6053]},
+  "dc_wr32(0x8C100100u, 0x8C0F0000u); dc_wr32(0x8C100104u, %du); dc_wr32(0x8C100200u, 0);"
+  "dc_coro_install(%du, %du, 0);" % (T, S, L),
+  "c.r[0] == 3 && dc_coro_count() == 1")
+# 0x0000 in a delay slot: hardware runs it as a no-op (compilers leave it after jmp in C++ thunks)
+#   mov.l @(lit),r1 ; jmp @r1 ; .word 0 ; ... ; at 0x20: mov #5,r0 ; rts ; nop
+t("zero_in_delay_slot", {0: [0xD102, 0x412B, 0x0000, 0x0009, 0x0009, 0x0009,
+                             (BASE + 0x20) & 0xFFFF, (BASE + 0x20) >> 16],
+                         0x20: [0xE005, 0x000B, 0x0009]},
+  "dc_set_trap_handler((dc_trap_fn)(void (*)(void))abort);", "c.r[0] == 5")
 # code outside the executable that nothing recompiled (built at run time): interpreted
 #   main: mov.l @(lit),r1 ; jsr @r1 ; nop ; rts ; nop ; (lit = 0x8C200000)
 #   at 0x8C200000 (written by setup): mov #42,r0 ; add #1,r0 ; rts ; add r0,r0   -> 86
@@ -154,7 +175,15 @@ t("interp_runtime_code", {0: [0xD102, 0x410B, 0x0009, 0x000B, 0x0009, 0x0009, 0x
   "{ static const uint16_t code[] = { 0xE02A, 0x7001, 0x000B, 0x300C }; memcpy(dc_ram + 0x200000, code, sizeof code); }",
   "c.r[0] == 86")
 
-EXTRA = {"coro_setjmp_threads": ["--setjmp", hex(S)]}
+# checks on the generated code: the split caller of setjmp is one host function up to its rts
+def _table_end(gen, start):
+    import re
+    for line in open(os.path.join(gen, "recomp_table.c")):
+        m = re.match(r"\s*\{ 0x%08Xu, 0x([0-9A-F]{8})u," % start, line)
+        if m: return int(m.group(1), 16)
+GEN_CHECK = {"coro_setjmp_split_caller": lambda gen: _table_end(gen, BASE + 4) == BASE + 0x26}   # 4: loop head
+
+EXTRA = {"coro_setjmp_threads": ["--setjmp", hex(S)], "coro_setjmp_split_caller": ["--setjmp", hex(S)]}
 
 def build_bin(prog):
     size = max(off + 2 * len(w) for off, w in prog.items())
@@ -180,6 +209,7 @@ def prepare(tmp, name, prog, setup, check):
 #include "dccore/coro.h"
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 extern int dc_alias_verbose;
 int main(void) {
   sh4ctx c; dc_init(&c);
@@ -211,6 +241,8 @@ def main():
         cc = os.environ.get("CC", "cc").split() + os.environ.get("CFLAGS", "").split()
         subprocess.check_call(cc + ["-O1", "-w", "-I" + os.path.join(ROOT, "runtime/include"), "-o", exe] + srcs + ["-lm"])
         r = subprocess.run(os.environ.get("RUN", "").split() + [exe], capture_output=True, text=True)
+        gen_ok = GEN_CHECK.get(name, lambda g: True)(os.path.join(d, "gen"))
+        if not gen_ok: r = subprocess.CompletedProcess(r.args, 1, "generated code check failed", "")
         status = "ok" if r.returncode == 0 else "FAIL " + r.stdout.strip() + r.stderr.strip()
         print("%-28s %s" % (name, status))
         ok += r.returncode == 0

@@ -390,6 +390,8 @@ class Translator:
     def slot_code(self, i, insns):
         s = insns.get(i.addr + 2) or self.decode(i.addr + 2)
         if s.kind != "op":
+            if s.kind == "bad" and self.u16(i.addr + 2) == 0x0000:
+                return "/* 0000 in the delay slot: a no-op on the hardware */"
             if s.kind == "bad":
                 return s.code
             return 'dc_trap(c, %s, "branch in delay slot");' % h(s.addr)
@@ -455,6 +457,57 @@ class Translator:
 
     def _after_call(self, nxt, end):
         return "goto L_%08X;" % nxt if nxt < end else "return %s;" % h(nxt)
+
+
+def flow_end(tr, s, cap=0x4000):
+    """End of the guest function that starts at s, by control flow: the first rts (or jmp) past
+    every branch target seen so far, plus its delay slot."""
+    a = s; far = s
+    while a < s + cap:
+        op = tr.u16(a)
+        if op is None: return a
+        top = op >> 12
+        if top == 0xA:
+            d = op & 0xFFF; d = d - 0x1000 if d & 0x800 else d
+            far = max(far, a + 4 + d * 2)
+        elif top == 0x8 and ((op >> 8) & 0xF) in (0x9, 0xB, 0xD, 0xF):
+            d = op & 0xFF; d = d - 0x100 if d & 0x80 else d
+            far = max(far, a + 4 + d * 2)
+        elif (op == 0x000B or (op & 0xF0FF) == 0x402B) and a >= far:
+            return a + 4
+        a += 2
+    return a
+
+
+def extend_setjmp_callers(tr, ranges):
+    """A function that calls the game's setjmp must stay one host function until it returns: the
+    guest longjmp resumes in the host frame of that call (DC_CALL_SETJMP), so the function may not
+    leave its frame by a tail jump into a split-off part (a loop head that became a function
+    start, for example). Such a function is extended to its end by control flow; the starts inside
+    it remain functions of their own for jumps from outside."""
+    if not tr.setjmp:
+        return ranges
+    sites = []
+    a = tr.base
+    while a < tr.end - 1:
+        op = tr.u16(a)
+        if op >> 12 == 0xB:
+            d = op & 0xFFF; d = d - 0x1000 if d & 0x800 else d
+            if a + 4 + d * 2 in tr.setjmp: sites.append(a)
+        elif (op & 0xF0FF) == 0x400B and tr._reg_const(None, a, (op >> 8) & 0xF, tr.base) in tr.setjmp:
+            sites.append(a)
+        a += 2
+    out = list(ranges)
+    starts = [s for s, _ in ranges]
+    import bisect
+    for site in sites:
+        k = bisect.bisect_right(starts, site) - 1
+        if k < 0: continue
+        s, e = out[k]
+        fe = flow_end(tr, s)
+        if fe > e and fe > site:
+            out[k] = (s, fe)
+    return out
 
 
 def read_funcs(path, base, end):
@@ -610,6 +663,7 @@ def main():
         e = funcs[k + 1] if k + 1 < len(funcs) else base + len(data)
         e = min(e, s + args.max_func_bytes)
         ranges.append((s, e))
+    ranges = extend_setjmp_callers(tr, ranges)
     # one file per 16 KB of address space: adding a function only changes its own file,
     # and files whose text is unchanged are not rewritten (incremental builds stay fast)
     files = []
