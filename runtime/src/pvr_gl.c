@@ -529,6 +529,11 @@ static void draw_bars(int px0, int px1, int y0, int y1) {
 /* vertical centring: the share of the picture height to move it down by (the drawn lines are
  * centred in the display; Rush shows 470 lines and draws 4..443) */
 static float pic_offy;
+/* dc_pvr_gl_fill_lines: show only the lines the game draws, filling the window height (no black bands
+ * above and below; Rush draws 440 of its 470 lines, so the picture is ~7% taller). Rows of the FBO
+ * (GL rows go up) holding those lines; 0/0 = the whole picture. */
+int dc_pvr_gl_fill_lines = 1;
+static int pic_y0, pic_y1;
 /* debug (DC_GL_DEBUG): draw a known 4x4 texture through the real shader and read the result back,
  * at several 1/w depths and filter settings, and log what the driver produced */
 static void gl_selftest(void) {
@@ -835,6 +840,8 @@ void dc_pvr_gl_render(int scale) {
         draw_bars(px0, fb_w - px0, fb_h - (f.clip_y1 + 1) * scale, fb_h - f.clip_y0 * scale);
     }
     pic_offy = ((float)(f.height - 1 - f.clip_y1) - (float)f.clip_y0) * 0.5f / (float)f.height;
+    pic_y0 = fb_h - (f.clip_y1 + 1) * scale; pic_y1 = fb_h - f.clip_y0 * scale;
+    if (pic_y0 < 0 || pic_y1 > fb_h || pic_y1 - pic_y0 < fb_h / 2) pic_y0 = pic_y1 = 0;   /* odd clip: whole picture */
     p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
@@ -862,8 +869,12 @@ void dc_pvr_gl_present(int win_w, int win_h, int stretch) {
     p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
     p_glViewport(0, 0, win_w, win_h);
     p_glClearColor(0, 0, 0, 1); p_glClear(GL_COLOR_BUFFER_BIT);
-    int sh = (int)(pic_offy * (float)dh + (pic_offy >= 0 ? 0.5f : -0.5f));   /* centre the drawn lines (GL rows go up) */
-    p_glBlitFramebuffer(0, 0, fb_w, fb_h, dx, dy - sh, dx + dw, dy + dh - sh, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    if (dc_pvr_gl_fill_lines && pic_y1 > pic_y0) {         /* the drawn lines fill the height */
+        p_glBlitFramebuffer(0, pic_y0, fb_w, pic_y1, dx, dy, dx + dw, dy + dh, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    } else {
+        int sh = (int)(pic_offy * (float)dh + (pic_offy >= 0 ? 0.5f : -0.5f));   /* centre the drawn lines (GL rows go up) */
+        p_glBlitFramebuffer(0, 0, fb_w, fb_h, dx, dy - sh, dx + dw, dy + dh - sh, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    }
     p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
@@ -873,7 +884,7 @@ void dc_pvr_gl_load_rgb(const uint8_t *rgb, int w, int h) {
     if (!ready || w <= 0 || h <= 0) return;
     if (!fbo) ensure_fbo(w, h);
     disp_aspect = 4.f / 3.f;                               /* a CPU-drawn screen: always 4:3 */
-    pic_offy = 0;
+    pic_offy = 0; pic_y0 = pic_y1 = 0;
     uint8_t *tmp = malloc((size_t)w * h * 3);
     for (int y = 0; y < h; y++) memcpy(tmp + (size_t)(h - 1 - y) * w * 3, rgb + (size_t)y * w * 3, (size_t)w * 3);
     if (w == fb_w && h == fb_h) {                          /* same size: straight into the picture */

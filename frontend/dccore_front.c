@@ -8,6 +8,9 @@
 #include "dccore/maple.h"
 #define SDL_MAIN_HANDLED
 #include <SDL.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,17 +24,29 @@ static SDL_GameController *pads[4];     /* gamepad k drives Dreamcast port k (po
 static void pad_open(int device_index) {
     if (!SDL_IsGameController(device_index)) return;
     SDL_JoystickID id = SDL_JoystickGetDeviceInstanceID(device_index);
-    int slot = -1;
-    for (int k = 0; k < 4; k++) {
+    for (int k = 0; k < 4; k++)
         if (pads[k] && SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(pads[k])) == id) return;   /* already open */
-        if (!pads[k] && slot < 0) slot = k;
+    /* port: an XInput pad's player number (its ring light: player 1 -> port A) when that port is free or
+     * held by a pad without one (virtual or unnumbered devices), otherwise the first free port */
+    int want = SDL_JoystickGetDevicePlayerIndex(device_index), slot = -1;
+    if (want >= 0 && want < 4) {
+        if (!pads[want]) slot = want;
+        else if (SDL_GameControllerGetPlayerIndex(pads[want]) < 0) {
+            for (int k = 0; k < 4; k++) if (!pads[k]) {     /* move the unnumbered pad to a free port */
+                pads[k] = pads[want]; pads[want] = NULL; dc_pad[k].connected = 1;
+                fprintf(stderr, "controller %s: moved to port %c\n", SDL_GameControllerName(pads[k]), 'A' + k);
+                break;
+            }
+            if (!pads[want]) slot = want;
+        }
     }
-    if (slot < 0) return;
+    for (int k = 0; k < 4 && slot < 0; k++) if (!pads[k]) slot = k;
+    if (slot < 0) { fprintf(stderr, "controller %s: no free port\n", SDL_GameControllerNameForIndex(device_index)); return; }
     pads[slot] = SDL_GameControllerOpen(device_index);
     if (pads[slot]) {
-        fprintf(stderr, "controller %d: %s\n", slot + 1, SDL_GameControllerName(pads[slot]));
+        fprintf(stderr, "controller %s (player %d): port %c\n", SDL_GameControllerName(pads[slot]), want + 1, 'A' + slot);
         dc_pad[slot].connected = 1;
-    }
+    } else fprintf(stderr, "controller %d: %s\n", device_index, SDL_GetError());
 }
 static void pad_close(SDL_JoystickID id) {
     for (int k = 0; k < 4; k++)
@@ -263,6 +278,15 @@ static void on_vblank(uint64_t f) {
 
 int dc_front_open(const dc_front_config *c) {
     cfg = *c;
+#ifdef _WIN32
+    /* started without a console (double-click, shortcut): messages go to <save_name>.log next to the exe */
+    if (!GetConsoleWindow()) {
+        char *base = SDL_GetBasePath(), path[1024];
+        snprintf(path, sizeof path, "%s%s.log", base ? base : "", cfg.save_name ? cfg.save_name : "dc-core");
+        if (base) SDL_free(base);
+        if (freopen(path, "w", stderr)) setvbuf(stderr, NULL, _IONBF, 0);
+    }
+#endif
     if (cfg.scale <= 0) cfg.scale = 2;
 #ifdef __SWITCH__
     cfg.width = 1280; cfg.height = 720; cfg.fullscreen = 1;   /* the console's screen / TV output */
@@ -312,6 +336,9 @@ int dc_front_open(const dc_front_config *c) {
 #ifdef __SWITCH__
     if (SDL_NumJoysticks() > 0) joy = SDL_JoystickOpen(0);
 #else
+    for (int i = 0; i < SDL_NumJoysticks(); i++)          /* what the system reports, for diagnosing input */
+        fprintf(stderr, "joystick %d: %s%s, player %d\n", i, SDL_JoystickNameForIndex(i),
+                SDL_IsGameController(i) ? " (gamepad)" : " (not a known gamepad: ignored)", SDL_JoystickGetDevicePlayerIndex(i) + 1);
     for (int i = 0; i < SDL_NumJoysticks(); i++) pad_open(i);
 #endif
     dc_hw.on_render = on_render;
