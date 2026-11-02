@@ -472,11 +472,19 @@ static void scissor(int x, int y, int w, int h) {
     sc_set[0] = x; sc_set[1] = y; sc_set[2] = w; sc_set[3] = h;
     p_glScissor(x, y, w, h);
 }
+/* split-screen widening (dc_pvr_gl_split_panel_x): views clipped to [0, panel_x) beside a side panel
+ * are shifted to centre and widened to the whole width; the panel's backdrop goes, its contents
+ * (map, timer) move to the right edge */
+int dc_pvr_gl_split_panel_x;
+static int split_wide;                 /* this frame has such views */
+static int split_view(const pvr_poly *p) {
+    return split_wide && p->uclip == 2 && p->ux0 <= 0 && p->ux1 == dc_pvr_gl_split_panel_x;
+}
 static void scissor_for(const pvr_poly *p) {
     if (p->uclip != 2) { scissor(sc_x, sc_y, sc_w, sc_h); return; }
     /* a rectangle at the picture's left or right edge reaches the edge of the (widescreen) target */
     int x0 = p->ux0 <= 0 ? 0 : (int)floorf((sc_off + (float)p->ux0 * sc_kx) * sc_k);
-    int x1 = p->ux1 >= sc_rw ? 1 << 20 : (int)ceilf((sc_off + (float)p->ux1 * sc_kx) * sc_k);
+    int x1 = p->ux1 >= sc_rw || split_view(p) ? 1 << 20 : (int)ceilf((sc_off + (float)p->ux1 * sc_kx) * sc_k);
     int y0 = fb_h - p->uy1 * sc_scale, y1 = fb_h - p->uy0 * sc_scale;     /* GL rows go up */
     if (x0 < sc_x) x0 = sc_x; if (x1 > sc_x + sc_w) x1 = sc_x + sc_w;
     if (y0 < sc_y) y0 = sc_y; if (y1 > sc_y + sc_h) y1 = sc_y + sc_h;
@@ -788,11 +796,31 @@ void dc_pvr_gl_render(int scale) {
         hud_group(&f, RW, hud_side);
     }
     float cx0 = 1e30f, cx1 = -1e30f;                        /* x extent of the textured picture (side bars) */
+    split_wide = 0;
+    if (dc_pvr_gl_widescreen && dc_pvr_gl_split_panel_x > 0 && dc_pvr_gl_split_panel_x < f.width)
+        for (int i = 0; i < f.npolys && !split_wide; i++) {
+            const pvr_poly *p = &f.polys[i];
+            if (p->uclip == 2 && p->ux0 <= 0 && p->ux1 == dc_pvr_gl_split_panel_x && p->uy1 - p->uy0 < f.height * 3 / 4) split_wide = 1;
+        }
+    float view_dx = (float)(RW - dc_pvr_gl_split_panel_x * RW / f.width) * 0.5f, panel_dx = (WW - (float)RW) * 0.5f;
+    float panel_x = (float)(dc_pvr_gl_split_panel_x * RW / f.width);
     for (int i = 0; i < f.npolys; i++) {
         const pvr_poly *p = &f.polys[i];
         const pvr_vtx *v = f.verts + p->first;
         push_dx = 0;
         if (hud_dx > 0 && hud_side) push_dx = hud_side[i] * hud_dx;
+        if (split_wide) {
+            if (split_view(p)) push_dx = view_dx;
+            else {
+                float mnx = 1e30f, mny = 1e30f, mxy = -1e30f; int flat = 1;
+                for (int k = 0; k < p->n; k++) {
+                    if (v[k].x < mnx) mnx = v[k].x; if (v[k].y < mny) mny = v[k].y; if (v[k].y > mxy) mxy = v[k].y;
+                    if (v[k].z != v[0].z) flat = 0;
+                }
+                if (mnx >= panel_x - 1.f && flat && p->list == 0 && mxy - mny > f.height * 0.6f) { spans[i].first = nverts; spans[i].count = 0; continue; }   /* the backdrop */
+                if (mnx >= panel_x + 2.f) push_dx = panel_dx;      /* map, timer (the views' coin icons start just left of it) */
+            }
+        }
         spans[i].first = nverts;
         if (p->sprite) { tri(p, &v[0], &v[1], &v[2], 0, cull_small); tri(p, &v[0], &v[2], &v[3], 0, cull_small); }
         else for (int k = 0; k + 2 < p->n; k++) tri(p, &v[k], &v[k + 1], &v[k + 2], k & 1, cull_small);
