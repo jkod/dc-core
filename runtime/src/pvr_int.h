@@ -26,6 +26,7 @@ typedef struct {
     int hscale;                         /* scene coordinates are 2x wide (SCALER_CTL) */
     float bg[4], bgz;                   /* background plane colour and depth */
 } pvr_frame;
+void pvr_region_extent(int *w, int *h);   /* pixels the region array lists tiles for (0 if none) */
 
 /* the context STARTRENDER draws (matched by PARAM_BASE), plus render size and background */
 void pvr_get_frame(pvr_frame *f);

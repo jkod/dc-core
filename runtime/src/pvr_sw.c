@@ -646,7 +646,7 @@ float pvr_fog_alpha(float invw) { return fog_table(invw); }
 /* the area the region array (REGION_BASE) lists tiles for, in pixels: what the PVR actually renders.
  * Entries are 5 words, or 6 with FPU_PARAM_CFG bit 21; the control word holds the tile's x (bits 2-7),
  * y (8-13) and "last region" (31). 0 when there is no usable array. */
-static void region_extent(int *w, int *h) {
+void pvr_region_extent(int *w, int *h) {
     uint32_t a = REG(0x02C) & 0x7FFFFC, words = (REG(0x07C) >> 21) & 1 ? 6 : 5;
     int mx = -1, my = -1;
     for (int i = 0; i < 4096; i++, a += words * 4) {
@@ -712,7 +712,7 @@ int dc_pvr_sw_render(void) {
     int WO = W, HO = H;                                    /* no wider than a line (a 1024 clip into a 640-pixel texture) */
     if (stride && WO * bpp > (int)stride) WO = (int)stride / bpp;
     if (tex) {                                             /* a texture: only the tiles the region array lists, so the */
-        int rw, rh; region_extent(&rw, &rh);               /* lines past them (other textures) stay as they are */
+        int rw, rh; pvr_region_extent(&rw, &rh);               /* lines past them (other textures) stay as they are */
         if (rw > 0 && rw < WO) WO = rw;
         if (rh > 0 && rh < HO) HO = rh;
     }

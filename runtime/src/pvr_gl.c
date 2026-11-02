@@ -404,8 +404,9 @@ static float push_rw;
  * full width; a full-screen quad that later shows that texture draws the wide capture instead, its
  * texture coordinates taken from where each corner lands on the screen */
 #define NCAP 4
-static struct { GLuint fbo, tex, depth; int w, h; uint32_t addr; float ww, rw, rh; unsigned long frame; } cap[NCAP];
+static struct { GLuint fbo, tex, depth; int w, h; uint32_t addr; float ww, rw, rh; unsigned long frame; } cap[NCAP + 1];   /* [NCAP]: the previous contents of the one being drawn */
 static int capturing;                   /* drawing a render-to-texture pass */
+static int cap_cur = -1;                /* while capturing: the slot being drawn */
 static int cap_uv = -1;                 /* >= 0: the polygon being pushed shows capture cap_uv */
 static unsigned char *poly_cap;         /* per polygon: capture + 1, or 0 */
 static void push(const pvr_vtx *v) {
@@ -818,7 +819,11 @@ void dc_pvr_gl_render(int scale) {
         uint32_t stride = (dc_pvr_reg(0x04C) & 0x1FF) * 8, mode = dc_pvr_reg(0x048) & 7;
         int bpp = mode <= 3 ? 2 : mode == 4 ? 3 : 4;
         if (stride && f.width * bpp > (int)stride) f.width = (int)stride / bpp;
+        int rw, rh; pvr_region_extent(&rw, &rh);                 /* only the tiles the region array lists */
+        if (rw > 0 && rw < f.width) f.width = rw;
+        if (rh > 0 && rh < f.height) f.height = rh;
         if (f.clip_x1 >= f.width) f.clip_x1 = f.width - 1;
+        if (f.clip_y1 >= f.height) f.clip_y1 = f.height - 1;
     }
     int RW = f.width * (f.hscale ? 2 : 1), RH = f.height;
     last_rw = (float)RW; last_rh = (float)RH;
@@ -852,10 +857,11 @@ void dc_pvr_gl_render(int scale) {
     for (int i = 0; i < f.npolys; i++) {
         const pvr_poly *p = &f.polys[i]; const pvr_vtx *v = f.verts + p->first;
         poly_cap[i] = 0;
-        if (capturing || !dc_pvr_gl_widescreen || !((p->isp >> 25) & 1) || p->n < 3) continue;
+        if (!dc_pvr_gl_widescreen || !((p->isp >> 25) & 1) || p->n < 3) continue;
         uint32_t addr = (p->tcw & 0x1FFFFF) << 3; int c = 0;
         while (c < NCAP && !(cap[c].tex && cap[c].addr == addr)) c++;
             if (c == NCAP) continue;
+        if (capturing && c == cap_cur) { if (!cap[NCAP].tex) continue; c = NCAP; }   /* feedback: the last frame (replay trails) */
         float x0 = v[0].x, x1 = v[0].x, y0 = v[0].y, y1 = v[0].y; int flat = 1;
         for (int k = 1; k < p->n; k++) {
             if (v[k].x < x0) x0 = v[k].x; if (v[k].x > x1) x1 = v[k].x;
@@ -1189,7 +1195,9 @@ void dc_pvr_gl_render(int scale) {
             n3d++;
             for (int k = 0; k < f.polys[i].n && !wide3d; k++) if (v[k].x < -2.f || v[k].x > RW + 2.f) wide3d = 1;
         }
-        if (!(n3d >= 50 && wide3d) || backdrop_card(&f, RW)) {
+        int shows_cap = 0;                                  /* a full-width capture on screen (a held replay frame) */
+        for (int i = 0; i < f.npolys && !shows_cap; i++) shows_cap = poly_cap[i] != 0;
+        if (!shows_cap && (!(n3d >= 50 && wide3d) || backdrop_card(&f, RW))) {
             float off = (WW - (float)RW) * 0.5f, k = (float)fb_w / WW;
             int l = (int)floorf(off * k), r = (int)ceilf((off + (float)RW) * k);
             p_glBindFramebuffer(GL_FRAMEBUFFER, fbo);
@@ -1259,10 +1267,24 @@ void dc_pvr_gl_capture(int scale) {
     /* swap the screen's target for the capture's, draw, swap back (with what the present uses) */
     GLuint sf = fbo, st = color_tex, sd = depth_rb; int sw = fb_w, sh = fb_h;
     float sa = disp_aspect, so = pic_offy, sww = last_ww, srw = last_rw, srh = last_rh; int sy0 = pic_y0, sy1 = pic_y1;
+    if (cap[c].tex) {                   /* keep what is there now: the pass may draw it again (a trail) */
+        if (cap[NCAP].w != cap[c].w || cap[NCAP].h != cap[c].h || !cap[NCAP].tex) {
+            if (cap[NCAP].tex) { p_glDeleteFramebuffers(1, &cap[NCAP].fbo); p_glDeleteTextures(1, &cap[NCAP].tex); }
+            p_glGenTextures(1, &cap[NCAP].tex); p_glBindTexture(GL_TEXTURE_2D, cap[NCAP].tex);
+            p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, cap[c].w, cap[c].h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+            p_glGenFramebuffers(1, &cap[NCAP].fbo); p_glBindFramebuffer(GL_FRAMEBUFFER, cap[NCAP].fbo);
+            p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, cap[NCAP].tex, 0);
+            cap[NCAP].w = cap[c].w; cap[NCAP].h = cap[c].h;
+        }
+        p_glBindFramebuffer(GL_READ_FRAMEBUFFER, cap[c].fbo); p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, cap[NCAP].fbo);
+        p_glDisable(GL_SCISSOR_TEST);
+        p_glBlitFramebuffer(0, 0, cap[c].w, cap[c].h, 0, 0, cap[c].w, cap[c].h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        cap[NCAP].addr = addr; cap[NCAP].ww = cap[c].ww; cap[NCAP].rw = cap[c].rw; cap[NCAP].rh = cap[c].rh;
+    } else if (cap[NCAP].tex) cap[NCAP].addr = 0xFFFFFFFFu;
     fbo = cap[c].fbo; color_tex = cap[c].tex; depth_rb = cap[c].depth; fb_w = cap[c].w; fb_h = cap[c].h;
-    capturing = 1;
+    capturing = 1; cap_cur = c;
     dc_pvr_gl_render(scale);
-    capturing = 0;
+    capturing = 0; cap_cur = -1;
     {   /* the texture's alpha: RGB565 / 555 / 888 targets have none (opaque); ARGB4444 / 1555 / 8888 keep the drawn one */
         uint32_t mode = dc_pvr_reg(0x048) & 7;
         if (mode == 1 || mode == 4 || mode == 5) {
