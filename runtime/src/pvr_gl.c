@@ -824,11 +824,12 @@ void dc_pvr_gl_render(int scale) {
      * line or two different from one band to the next). */
     int band;
     {
-        static uint32_t prev_tgt = 0xFFFFFFFFu, prev_disp; static int prev_y0, prev_y1, prev_w, prev_h;
+        static uint32_t prev_tgt = 0xFFFFFFFFu, prev_disp; static int prev_x0, prev_x1, prev_y0, prev_y1, prev_w, prev_h;
         uint32_t tgt = dc_pvr_reg(0x060) & 0x7FFFFFu, disp = dc_pvr_reg(0x050) & 0x7FFFFFu;
-        band = !capturing && tgt == prev_tgt && disp == prev_disp && (f.clip_y0 > prev_y1 || f.clip_y1 < prev_y0);
+        /* bands of lines, or quarters (Re-Volt's 4-player race: four 320x240 renders): rectangles apart */
+        band = !capturing && tgt == prev_tgt && disp == prev_disp && (f.clip_y0 > prev_y1 || f.clip_y1 < prev_y0 || f.clip_x0 > prev_x1 || f.clip_x1 < prev_x0);
         if (band) { f.width = prev_w; f.height = prev_h; }
-        if (!capturing) { prev_tgt = tgt; prev_disp = disp; prev_y0 = f.clip_y0; prev_y1 = f.clip_y1; prev_w = f.width; prev_h = f.height; }
+        if (!capturing) { prev_tgt = tgt; prev_disp = disp; prev_x0 = f.clip_x0; prev_x1 = f.clip_x1; prev_y0 = f.clip_y0; prev_y1 = f.clip_y1; prev_w = f.width; prev_h = f.height; }
     }
     if (capturing) {                    /* a texture target: no wider than its lines (a 1024 clip into 640) */
         uint32_t stride = (dc_pvr_reg(0x04C) & 0x1FF) * 8, mode = dc_pvr_reg(0x048) & 7;
@@ -1127,6 +1128,11 @@ void dc_pvr_gl_render(int scale) {
     }
     { int sx0 = dc_pvr_gl_widescreen ? 0 : (int)((f.clip_x0 * (float)fb_w) / f.width), sx1 = dc_pvr_gl_widescreen ? fb_w : (int)(((f.clip_x1 + 1) * (float)fb_w) / f.width);
       if (lbox) { float o = (WW - (float)RW) * 0.5f, k = (float)fb_w / WW; sx0 = (int)ceilf(o * k); sx1 = (int)floorf((o + (float)RW) * k); }
+      else if (dc_pvr_gl_widescreen && band) {             /* a quarter: its side of the screen, out to that edge */
+        float o = (WW - (float)RW) * 0.5f, k = (float)fb_w / WW, kx = (float)RW / (float)f.width;
+        if (f.clip_x0 > 0) sx0 = (int)floorf((o + (float)f.clip_x0 * kx) * k + 0.5f);
+        if (f.clip_x1 + 1 < f.width) sx1 = (int)floorf((o + (float)(f.clip_x1 + 1) * kx) * k + 0.5f);
+      }
       int sy0 = f.clip_y0 * scale, sy1 = (f.clip_y1 + 1) * scale;
       p_glEnable(GL_SCISSOR_TEST);
       sc_x = sx0; sc_y = fb_h - sy1; sc_w = sx1 - sx0; sc_h = sy1 - sy0; sc_set[2] = -1;
