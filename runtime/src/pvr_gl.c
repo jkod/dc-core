@@ -817,6 +817,19 @@ void dc_pvr_gl_render(int scale) {
     frame_no++;
     pvr_frame f;
     pvr_get_frame(&f);
+    /* Several renders into the same framebuffer, each clipped to its own band of lines (FB_Y_CLIP), make
+     * up one picture (Looney Tunes Space Race's split screen: top view, bottom view, top strip): a
+     * render whose band does not overlap the previous one's, same target, same displayed buffer, keeps
+     * what is already drawn outside its band, and the picture's size (the display size can come out a
+     * line or two different from one band to the next). */
+    int band;
+    {
+        static uint32_t prev_tgt = 0xFFFFFFFFu, prev_disp; static int prev_y0, prev_y1, prev_w, prev_h;
+        uint32_t tgt = dc_pvr_reg(0x060) & 0x7FFFFFu, disp = dc_pvr_reg(0x050) & 0x7FFFFFu;
+        band = !capturing && tgt == prev_tgt && disp == prev_disp && (f.clip_y0 > prev_y1 || f.clip_y1 < prev_y0);
+        if (band) { f.width = prev_w; f.height = prev_h; }
+        if (!capturing) { prev_tgt = tgt; prev_disp = disp; prev_y0 = f.clip_y0; prev_y1 = f.clip_y1; prev_w = f.width; prev_h = f.height; }
+    }
     if (capturing) {                    /* a texture target: no wider than its lines (a 1024 clip into 640) */
         uint32_t stride = (dc_pvr_reg(0x04C) & 0x1FF) * 8, mode = dc_pvr_reg(0x048) & 7;
         int bpp = mode <= 3 ? 2 : mode == 4 ? 3 : 4;
@@ -984,7 +997,7 @@ void dc_pvr_gl_render(int scale) {
         hud_group_zmax = 1e30f; hud_group_imin = 0;
     }
     int lbox = dc_pvr_gl_widescreen && dc_pvr_gl_show_4_3;
-    if (dc_pvr_gl_widescreen && dc_pvr_gl_letterbox_4_3)
+    if (dc_pvr_gl_widescreen && dc_pvr_gl_letterbox_4_3 && (f.clip_y1 - f.clip_y0 + 1) * 4 >= f.height * 3)   /* not in a band */
         for (int i = 0; i < f.npolys && !lbox; i++) lbox = letterbox_bar(&f.polys[i], f.verts + f.polys[i].first, RW, f.height);
     float cx0 = 1e30f, cx1 = -1e30f;                        /* x extent of the textured picture (side bars) */
     split_wide = 0;
@@ -1101,10 +1114,15 @@ void dc_pvr_gl_render(int scale) {
 
     p_glDisable(GL_CULL_FACE);
     p_glColorMask(1, 1, 1, 1); p_glDepthMask(1); p_glStencilMask(0xFF);
-    /* outside the clip rectangle: black; inside: background plane, and all drawing scissored to it */
-    p_glDisable(GL_SCISSOR_TEST);
-    p_glClearColor(0, 0, 0, 1);
-    p_glClear(GL_COLOR_BUFFER_BIT);
+    /* outside the clip rectangle: black (not for a band, see above); inside: background plane, and all
+     * drawing scissored to it */
+    {
+        if (!band) {
+            p_glDisable(GL_SCISSOR_TEST);
+            p_glClearColor(0, 0, 0, 1);
+            p_glClear(GL_COLOR_BUFFER_BIT);
+        }
+    }
     { int sx0 = dc_pvr_gl_widescreen ? 0 : (int)((f.clip_x0 * (float)fb_w) / f.width), sx1 = dc_pvr_gl_widescreen ? fb_w : (int)(((f.clip_x1 + 1) * (float)fb_w) / f.width);
       if (lbox) { float o = (WW - (float)RW) * 0.5f, k = (float)fb_w / WW; sx0 = (int)ceilf(o * k); sx1 = (int)floorf((o + (float)RW) * k); }
       int sy0 = f.clip_y0 * scale, sy1 = (f.clip_y1 + 1) * scale;
@@ -1214,8 +1232,9 @@ void dc_pvr_gl_render(int scale) {
             int l = (int)floorf(off * k), r = (int)ceilf((off + (float)RW) * k);
             p_glBindFramebuffer(GL_FRAMEBUFFER, fbo);
             p_glEnable(GL_SCISSOR_TEST); p_glClearColor(0, 0, 0, 1);
-            if (l > 0) { p_glScissor(0, 0, l, fb_h); p_glClear(GL_COLOR_BUFFER_BIT); }
-            if (r < fb_w) { p_glScissor(r, 0, fb_w - r, fb_h); p_glClear(GL_COLOR_BUFFER_BIT); }
+            /* only this render's lines: a band render (see above) leaves the others alone */
+            if (l > 0) { p_glScissor(0, sc_y, l, sc_h); p_glClear(GL_COLOR_BUFFER_BIT); }
+            if (r < fb_w) { p_glScissor(r, sc_y, fb_w - r, sc_h); p_glClear(GL_COLOR_BUFFER_BIT); }
             p_glDisable(GL_SCISSOR_TEST);
         }
     }
