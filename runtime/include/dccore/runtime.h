@@ -1,6 +1,7 @@
 #ifndef DCCORE_RUNTIME_H
 #define DCCORE_RUNTIME_H
 #include "dccore/sh4.h"
+#include <stddef.h>
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -18,6 +19,12 @@ typedef struct dc_hw_ops {
 void  dc_init(sh4ctx *c);                         /* allocates 16 MB RAM, sets boot-like state */
 int   dc_load_binary(const char *path, uint32_t addr);
 int   dc_load_memory(const uint8_t *data, uint32_t len, uint32_t addr);   /* call after dc_init */
+/* Programs made of several executables loaded at the same address one after another (a launcher, an
+ * intro, the game): recompile the others with sh4recomp.py --prefix NAME (CMake: PREFIX NAME), then
+ * switch with dc_use_code(NAME_dc_fn_table, NAME_dc_fn_count) after loading one. Declare them as
+ *   extern const char NAME_dc_fn_table[]; extern const size_t NAME_dc_fn_count;
+ * dc_use_code(dc_fn_table, dc_fn_count) goes back to the unprefixed one. */
+void  dc_use_code(const void *table, size_t count);
 sh4fn dc_lookup(uint32_t addr);
 void  dc_hle_register(uint32_t addr, sh4fn fn);   /* replace a guest function with native code */
 /* RAM range [dst, dst+len) holds a copy of executable code at src (found automatically for code

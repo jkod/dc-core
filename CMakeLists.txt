@@ -76,12 +76,12 @@ if(DCCORE_DEMO AND TARGET dccore_front)
 endif()
 
 # dccore_add_recomp(<target> BIN <1ST_READ.BIN> FUNCS <funcs.txt> [BASE 0x8C010000] [SETJMP addr...]
-#                   [MAX_FUNC_BYTES n] [NO_DISCOVER])
+#                   [MAX_FUNC_BYTES n] [NO_DISCOVER] [PREFIX name])
 #
 # Recompiles the player's own executable at configure time and builds it as a static
 # library. The generated C is derived from the game and stays in the build directory.
 function(dccore_add_recomp target)
-  cmake_parse_arguments(A "NO_DISCOVER" "BIN;FUNCS;BASE;MAX_FUNC_BYTES" "SETJMP" ${ARGN})
+  cmake_parse_arguments(A "NO_DISCOVER" "BIN;FUNCS;BASE;MAX_FUNC_BYTES;PREFIX" "SETJMP" ${ARGN})
   if(NOT A_BASE)
     set(A_BASE 0x8C010000)
   endif()
@@ -102,6 +102,10 @@ function(dccore_add_recomp target)
   # targets found by scanning, which would bring back starts inside data areas
   if(A_NO_DISCOVER)
     list(APPEND sj --no-discover)
+  endif()
+  # PREFIX: a second executable of the same program (symbols PREFIX_dc_fn_table, ...; dc_use_code)
+  if(A_PREFIX)
+    list(APPEND sj --prefix ${A_PREFIX})
   endif()
   execute_process(
     COMMAND ${DCCORE_PYTHON} ${DCCORE_DIR}/tools/recomp/sh4recomp.py ${A_BIN}

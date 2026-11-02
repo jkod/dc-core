@@ -22,6 +22,10 @@ static void run(sh4ctx *c, uint64_t cycles) { c->cycles += cycles; dc_events(c);
 
 static void blk(uint32_t pcw) { uint32_t b[8] = {pcw}; dc_ta_write32(b); }
 
+/* a second executable's table (dc_use_code): one function at 8C010000 that sets r0 = 77 */
+static uint32_t second_fn(sh4ctx *c) { c->r[0] = 77; return 0; }
+static const dc_fn_entry second_table[1] = {{0x8C010000u, 0x8C010010u, second_fn}};
+
 int main(void) {
     sh4ctx c; dc_init(&c); dc_hw_verbose = 0;
     dc_ta_set_sink(sink);
@@ -283,6 +287,11 @@ int main(void) {
         uint32_t t = dc_rd32(0xFFD80024u);
         CHECK(t < 0xFFFFFFFFu && t > 0xFFF00000u);
     }
+    /* switching executables: 8C010000 resolves through the table in use */
+    dc_use_code(second_table, 1);
+    c.r[0] = 0; c.pr = 0; dc_call(&c, 0x8C010000u);
+    if (c.r[0] != 77) { printf("FAIL: dc_use_code: r0=%u\n", c.r[0]); fails++; }
+    dc_use_code(dc_fn_table, dc_fn_count);
     printf(fails ? "%d runtime test(s) FAILED\n" : "runtime tests passed\n", fails);
     return fails != 0;
 }

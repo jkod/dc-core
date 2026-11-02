@@ -48,6 +48,7 @@ class Translator:
         self.data = data; self.base = base; self.end = base + len(data)
         self.volatile = self._volatile_literals()
         self.setjmp = set()          # the game's setjmp routine(s): calls get DC_CALL_SETJMP
+        self.prefix = ""             # symbol prefix (a second executable: PREFIX_dc_fn_table, f_PREFIX_...)
 
     def _volatile_literals(self):
         """Literal-pool words that code can write: some routines keep variables in their own pool
@@ -356,7 +357,7 @@ class Translator:
     # ------------------------------------------------------------------ emit
     def emit_function(self, start, end, known, out):
         """known: sorted list of function starts (for direct calls)."""
-        name = "f_%08X" % start
+        name = "f_%s%08X" % (self.prefix, start)
         out.append("uint32_t %s(sh4ctx *c) {" % name)
         out.append("  if (c->entry != %s) { jt = c->entry; goto local_jump; }" % h(start))
         insns = {}
@@ -640,11 +641,14 @@ def main():
     ap.add_argument("--no-discover", action="store_true")
     ap.add_argument("--setjmp", action="append", default=[], type=lambda x: int(x, 0),
                     help="address of the game's setjmp (cooperative threads; see dccore/coro.h)")
+    ap.add_argument("--prefix", default="", help="symbol prefix for a second executable in the same program "
+                    "(table PREFIX_dc_fn_table / PREFIX_dc_fn_count; switch with dc_use_code)")
     args = ap.parse_args()
     data = open(args.bin, "rb").read()
     base = int(args.base, 0)
     tr = Translator(data, base)
     tr.setjmp = {(a & 0x1FFFFFFF) | 0x80000000 for a in args.setjmp}
+    tr.prefix = args.prefix + "_" if args.prefix else ""
     funcs = read_funcs(args.funcs, base, base + len(data)) if args.funcs else scan_functions(tr)
     if not args.funcs:
         print("scan: %d function starts" % len(funcs))
@@ -687,13 +691,14 @@ def main():
             if os.path.exists(o): os.remove(o)
     # dispatch table
     tab = ['#include "dccore/sh4.h"', "#include <stddef.h>", ""]
-    for s, _ in ranges: tab.append("uint32_t f_%08X(sh4ctx *c);" % s)
+    pf = tr.prefix
+    for s, _ in ranges: tab.append("uint32_t f_%s%08X(sh4ctx *c);" % (pf, s))
     tab.append("")
     tab.append("typedef struct { uint32_t addr, end; sh4fn fn; } dc_fn_entry;")
-    tab.append("const dc_fn_entry dc_fn_table[] = {")
-    for s_, e_ in ranges: tab.append("  { %s, %s, f_%08X }," % (h(s_), h(e_), s_))
+    tab.append("const dc_fn_entry %sdc_fn_table[] = {" % pf)
+    for s_, e_ in ranges: tab.append("  { %s, %s, f_%s%08X }," % (h(s_), h(e_), pf, s_))
     tab.append("};")
-    tab.append("const size_t dc_fn_count = %d;" % len(ranges))
+    tab.append("const size_t %sdc_fn_count = %d;" % (pf, len(ranges)))
     tp = os.path.join(args.out, "recomp_table.c"); text = "\n".join(tab) + "\n"
     if not (os.path.exists(tp) and open(tp).read() == text):
         open(tp, "w").write(text)

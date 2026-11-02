@@ -84,15 +84,22 @@ sh4fn dc_lookup(uint32_t addr) {
     return f;
 }
 
+/* the recompiled executable in use: the program's own table, or one chosen with dc_use_code */
+static const dc_fn_entry *fn_tab; static size_t fn_cnt; static int fn_set;
+void dc_use_code(const void *table, size_t count) {
+    fn_tab = (const dc_fn_entry *)table; fn_cnt = count; fn_set = 1;
+    lcache_clear(); alias_n = 0;                  /* nothing of the previous executable stays reachable */
+}
 static sh4fn lookup_table(uint32_t addr) {
-    size_t lo = 0, hi = dc_fn_count;
+    if (!fn_set) { fn_tab = dc_fn_table; fn_cnt = dc_fn_count; fn_set = 1; }
+    size_t lo = 0, hi = fn_cnt;
     while (lo < hi) {
         size_t mid = (lo + hi) / 2;
-        if (dc_fn_table[mid].addr < addr) lo = mid + 1; else hi = mid;
+        if (fn_tab[mid].addr < addr) lo = mid + 1; else hi = mid;
     }
-    if (lo < dc_fn_count && dc_fn_table[lo].addr == addr) return dc_fn_table[lo].fn;
+    if (lo < fn_cnt && fn_tab[lo].addr == addr) return fn_tab[lo].fn;
     /* inside a function: it is entered there through its entry switch */
-    if (lo > 0 && addr < dc_fn_table[lo - 1].end && !(addr & 1)) return dc_fn_table[lo - 1].fn;
+    if (lo > 0 && addr < fn_tab[lo - 1].end && !(addr & 1)) return fn_tab[lo - 1].fn;
     return NULL;
 }
 
