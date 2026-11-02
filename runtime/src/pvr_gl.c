@@ -804,22 +804,57 @@ void dc_pvr_gl_render(int scale) {
         }
     float view_dx = (float)(RW - dc_pvr_gl_split_panel_x * RW / f.width) * 0.5f, panel_dx = (WW - (float)RW) * 0.5f;
     float panel_x = (float)(dc_pvr_gl_split_panel_x * RW / f.width);
+    /* each view's HUD moves out like the single-player one: left third to the left edge, right third
+     * to the right edge (with the small flat icons next to it, Rush's coins); the panel's map and
+     * timer then sit just left of the right-hand HUD */
+    float side_dx = view_dx + panel_dx;                      /* from the view's edge to the screen's */
+    if (split_wide && dc_pvr_gl_hud_z > 0 && dc_pvr_gl_hud_move) {
+        if (f.npolys > cap_side) { cap_side = f.npolys + 1024; hud_side = realloc(hud_side, (size_t)cap_side); }
+        memset(hud_side, 0, (size_t)f.npolys);
+        hud_group(&f, (int)panel_x, hud_side);
+        /* boxes of the right-moving HUD pieces, and the small flat polygons next to them */
+        float r0 = 1e30f, p1 = -1e30f;
+        for (int pass = 0; pass < 2; pass++)
+            for (int i = 0; i < f.npolys; i++) {
+                const pvr_poly *p = &f.polys[i]; const pvr_vtx *v = f.verts + p->first;
+                float x0 = 1e30f, x1 = -1e30f, y0 = 1e30f, y1 = -1e30f; int flat = 1;
+                for (int k = 0; k < p->n; k++) {
+                    if (v[k].x < x0) x0 = v[k].x; if (v[k].x > x1) x1 = v[k].x;
+                    if (v[k].y < y0) y0 = v[k].y; if (v[k].y > y1) y1 = v[k].y;
+                    if (v[k].z != v[0].z) flat = 0;
+                }
+                if (x0 >= panel_x + 2.f) { if (pass && !split_view(p) && flat && x1 <= (float)RW + 2.f && x1 > p1) p1 = x1; continue; }   /* the panel's contents */
+                if (pass == 0) { if (hud_side[i] > 0 && x0 < r0) r0 = x0; continue; }
+                if (!hud_side[i] && flat && x1 - x0 < 40.f && y1 - y0 < 40.f && x0 > panel_x * 0.75f) {
+                    for (int j = 0; j < f.npolys; j++) {        /* within 24 px of a right-moving piece */
+                        if (hud_side[j] != 1) continue;
+                        const pvr_vtx *w = f.verts + f.polys[j].first;
+                        float a0 = w[0].x, a1 = w[0].x, b0 = w[0].y, b1 = w[0].y;
+                        for (int k = 1; k < f.polys[j].n; k++) { if (w[k].x < a0) a0 = w[k].x; if (w[k].x > a1) a1 = w[k].x; if (w[k].y < b0) b0 = w[k].y; if (w[k].y > b1) b1 = w[k].y; }
+                        if (x0 < a1 + 24.f && a0 < x1 + 24.f && y0 < b1 + 4.f && b0 < y1 + 4.f) { hud_side[i] = 2; break; }   /* 2: icon, moves, not counted */
+                    }
+                }
+            }
+        if (r0 < 1e29f && p1 > -1e29f) panel_dx = r0 + view_dx + side_dx - 8.f - p1;   /* map right edge 8 px left of the HUD */
+    }
     for (int i = 0; i < f.npolys; i++) {
         const pvr_poly *p = &f.polys[i];
         const pvr_vtx *v = f.verts + p->first;
         push_dx = 0;
         if (hud_dx > 0 && hud_side) push_dx = hud_side[i] * hud_dx;
         if (split_wide) {
-            if (split_view(p)) push_dx = view_dx;
-            else {
-                float mnx = 1e30f, mny = 1e30f, mxy = -1e30f; int flat = 1;
-                for (int k = 0; k < p->n; k++) {
-                    if (v[k].x < mnx) mnx = v[k].x; if (v[k].y < mny) mny = v[k].y; if (v[k].y > mxy) mxy = v[k].y;
-                    if (v[k].z != v[0].z) flat = 0;
-                }
-                if (mnx >= panel_x - 1.f && flat && p->list == 0 && mxy - mny > f.height * 0.6f) { spans[i].first = nverts; spans[i].count = 0; continue; }   /* the backdrop */
-                if (mnx >= panel_x + 2.f) push_dx = panel_dx;      /* map, timer (the views' coin icons start just left of it) */
+            float mnx = 1e30f, mxx = -1e30f, mny = 1e30f, mxy = -1e30f; int flat = 1;
+            for (int k = 0; k < p->n; k++) {
+                if (v[k].x < mnx) mnx = v[k].x; if (v[k].x > mxx) mxx = v[k].x; if (v[k].y < mny) mny = v[k].y; if (v[k].y > mxy) mxy = v[k].y;
+                if (v[k].z != v[0].z) flat = 0;
             }
+            int moving = hud_side && dc_pvr_gl_hud_move && dc_pvr_gl_hud_z > 0;
+            int out = moving ? (hud_side[i] < 0 ? -1 : hud_side[i] > 0 ? 1 : 0) : 0;
+            if (split_view(p)) push_dx = view_dx + out * side_dx;
+            else if (mnx >= panel_x - 1.f && flat && p->list == 0 && mxy - mny > f.height * 0.6f) { spans[i].first = nverts; spans[i].count = 0; continue; }   /* the panel backdrop */
+            else if (flat && !((p->isp >> 25) & 1) && mxy - mny <= 4.f && mxx - mnx > RW * 0.9f) { spans[i].first = nverts; spans[i].count = 0; continue; }   /* the divider line */
+            else if (mnx >= panel_x + 2.f) push_dx = panel_dx;      /* map, timer (the views' coin icons start just left of it) */
+            else if (flat && v[0].z >= dc_pvr_gl_hud_z && dc_pvr_gl_hud_z > 0) push_dx = view_dx + out * side_dx;   /* the views' HUD (drawn unclipped) */
         }
         spans[i].first = nverts;
         if (p->sprite) { tri(p, &v[0], &v[1], &v[2], 0, cull_small); tri(p, &v[0], &v[2], &v[3], 0, cull_small); }
