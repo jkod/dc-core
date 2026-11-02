@@ -131,6 +131,7 @@ static void read_pad(SDL_GameController *pad, uint16_t *b, int *jx, int *jy, int
     static const struct { SDL_GameControllerButton s; uint16_t d; } map[] = {
         { SDL_CONTROLLER_BUTTON_A, DC_BTN_A }, { SDL_CONTROLLER_BUTTON_B, DC_BTN_B }, { SDL_CONTROLLER_BUTTON_X, DC_BTN_X },
         { SDL_CONTROLLER_BUTTON_Y, DC_BTN_Y }, { SDL_CONTROLLER_BUTTON_START, DC_BTN_START },
+        { SDL_CONTROLLER_BUTTON_BACK, DC_BTN_START },      /* View / Select / - as Start too (the Dreamcast pad has one) */
         { SDL_CONTROLLER_BUTTON_DPAD_UP, DC_BTN_UP }, { SDL_CONTROLLER_BUTTON_DPAD_DOWN, DC_BTN_DOWN },
         { SDL_CONTROLLER_BUTTON_DPAD_LEFT, DC_BTN_LEFT }, { SDL_CONTROLLER_BUTTON_DPAD_RIGHT, DC_BTN_RIGHT } };
     for (unsigned i = 0; i < sizeof map / sizeof map[0]; i++) if (SDL_GameControllerGetButton(pad, map[i].s)) *b |= map[i].d;
@@ -250,6 +251,14 @@ static void events(void) {
         }
         if (e.type == SDL_JOYDEVICEREMOVED) raw_close((SDL_JoystickID)e.jdevice.which);
 #endif
+        if (e.type == SDL_CONTROLLERBUTTONDOWN) {          /* the first presses, for diagnosing pads */
+            static int logged;
+            if (logged++ < 40) {
+                int port = -1;
+                for (int k = 0; k < 4; k++) if (pads[k] && SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(pads[k])) == e.cbutton.which) port = k;
+                fprintf(stderr, "pad button %s (port %c)\n", SDL_GameControllerGetStringForButton((SDL_GameControllerButton)e.cbutton.button), port >= 0 ? 'A' + port : '?');
+            }
+        }
         if (e.type == SDL_CONTROLLERDEVICEADDED) pad_open(e.cdevice.which);                 /* device index */
         if (e.type == SDL_CONTROLLERDEVICEREMOVED) pad_close((SDL_JoystickID)e.cdevice.which); /* instance id */
     }
