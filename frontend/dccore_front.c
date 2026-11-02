@@ -17,7 +17,29 @@ extern sh4ctx *dc_current_ctx;         /* dispatch.c */
 static SDL_Window *win;
 static SDL_GLContext glc;
 static SDL_AudioDeviceID audio;
-static SDL_GameController *pad;
+static SDL_GameController *pads[4];     /* gamepad k drives Dreamcast port k (port A also has the keyboard) */
+static void pad_open(int device_index) {
+    if (!SDL_IsGameController(device_index)) return;
+    SDL_JoystickID id = SDL_JoystickGetDeviceInstanceID(device_index);
+    int slot = -1;
+    for (int k = 0; k < 4; k++) {
+        if (pads[k] && SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(pads[k])) == id) return;   /* already open */
+        if (!pads[k] && slot < 0) slot = k;
+    }
+    if (slot < 0) return;
+    pads[slot] = SDL_GameControllerOpen(device_index);
+    if (pads[slot]) {
+        fprintf(stderr, "controller %d: %s\n", slot + 1, SDL_GameControllerName(pads[slot]));
+        dc_pad[slot].connected = 1;
+    }
+}
+static void pad_close(SDL_JoystickID id) {
+    for (int k = 0; k < 4; k++)
+        if (pads[k] && SDL_JoystickInstanceID(SDL_GameControllerGetJoystick(pads[k])) == id) {
+            SDL_GameControllerClose(pads[k]); pads[k] = NULL;
+            fprintf(stderr, "controller %d disconnected\n", k + 1);
+        }
+}
 #ifdef __SWITCH__
 static SDL_Joystick *joy;
 #endif
@@ -48,7 +70,26 @@ static void on_render(void) {
 
 /* ------------------------------------------------------------------ input */
 static uint8_t axis8(Sint16 v) { int x = (v + 32768) >> 8; return (uint8_t)(x < 0 ? 0 : x > 255 ? 255 : x); }
+static void read_pad(SDL_GameController *pad, uint16_t *b, int *jx, int *jy, int *lt, int *rt) {
+    Sint16 ax = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX), ay = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY);
+    if (ax < -4000 || ax > 4000) *jx = axis8(ax);
+    if (ay < -4000 || ay > 4000) *jy = axis8(ay);
+    int tl = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_TRIGGERLEFT), tr = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_TRIGGERRIGHT);
+    if (tl / 128 > *lt) *lt = tl / 128 > 255 ? 255 : tl / 128;
+    if (tr / 128 > *rt) *rt = tr / 128 > 255 ? 255 : tr / 128;
+    static const struct { SDL_GameControllerButton s; uint16_t d; } map[] = {
+        { SDL_CONTROLLER_BUTTON_A, DC_BTN_A }, { SDL_CONTROLLER_BUTTON_B, DC_BTN_B }, { SDL_CONTROLLER_BUTTON_X, DC_BTN_X },
+        { SDL_CONTROLLER_BUTTON_Y, DC_BTN_Y }, { SDL_CONTROLLER_BUTTON_START, DC_BTN_START },
+        { SDL_CONTROLLER_BUTTON_DPAD_UP, DC_BTN_UP }, { SDL_CONTROLLER_BUTTON_DPAD_DOWN, DC_BTN_DOWN },
+        { SDL_CONTROLLER_BUTTON_DPAD_LEFT, DC_BTN_LEFT }, { SDL_CONTROLLER_BUTTON_DPAD_RIGHT, DC_BTN_RIGHT } };
+    for (unsigned i = 0; i < sizeof map / sizeof map[0]; i++) if (SDL_GameControllerGetButton(pad, map[i].s)) *b |= map[i].d;
+}
 static void read_input(void) {
+    for (int p = 1; p < 4; p++) {                          /* ports B-D: gamepads 2-4 */
+        uint16_t pb = 0; int px = 128, py = 128, pl = 0, pr = 0;
+        if (pads[p]) read_pad(pads[p], &pb, &px, &py, &pl, &pr);
+        dc_pad[p].buttons = pb; dc_pad[p].jx = (uint8_t)px; dc_pad[p].jy = (uint8_t)py; dc_pad[p].lt = (uint8_t)pl; dc_pad[p].rt = (uint8_t)pr;
+    }
     const Uint8 *k = SDL_GetKeyboardState(NULL);
     uint16_t b = 0; int jx = 128, jy = 128, lt = 0, rt = 0;
     if (k[SDL_SCANCODE_UP]) { b |= DC_BTN_UP; jy = 0; }
@@ -62,20 +103,7 @@ static void read_input(void) {
     if (k[SDL_SCANCODE_RETURN]) b |= DC_BTN_START;
     if (k[SDL_SCANCODE_A]) lt = 255;
     if (k[SDL_SCANCODE_S]) rt = 255;
-    if (pad) {
-        Sint16 ax = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX), ay = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY);
-        if (ax < -4000 || ax > 4000) jx = axis8(ax);
-        if (ay < -4000 || ay > 4000) jy = axis8(ay);
-        int tl = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_TRIGGERLEFT), tr = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_TRIGGERRIGHT);
-        if (tl / 128 > lt) lt = tl / 128 > 255 ? 255 : tl / 128;
-        if (tr / 128 > rt) rt = tr / 128 > 255 ? 255 : tr / 128;
-        static const struct { SDL_GameControllerButton s; uint16_t d; } map[] = {
-            { SDL_CONTROLLER_BUTTON_A, DC_BTN_A }, { SDL_CONTROLLER_BUTTON_B, DC_BTN_B }, { SDL_CONTROLLER_BUTTON_X, DC_BTN_X },
-            { SDL_CONTROLLER_BUTTON_Y, DC_BTN_Y }, { SDL_CONTROLLER_BUTTON_START, DC_BTN_START },
-            { SDL_CONTROLLER_BUTTON_DPAD_UP, DC_BTN_UP }, { SDL_CONTROLLER_BUTTON_DPAD_DOWN, DC_BTN_DOWN },
-            { SDL_CONTROLLER_BUTTON_DPAD_LEFT, DC_BTN_LEFT }, { SDL_CONTROLLER_BUTTON_DPAD_RIGHT, DC_BTN_RIGHT } };
-        for (unsigned i = 0; i < sizeof map / sizeof map[0]; i++) if (SDL_GameControllerGetButton(pad, map[i].s)) b |= map[i].d;
-    }
+    if (pads[0]) read_pad(pads[0], &b, &jx, &jy, &lt, &rt);
 #ifdef __SWITCH__
     /* Joy-Cons / Pro Controller as SDL joystick 0, buttons in libnx order. Mapped by position:
      * B (bottom) = A, A (right) = B, Y (left) = X, X (top) = Y; ZL/ZR = triggers; + = Start;
@@ -151,8 +179,8 @@ static void events(void) {
             }
             if (e.key.keysym.sym == SDLK_F12) screenshot();
         }
-        if (e.type == SDL_CONTROLLERDEVICEADDED && !pad) pad = SDL_GameControllerOpen(e.cdevice.which);
-        if (e.type == SDL_CONTROLLERDEVICEREMOVED && pad) { SDL_GameControllerClose(pad); pad = NULL; }
+        if (e.type == SDL_CONTROLLERDEVICEADDED) pad_open(e.cdevice.which);                 /* device index */
+        if (e.type == SDL_CONTROLLERDEVICEREMOVED) pad_close((SDL_JoystickID)e.cdevice.which); /* instance id */
     }
     read_input();
 }
@@ -279,7 +307,7 @@ int dc_front_open(const dc_front_config *c) {
 #ifdef __SWITCH__
     if (SDL_NumJoysticks() > 0) joy = SDL_JoystickOpen(0);
 #else
-    for (int i = 0; i < SDL_NumJoysticks() && !pad; i++) if (SDL_IsGameController(i)) pad = SDL_GameControllerOpen(i);
+    for (int i = 0; i < SDL_NumJoysticks(); i++) pad_open(i);
 #endif
     dc_hw.on_render = on_render;
     dc_hw.on_vblank = on_vblank;
@@ -289,7 +317,7 @@ int dc_front_open(const dc_front_config *c) {
 
 void dc_front_close(void) {
     wav_close();
-    if (pad) SDL_GameControllerClose(pad);
+    for (int k = 0; k < 4; k++) if (pads[k]) SDL_GameControllerClose(pads[k]);
 #ifdef __SWITCH__
     if (joy) SDL_JoystickClose(joy);
     joy = NULL;
@@ -297,7 +325,7 @@ void dc_front_close(void) {
     if (audio) SDL_CloseAudioDevice(audio);
     if (glc) SDL_GL_DeleteContext(glc);
     if (win) SDL_DestroyWindow(win);
-    pad = NULL; audio = 0; glc = NULL; win = NULL;
+    memset(pads, 0, sizeof pads); audio = 0; glc = NULL; win = NULL;
     SDL_Quit();
 }
 

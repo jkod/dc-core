@@ -63,8 +63,9 @@ int main(void) {
     dc_pvr_gl_hud_z = 999.f;
     pvr(0x128, 0); pvr(0x144, 0x80000000u);
     ta(hdr);
-    for (int i = 0; i < 60; i++) {                          /* 3D: tiny triangles at the bottom right, varying 1/w */
-        uint32_t a0[8] = { 7u << 29, fu(60), fu(60), fu(1.0f + i * 0.01f), 0, 0, 0xFFFFFFFFu, 0 }, a1[8] = { 7u << 29, fu(61), fu(60), fu(1.5f), 0, 0, 0xFFFFFFFFu, 0 };
+    for (int i = 0; i < 60; i++) {                          /* 3D: tiny triangles at the bottom right, varying 1/w; */
+        /* the first one reaches past the 4:3 picture (a race scene fills the width; menus do not) */
+        uint32_t a0[8] = { 7u << 29, fu(60), fu(60), fu(1.0f + i * 0.01f), 0, 0, 0xFFFFFFFFu, 0 }, a1[8] = { 7u << 29, fu(i ? 61 : 70), fu(60), fu(1.5f), 0, 0, 0xFFFFFFFFu, 0 };
         uint32_t a2[8] = { (7u << 29) | (1u << 28), fu(60), fu(61), fu(2.0f), 0, 0, 0xFFFFFFFFu, 0 };
         ta(a0); ta(a1); ta(a2);
     }

@@ -284,6 +284,7 @@ static GLuint compile(GLenum type, const char *src) {
 int dc_pvr_gl_mipmaps;                 /* enhancement: mipmaps for every texture */
 float dc_pvr_gl_anisotropy;            /* enhancement: anisotropic filtering (clamped to the driver's max) */
 static float max_aniso;
+static void bars_init(void);
 
 int dc_pvr_gl_init(void *(*getproc)(const char *)) {
     int missing = 0;
@@ -298,6 +299,7 @@ int dc_pvr_gl_init(void *(*getproc)(const char *)) {
     p_glLinkProgram(prog);
     GLint ok = 0; p_glGetProgramiv(prog, GL_LINK_STATUS, &ok);
     if (!ok) { char log[2048]; p_glGetProgramInfoLog(prog, sizeof log, NULL, log); fprintf(stderr, "pvr_gl: link: %s\n", log); return -1; }
+    bars_init();
 #define UL(f, n) U.f = p_glGetUniformLocation(prog, n)
     UL(scale, "u_scale"); UL(offx, "u_offx"); UL(set, "u_set"); UL(quad, "u_quad"); UL(quad_col, "u_quad_col"); UL(tex, "u_tex");
     UL(textured, "u_textured"); UL(shade, "u_shade"); UL(use_alpha, "u_use_alpha"); UL(ign_ta, "u_ign_ta"); UL(offset, "u_offset");
@@ -459,6 +461,74 @@ static void batch_add(const pvr_poly *p, int set, int mark, int blend, int first
 }
 
 
+
+/* ------------------------------------------------------------------ widescreen side bars
+ * Frames that draw nothing beyond the 4:3 picture (2D menus) get side bars in the picture's own
+ * edge colour: each edge strip is copied into a small texture, mipmapped on the GPU, and the bar
+ * shows its blurred, darkened average (vertical gradient kept). No readback. */
+int dc_pvr_gl_side_fill = 1;
+static GLuint bar_prog, edge_tex[2], edge_fbo[2];
+static GLint bar_x0, bar_x1, bar_tex;
+static const char *bar_vs =
+"#version 330 core\n"
+"layout(location=0) in vec3 a_pos;\n"
+"uniform float u_x0, u_x1; out float v_y;\n"
+"void main() { float t = (a_pos.x + 1.0) * 0.5; gl_Position = vec4(mix(u_x0, u_x1, t), a_pos.y, 0.0, 1.0); v_y = (a_pos.y + 1.0) * 0.5; }\n";
+static const char *bar_fs =
+"#version 330 core\n"
+"in float v_y; uniform sampler2D u_tex; out vec4 o_col;\n"
+"void main() { o_col = vec4(textureLod(u_tex, vec2(0.5, v_y), 3.0).rgb * 0.75, 1.0); }\n";
+#define EDGE_W 16
+#define EDGE_H 64
+static void bars_init(void) {
+    bar_prog = p_glCreateProgram();
+    p_glAttachShader(bar_prog, compile(GL_VERTEX_SHADER, bar_vs));
+    p_glAttachShader(bar_prog, compile(GL_FRAGMENT_SHADER, bar_fs));
+    p_glLinkProgram(bar_prog);
+    GLint ok = 0; p_glGetProgramiv(bar_prog, GL_LINK_STATUS, &ok);
+    if (!ok) { bar_prog = 0; return; }
+    bar_x0 = p_glGetUniformLocation(bar_prog, "u_x0"); bar_x1 = p_glGetUniformLocation(bar_prog, "u_x1");
+    bar_tex = p_glGetUniformLocation(bar_prog, "u_tex");
+    for (int i = 0; i < 2; i++) {
+        p_glGenTextures(1, &edge_tex[i]); p_glBindTexture(GL_TEXTURE_2D, edge_tex[i]);
+        p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, EDGE_W, EDGE_H, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR); p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        p_glGenerateMipmap(GL_TEXTURE_2D);
+        p_glGenFramebuffers(1, &edge_fbo[i]); p_glBindFramebuffer(GL_FRAMEBUFFER, edge_fbo[i]);
+        p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, edge_tex[i], 0);
+    }
+    p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+/* side = 0 left, 1 right; picture columns [px0, px1) of the FBO, rows [y0, y1) */
+static void draw_bars(int px0, int px1, int y0, int y1) {
+    if (!bar_prog || px0 <= 0 || y1 <= y0) return;
+    int strip = (px1 - px0) / 40 > 2 ? (px1 - px0) / 40 : 2;
+    for (int i = 0; i < 2; i++) {
+        int sx = i ? px1 - strip : px0;
+        p_glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo); p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, edge_fbo[i]);
+        p_glBlitFramebuffer(sx, y0, sx + strip, y1, 0, 0, EDGE_W, EDGE_H, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+        p_glBindTexture(GL_TEXTURE_2D, edge_tex[i]); p_glGenerateMipmap(GL_TEXTURE_2D);
+    }
+    p_glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    p_glViewport(0, 0, fb_w, fb_h);
+    p_glEnable(GL_SCISSOR_TEST); p_glScissor(0, y0, fb_w, y1 - y0);
+    p_glDisable(GL_DEPTH_TEST); p_glDisable(GL_BLEND); p_glDisable(GL_STENCIL_TEST);
+    p_glUseProgram(bar_prog);
+    p_glUniform1i(bar_tex, 0); p_glActiveTexture(GL_TEXTURE0);
+    p_glBindVertexArray(vao);
+    for (int i = 0; i < 2; i++) {
+        float a = i ? (float)px1 : 0.f, b = i ? (float)fb_w : (float)px0;
+        p_glUniform1f(bar_x0, a / fb_w * 2.f - 1.f); p_glUniform1f(bar_x1, b / fb_w * 2.f - 1.f);
+        p_glBindTexture(GL_TEXTURE_2D, edge_tex[i]);
+        p_glDrawArrays(GL_TRIANGLES, quad_first, 6);
+    }
+    p_glUseProgram(prog);
+    p_glDisable(GL_SCISSOR_TEST);
+}
+/* vertical centring: the share of the picture height to move it down by (the drawn lines are
+ * centred in the display; Rush shows 470 lines and draws 4..443) */
+static float pic_offy;
 /* debug (DC_GL_DEBUG): draw a known 4x4 texture through the real shader and read the result back,
  * at several 1/w depths and filter settings, and log what the driver produced */
 static void gl_selftest(void) {
@@ -550,10 +620,14 @@ static void hud_group(const pvr_frame *f, int RW, signed char *side) {
         if (n == cap) { cap = cap ? cap * 2 : 1024; b = realloc(b, (size_t)cap * sizeof *b); }
         b[n].x0 = x0; b[n].y0 = y0; b[n].x1 = x1; b[n].y1 = y1; b[n].poly = i; b[n].parent = n; n++;
     }
-    const float gap = 6.f;                                   /* letter spacing in the console's pixels */
+    /* in the console's pixels: anything within 6 joins; in the same row (vertical overlap) within
+     * 32, so a menu line's labels and values move or stay together (Rush's "PLAYERS 1 2 3 4") */
+    const float gap = 6.f, row_gap = 32.f;
     for (int i = 0; i < n; i++)
         for (int j = i + 1; j < n; j++) {
-            if (b[i].x0 > b[j].x1 + gap || b[j].x0 > b[i].x1 + gap) continue;
+            int same_row = b[i].y0 < b[j].y1 && b[j].y0 < b[i].y1;
+            float gx = same_row ? row_gap : gap;
+            if (b[i].x0 > b[j].x1 + gx || b[j].x0 > b[i].x1 + gx) continue;
             if (b[i].y0 > b[j].y1 + gap || b[j].y0 > b[i].y1 + gap) continue;
             int a = hud_find(b, i), c = hud_find(b, j);
             if (a != c) b[c].parent = a;
@@ -594,12 +668,18 @@ void dc_pvr_gl_render(int scale) {
      * also draw a 3D scene, so full-screen 2D menus keep their layout */
     float hud_dx = 0;
     if (dc_pvr_gl_widescreen && dc_pvr_gl_hud_z > 0) {
-        int n3d = 0;
-        for (int i = 0; i < f.npolys && n3d < 50; i++) {
+        /* a race-like frame: a 3D scene (50+ polygons with varying depth) that reaches past the
+         * 4:3 picture into the sides; menus with 3D objects (track previews, emblems) keep their
+         * 2D layout */
+        int n3d = 0, wide3d = 0;
+        for (int i = 0; i < f.npolys && !(n3d >= 50 && wide3d); i++) {
             const pvr_vtx *v = f.verts + f.polys[i].first;
-            if (f.polys[i].n >= 3 && v[0].z < dc_pvr_gl_hud_z && (v[0].z != v[1].z || v[0].z != v[2].z)) n3d++;
+            if (f.polys[i].n >= 3 && v[0].z < dc_pvr_gl_hud_z && (v[0].z != v[1].z || v[0].z != v[2].z)) {
+                n3d++;
+                for (int k = 0; k < f.polys[i].n && !wide3d; k++) if (v[k].x < -2.f || v[k].x > RW + 2.f) wide3d = 1;
+            }
         }
-        if (n3d >= 50) hud_dx = (WW - (float)RW) * 0.5f;
+        if (n3d >= 50 && wide3d) hud_dx = (WW - (float)RW) * 0.5f;
     }
     /* HUD pieces are grouped first (pieces that touch or nearly touch: the letters of a line, the
      * parts of a panel), then each group moves as a whole by where its centre is, so centred text
@@ -610,6 +690,7 @@ void dc_pvr_gl_render(int scale) {
         memset(hud_side, 0, (size_t)f.npolys);
         hud_group(&f, RW, hud_side);
     }
+    int beyond = 0;                                        /* anything drawn outside the 4:3 picture */
     for (int i = 0; i < f.npolys; i++) {
         const pvr_poly *p = &f.polys[i];
         const pvr_vtx *v = f.verts + p->first;
@@ -619,6 +700,7 @@ void dc_pvr_gl_render(int scale) {
         if (p->sprite) { tri(p, &v[0], &v[1], &v[2], 0, cull_small); tri(p, &v[0], &v[2], &v[3], 0, cull_small); }
         else for (int k = 0; k + 2 < p->n; k++) tri(p, &v[k], &v[k + 1], &v[k + 2], k & 1, cull_small);
         spans[i].count = nverts - spans[i].first;
+        if (!beyond) for (int k = 0; k < p->n; k++) if (v[k].x < -2.f || v[k].x > RW + 2.f) { beyond = 1; break; }
     }
     push_dx = 0;
     int mod_first = nverts;
@@ -745,6 +827,11 @@ void dc_pvr_gl_render(int scale) {
     p_glDisable(GL_BLEND);
     p_glDisable(GL_SCISSOR_TEST);
     p_glDepthMask(1);
+    if (dc_pvr_gl_widescreen && dc_pvr_gl_side_fill && !beyond) {
+        int px0 = (int)((WW - (float)RW) * 0.5f / WW * (float)fb_w + 0.5f);
+        draw_bars(px0, fb_w - px0, fb_h - (f.clip_y1 + 1) * scale, fb_h - f.clip_y0 * scale);
+    }
+    pic_offy = ((float)(f.height - 1 - f.clip_y1) - (float)f.clip_y0) * 0.5f / (float)f.height;
     p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
@@ -772,7 +859,8 @@ void dc_pvr_gl_present(int win_w, int win_h, int stretch) {
     p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
     p_glViewport(0, 0, win_w, win_h);
     p_glClearColor(0, 0, 0, 1); p_glClear(GL_COLOR_BUFFER_BIT);
-    p_glBlitFramebuffer(0, 0, fb_w, fb_h, dx, dy, dx + dw, dy + dh, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    int sh = (int)(pic_offy * (float)dh + (pic_offy >= 0 ? 0.5f : -0.5f));   /* centre the drawn lines (GL rows go up) */
+    p_glBlitFramebuffer(0, 0, fb_w, fb_h, dx, dy - sh, dx + dw, dy + dh - sh, GL_COLOR_BUFFER_BIT, GL_LINEAR);
     p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
@@ -782,6 +870,7 @@ void dc_pvr_gl_load_rgb(const uint8_t *rgb, int w, int h) {
     if (!ready || w <= 0 || h <= 0) return;
     if (!fbo) ensure_fbo(w, h);
     disp_aspect = 4.f / 3.f;                               /* a CPU-drawn screen: always 4:3 */
+    pic_offy = 0;
     uint8_t *tmp = malloc((size_t)w * h * 3);
     for (int y = 0; y < h; y++) memcpy(tmp + (size_t)(h - 1 - y) * w * 3, rgb + (size_t)y * w * 3, (size_t)w * 3);
     if (w == fb_w && h == fb_h) {                          /* same size: straight into the picture */
