@@ -712,6 +712,8 @@ static void gl_selftest(void) {
 typedef struct { float x0, y0, x1, y1; int poly, parent; } hud_box;
 static int hud_find(hud_box *b, int i) { while (b[i].parent != i) { b[i].parent = b[b[i].parent].parent; i = b[i].parent; } return i; }
 static float hud_group_zmax = 1e30f;    /* polygons at or above this depth are left out (a pause menu) */
+static int hud_group_imin;              /* ... when drawn at or after this polygon (dc_pvr_gl_hud_before_shade) */
+int dc_pvr_gl_hud_before_shade;
 static void hud_group(const pvr_frame *f, int RW, signed char *side) {
     static hud_box *b; static int cap;
     int n = 0;
@@ -723,7 +725,7 @@ static void hud_group(const pvr_frame *f, int RW, signed char *side) {
         for (int k = 0; k < p->n; k++) {
             /* nearly flat (within 2% in 1/w) counts as flat: Space Race's map shadow tilts a little */
             if (fabsf(v[k].z - v[0].z) > 0.02f * v[0].z) flat = 0;
-            if (v[k].z < dc_pvr_gl_hud_z || v[k].z >= hud_group_zmax || (dc_pvr_gl_hud_zmax > 0 && v[k].z >= dc_pvr_gl_hud_zmax)) near = 0;
+            if (v[k].z < dc_pvr_gl_hud_z || (v[k].z >= hud_group_zmax && i >= hud_group_imin) || (dc_pvr_gl_hud_zmax > 0 && v[k].z >= dc_pvr_gl_hud_zmax)) near = 0;
             if (v[k].x < x0) x0 = v[k].x; if (v[k].x > x1) x1 = v[k].x;
             if (v[k].y < y0) y0 = v[k].y; if (v[k].y > y1) y1 = v[k].y;
         }
@@ -963,13 +965,23 @@ void dc_pvr_gl_render(int scale) {
                 && t[j].area > box * 0.98f && t[j].area < box * 1.02f && t[j].z < ovl_z) ovl_z = t[j].z;
         }
     }
+    /* dc_pvr_gl_hud_before_shade: what the game draws before the shade is HUD even above its depth
+     * (Re-Volt draws its race HUD above the pause shade); only what comes after it is the menu */
+    int ovl_i = 0;
+    if (ovl_z < 1e29f && dc_pvr_gl_hud_before_shade) {
+        ovl_i = f.npolys;
+        for (int i = 0; i < f.npolys; i++) {
+            const pvr_poly *p = &f.polys[i]; const pvr_vtx *v = f.verts + p->first;
+            if (p->n >= 3 && v[0].z == ovl_z && shade_poly(p, v)) { ovl_i = i; break; }
+        }
+    }
     static signed char *hud_side; static int cap_side;
     if (hud_dx > 0) {
         if (f.npolys > cap_side) { cap_side = f.npolys + 1024; hud_side = realloc(hud_side, (size_t)cap_side); }
         memset(hud_side, 0, (size_t)f.npolys);
-        hud_group_zmax = ovl_z;
+        hud_group_zmax = ovl_z; hud_group_imin = ovl_i;
         hud_group(&f, RW, hud_side);
-        hud_group_zmax = 1e30f;
+        hud_group_zmax = 1e30f; hud_group_imin = 0;
     }
     int lbox = dc_pvr_gl_widescreen && dc_pvr_gl_show_4_3;
     if (dc_pvr_gl_widescreen && dc_pvr_gl_letterbox_4_3)
@@ -1028,7 +1040,7 @@ void dc_pvr_gl_render(int scale) {
         push_dx = 0;
         if (hud_dx > 0 && hud_side) {
             push_dx = hud_side[i] * hud_dx;
-            if (ovl_z < 1e29f && v[0].z >= ovl_z) {           /* pause shade and menu */
+            if (ovl_z < 1e29f && v[0].z >= ovl_z && i >= ovl_i) {   /* pause shade and menu */
                 int flat = 1; for (int k = 1; k < p->n; k++) if (v[k].z != v[0].z) flat = 0;
                 if (flat) { push_dx = 0; if (v[0].z == ovl_z) { push_wide = WW; push_rw = (float)RW; } }
             }
