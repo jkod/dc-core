@@ -393,10 +393,13 @@ static GLuint texture_for(uint32_t tcw, uint32_t tsp) {
 
 /* ------------------------------------------------------------------ geometry */
 static float push_dx;                   /* x shift for the polygon being pushed (HUD in widescreen) */
+static float push_wide;                 /* > 0: a full-screen quad, its edges pushed out this far */
+static float push_rw;
 static void push(const pvr_vtx *v) {
     if (nverts == cap_verts) { cap_verts = cap_verts ? cap_verts * 2 : 8192; verts = realloc(verts, cap_verts * sizeof *verts); }
     gv *g = &verts[nverts++];
-    g->x = v->x + push_dx; g->y = v->y; g->z = v->z; g->u = v->u; g->v = v->v; g->u1 = v->u1; g->v1 = v->v1;
+    g->x = v->x + push_dx;
+    if (push_wide > 0) { if (v->x <= 1.f) g->x -= push_wide; else if (v->x >= push_rw - 1.f) g->x += push_wide; } g->y = v->y; g->z = v->z; g->u = v->u; g->v = v->v; g->u1 = v->u1; g->v1 = v->v1;
     memcpy(g->c, v->c, 16); memcpy(g->o, v->o, 16); memcpy(g->c1, v->c1, 16); memcpy(g->o1, v->o1, 16);
 }
 /* triangle with the PVR's culling (sign of the screen area; odd strip triangles are flipped) */
@@ -679,6 +682,7 @@ static void gl_selftest(void) {
  * centre lies in the left / right third of the 4:3 picture, 0 otherwise */
 typedef struct { float x0, y0, x1, y1; int poly, parent; } hud_box;
 static int hud_find(hud_box *b, int i) { while (b[i].parent != i) { b[i].parent = b[b[i].parent].parent; i = b[i].parent; } return i; }
+static float hud_group_zmax = 1e30f;    /* polygons at or above this depth are left out (a pause menu) */
 static void hud_group(const pvr_frame *f, int RW, signed char *side) {
     static hud_box *b; static int cap;
     int n = 0;
@@ -689,7 +693,7 @@ static void hud_group(const pvr_frame *f, int RW, signed char *side) {
         int flat = 1, near = 1; float x0 = v[0].x, x1 = v[0].x, y0 = v[0].y, y1 = v[0].y;
         for (int k = 0; k < p->n; k++) {
             if (v[k].z != v[0].z) flat = 0;
-            if (v[k].z < dc_pvr_gl_hud_z) near = 0;
+            if (v[k].z < dc_pvr_gl_hud_z || v[k].z >= hud_group_zmax) near = 0;
             if (v[k].x < x0) x0 = v[k].x; if (v[k].x > x1) x1 = v[k].x;
             if (v[k].y < y0) y0 = v[k].y; if (v[k].y > y1) y1 = v[k].y;
         }
@@ -808,24 +812,45 @@ void dc_pvr_gl_render(int scale) {
      * to the right edge (with the small flat icons next to it, Rush's coins); the panel's map and
      * timer then sit just left of the right-hand HUD */
     float side_dx = view_dx + panel_dx;                      /* from the view's edge to the screen's */
+    /* a full-screen shade over both views (Rush's pause) and what is drawn above it (the menu) belong
+     * to the whole screen: they stay centred and the shade covers the full width */
+    float ovl_z = 1e30f;
+    if (split_wide && dc_pvr_gl_hud_z > 0)
+        for (int i = 0; i < f.npolys; i++) {
+            const pvr_poly *p = &f.polys[i]; const pvr_vtx *v = f.verts + p->first;
+            if (p->n < 3 || ((p->isp >> 25) & 1) || v[0].z < dc_pvr_gl_hud_z) continue;
+            float x0 = 1e30f, x1 = -1e30f, y0 = 1e30f, y1 = -1e30f; int flat = 1;
+            for (int k = 0; k < p->n; k++) {
+                if (v[k].x < x0) x0 = v[k].x; if (v[k].x > x1) x1 = v[k].x;
+                if (v[k].y < y0) y0 = v[k].y; if (v[k].y > y1) y1 = v[k].y;
+                if (v[k].z != v[0].z) flat = 0;
+            }
+            if (flat && x0 <= 1.f && x1 >= RW - 1.f && y1 - y0 > f.height * 0.8f && v[0].z < ovl_z) ovl_z = v[0].z;
+        }
+    hud_group_zmax = ovl_z;
     if (split_wide && dc_pvr_gl_hud_z > 0 && dc_pvr_gl_hud_move) {
         if (f.npolys > cap_side) { cap_side = f.npolys + 1024; hud_side = realloc(hud_side, (size_t)cap_side); }
         memset(hud_side, 0, (size_t)f.npolys);
         hud_group(&f, (int)panel_x, hud_side);
+        hud_group_zmax = 1e30f;
         /* boxes of the right-moving HUD pieces, and the small flat polygons next to them */
         float r0 = 1e30f, p1 = -1e30f;
         for (int pass = 0; pass < 2; pass++)
             for (int i = 0; i < f.npolys; i++) {
                 const pvr_poly *p = &f.polys[i]; const pvr_vtx *v = f.verts + p->first;
-                float x0 = 1e30f, x1 = -1e30f, y0 = 1e30f, y1 = -1e30f; int flat = 1;
+                float x0 = 1e30f, x1 = -1e30f, y0 = 1e30f, y1 = -1e30f, z0 = 1e30f; int flat = 1;
                 for (int k = 0; k < p->n; k++) {
                     if (v[k].x < x0) x0 = v[k].x; if (v[k].x > x1) x1 = v[k].x;
                     if (v[k].y < y0) y0 = v[k].y; if (v[k].y > y1) y1 = v[k].y;
                     if (v[k].z != v[0].z) flat = 0;
+                    if (v[k].z < z0) z0 = v[k].z;
                 }
+                /* small icons: flat, or small 3D models right at the camera (Rush's battle score
+                 * dial around the number) */
+                float icon = flat ? 40.f : z0 >= 0.5f ? 64.f : 0.f;
                 if (x0 >= panel_x + 2.f) { if (pass && !split_view(p) && flat && x1 <= (float)RW + 2.f && x1 > p1) p1 = x1; continue; }   /* the panel's contents */
                 if (pass == 0) { if (hud_side[i] > 0 && x0 < r0) r0 = x0; continue; }
-                if (!hud_side[i] && flat && x1 - x0 < 40.f && y1 - y0 < 40.f && x0 > panel_x * 0.75f) {
+                if (!hud_side[i] && x1 - x0 < icon && y1 - y0 < icon && x0 > panel_x * 0.75f) {
                     for (int j = 0; j < f.npolys; j++) {        /* within 24 px of a right-moving piece */
                         if (hud_side[j] != 1) continue;
                         const pvr_vtx *w = f.verts + f.polys[j].first;
@@ -853,6 +878,7 @@ void dc_pvr_gl_render(int scale) {
             if (split_view(p)) push_dx = view_dx + out * side_dx;
             else if (mnx >= panel_x - 1.f && flat && p->list == 0 && mxy - mny > f.height * 0.6f) { spans[i].first = nverts; spans[i].count = 0; continue; }   /* the panel backdrop */
             else if (flat && !((p->isp >> 25) & 1) && mxy - mny <= 4.f && mxx - mnx > RW * 0.9f) { spans[i].first = nverts; spans[i].count = 0; continue; }   /* the divider line */
+            else if (flat && v[0].z >= ovl_z) { push_dx = 0; if (v[0].z == ovl_z) { push_wide = WW; push_rw = (float)RW; } }   /* pause shade and menu */
             else if (mnx >= panel_x + 2.f) push_dx = panel_dx;      /* map, timer (the views' coin icons start just left of it) */
             else if (flat && v[0].z >= dc_pvr_gl_hud_z && dc_pvr_gl_hud_z > 0) push_dx = view_dx + out * side_dx;   /* the views' HUD (drawn unclipped) */
         }
@@ -860,6 +886,7 @@ void dc_pvr_gl_render(int scale) {
         if (p->sprite) { tri(p, &v[0], &v[1], &v[2], 0, cull_small); tri(p, &v[0], &v[2], &v[3], 0, cull_small); }
         else for (int k = 0; k + 2 < p->n; k++) tri(p, &v[k], &v[k + 1], &v[k + 2], k & 1, cull_small);
         spans[i].count = nverts - spans[i].first;
+        push_wide = 0;
         if ((p->isp >> 25) & 1) for (int k = 0; k < p->n; k++) { if (v[k].x < cx0) cx0 = v[k].x; if (v[k].x > cx1) cx1 = v[k].x; }
     }
     push_dx = 0;
