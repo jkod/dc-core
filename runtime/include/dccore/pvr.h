@@ -41,6 +41,13 @@ extern float dc_pvr_gl_anisotropy;
  * overlay, and those in the left / right third of the 4:3 picture move to the edges (0 = off; a
  * per-game value: Rush 2049 draws its HUD at 1/w 1.0 (panels) and 1000+ (sprites), so 1.0) */
 extern float dc_pvr_gl_hud_z;
+/* widescreen HUD: flat polygons at or above this 1/w are not HUD and never move (0 = no limit). For
+ * markers that follow the 3D scene but are drawn flat in front of it (Tennis 2K2's "1P" / "COM" at
+ * 1/w 8 and 50, its HUD at 1.0 - 3.5) */
+extern float dc_pvr_gl_hud_zmax;
+/* widescreen: frames without a 3D scene reaching past the 4:3 picture (2D menus) are cut to the 4:3
+ * picture, so the side bars replace what the game draws beyond its edges (default 0) */
+extern int dc_pvr_gl_clip_2d;
 extern int dc_pvr_gl_split_panel_x;   /* widescreen: split-screen views clipped to [0, x) beside a side panel become full width (0 = off) */
 extern int dc_pvr_gl_hud_move;        /* widescreen: HUD pieces move out to the screen edges (default 1) */
 extern int dc_pvr_gl_hud_sharp;       /* HUD textures (flat polygons at >= dc_pvr_gl_hud_z) get a bicubic filter (default 1) */

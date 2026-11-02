@@ -347,6 +347,8 @@ int dc_pvr_gl_init(void *(*getproc)(const char *)) {
 int dc_pvr_gl_widescreen;
 float dc_pvr_gl_aspect;                /* window width / height for the widescreen target (0 = 16:9) */
 float dc_pvr_gl_hud_z;
+float dc_pvr_gl_hud_zmax;
+int dc_pvr_gl_clip_2d;
 static float disp_aspect = 4.f / 3.f;
 
 static void ensure_fbo(int w, int h) {
@@ -696,7 +698,7 @@ static void hud_group(const pvr_frame *f, int RW, signed char *side) {
         for (int k = 0; k < p->n; k++) {
             /* nearly flat (within 2% in 1/w) counts as flat: Space Race's map shadow tilts a little */
             if (fabsf(v[k].z - v[0].z) > 0.02f * v[0].z) flat = 0;
-            if (v[k].z < dc_pvr_gl_hud_z || v[k].z >= hud_group_zmax) near = 0;
+            if (v[k].z < dc_pvr_gl_hud_z || v[k].z >= hud_group_zmax || (dc_pvr_gl_hud_zmax > 0 && v[k].z >= dc_pvr_gl_hud_zmax)) near = 0;
             if (v[k].x < x0) x0 = v[k].x; if (v[k].x > x1) x1 = v[k].x;
             if (v[k].y < y0) y0 = v[k].y; if (v[k].y > y1) y1 = v[k].y;
         }
@@ -1048,6 +1050,27 @@ void dc_pvr_gl_render(int scale) {
     p_glDisable(GL_BLEND);
     p_glDisable(GL_SCISSOR_TEST);
     p_glDepthMask(1);
+    if (dc_pvr_gl_widescreen && dc_pvr_gl_clip_2d && !lbox && WW > (float)RW + 1.f) {
+        /* a 2D frame (no 3D scene of 50+ polygons reaching past the 4:3 picture): what the game draws
+         * beyond the 4:3 edges (a background's overhang, a ticker running on) is cleared, and the side
+         * fill below gives it bars like any menu */
+        int n3d = 0, wide3d = 0;
+        for (int i = 0; i < f.npolys && !(n3d >= 50 && wide3d); i++) {
+            const pvr_vtx *v = f.verts + f.polys[i].first;
+            if (f.polys[i].n < 3 || (dc_pvr_gl_hud_z > 0 && v[0].z >= dc_pvr_gl_hud_z) || (v[0].z == v[1].z && v[0].z == v[2].z)) continue;
+            n3d++;
+            for (int k = 0; k < f.polys[i].n && !wide3d; k++) if (v[k].x < -2.f || v[k].x > RW + 2.f) wide3d = 1;
+        }
+        if (!(n3d >= 50 && wide3d)) {
+            float off = (WW - (float)RW) * 0.5f, k = (float)fb_w / WW;
+            int l = (int)floorf(off * k), r = (int)ceilf((off + (float)RW) * k);
+            p_glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+            p_glEnable(GL_SCISSOR_TEST); p_glClearColor(0, 0, 0, 1);
+            if (l > 0) { p_glScissor(0, 0, l, fb_h); p_glClear(GL_COLOR_BUFFER_BIT); }
+            if (r < fb_w) { p_glScissor(r, 0, fb_w - r, fb_h); p_glClear(GL_COLOR_BUFFER_BIT); }
+            p_glDisable(GL_SCISSOR_TEST);
+        }
+    }
     if (dc_pvr_gl_widescreen && dc_pvr_gl_side_fill && hud_dx == 0 && !lbox) {   /* not in races (their HUD is out there) */
         /* bars start where the picture's textured content ends (Rush's title image stops 3 pixels short
          * of the right edge, which left a black line), never inside the middle third */
