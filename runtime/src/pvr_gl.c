@@ -421,8 +421,11 @@ static void draw_quad(float r, float g, float b, float a) {
 
 typedef struct { int idx; float key; } sort_e;
 static int cmp_sort(const void *a, const void *b) {
-    float x = ((const sort_e *)a)->key, y = ((const sort_e *)b)->key;
-    return x < y ? -1 : x > y;
+    /* equal depth keeps submission order: qsort is not stable everywhere (MSVC's is not), and
+     * text drawn at one depth then lost letters at random */
+    const sort_e *p = a, *q = b;
+    if (p->key != q->key) return p->key < q->key ? -1 : 1;
+    return p->idx < q->idx ? -1 : p->idx > q->idx;
 }
 
 /* Draw batching: consecutive polygons with the same render state go out in one call (menus can
