@@ -83,7 +83,16 @@ static struct { uint64_t start; uint32_t cnt0; int running; } tmu[3];
 static uint32_t *tmu_reg(int ch, int r) { return p4reg(0xFFD80008u + ch * 12 + r * 4); }  /* r: 0 TCOR 1 TCNT 2 TCR */
 static uint64_t tmu_div(int ch) { static const int d[8] = {4, 16, 64, 256, 1024, 1024, 1024, 1024}; return (uint64_t)d[*tmu_reg(ch, 2) & 7] * (CPU_HZ / PERIPH_HZ); }
 
+/* TCOR and TCNT power up as FFFFFFFF (SH-4 manual): games that start a channel without loading it
+ * use it as a free-running counter (Re-Volt times its frames with TMU2 that way) */
+static void tmu_power_on(void) {
+    static int done;
+    if (done) return;
+    done = 1;
+    for (int ch = 0; ch < 3; ch++) { *tmu_reg(ch, 0) = 0xFFFFFFFFu; *tmu_reg(ch, 1) = 0xFFFFFFFFu; }
+}
 static void tmu_sync(int ch, uint64_t now) {
+    tmu_power_on();
     if (!tmu[ch].running) return;
     uint64_t ticks = (now - tmu[ch].start) / tmu_div(ch);
     uint32_t cor = *tmu_reg(ch, 0), cnt = tmu[ch].cnt0;

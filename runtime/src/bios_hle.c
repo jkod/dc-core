@@ -280,7 +280,12 @@ static uint32_t h_gdrom(sh4ctx *c) {
     case 10:                                          /* change_data_type(params[4]) */
         c->r[0] = 0;
         break;
-    case 2: case 3: case 5: case 8: case 9:           /* exec_server, init, dma_end, abort, reset */
+    case 5:                                           /* dma_end: the game's GD-DMA end interrupt handler */
+        TR("bios: gd dma_end\n");
+        dc_wr32(0xA05F6900u, 1u << 14);              /* acknowledge it (ISTNRM bit 14, write 1 to clear) */
+        c->r[0] = 0;
+        break;
+    case 2: case 3: case 8: case 9:                   /* exec_server, init, abort, reset */
         c->r[0] = 0;
         break;
     default:

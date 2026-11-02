@@ -273,6 +273,16 @@ int main(void) {
         CHECK(dc_rd32(0x8C0000BCu) == 0x8C0010F0u);          /* GD-ROM vector still the HLE entry */
         remove("dctest_boot.bin");
     }
+
+    /* 12. TMU: TCOR/TCNT power up as FFFFFFFF, so a channel started without loading counts down from there */
+    CHECK(dc_rd32(0xFFD80020u) == 0xFFFFFFFFu && dc_rd32(0xFFD80024u) == 0xFFFFFFFFu);
+    dc_wr16(0xFFD80028u, 0);                           /* TCR2: P/4 */
+    dc_wr8(0xFFD80004u, dc_rd8(0xFFD80004u) | 4);      /* start TMU2 */
+    run(&c, 1000000);
+    {
+        uint32_t t = dc_rd32(0xFFD80024u);
+        CHECK(t < 0xFFFFFFFFu && t > 0xFFF00000u);
+    }
     printf(fails ? "%d runtime test(s) FAILED\n" : "runtime tests passed\n", fails);
     return fails != 0;
 }
