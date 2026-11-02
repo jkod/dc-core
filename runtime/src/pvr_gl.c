@@ -793,11 +793,29 @@ void dc_pvr_gl_render(int scale) {
     /* HUD pieces are grouped first (pieces that touch or nearly touch: the letters of a line, the
      * parts of a panel), then each group moves as a whole by where its centre is, so centred text
      * stays together */
+    /* a full-screen shade over the HUD (Rush's pause) and what is drawn above it (the menu) belong to
+     * the whole screen: they stay centred, the shade covers the full width, and the HUD below keeps
+     * its widescreen place */
+    float ovl_z = 1e30f;
+    if (dc_pvr_gl_widescreen && dc_pvr_gl_hud_z > 0)
+        for (int i = 0; i < f.npolys; i++) {
+            const pvr_poly *p = &f.polys[i]; const pvr_vtx *v = f.verts + p->first;
+            if (p->n < 3 || ((p->isp >> 25) & 1) || v[0].z < dc_pvr_gl_hud_z) continue;
+            float x0 = 1e30f, x1 = -1e30f, y0 = 1e30f, y1 = -1e30f; int flat = 1;
+            for (int k = 0; k < p->n; k++) {
+                if (v[k].x < x0) x0 = v[k].x; if (v[k].x > x1) x1 = v[k].x;
+                if (v[k].y < y0) y0 = v[k].y; if (v[k].y > y1) y1 = v[k].y;
+                if (v[k].z != v[0].z) flat = 0;
+            }
+            if (flat && x0 <= 1.f && x1 >= RW - 1.f && y1 - y0 > f.height * 0.8f && v[0].z < ovl_z) ovl_z = v[0].z;
+        }
     static signed char *hud_side; static int cap_side;
     if (hud_dx > 0) {
         if (f.npolys > cap_side) { cap_side = f.npolys + 1024; hud_side = realloc(hud_side, (size_t)cap_side); }
         memset(hud_side, 0, (size_t)f.npolys);
+        hud_group_zmax = ovl_z;
         hud_group(&f, RW, hud_side);
+        hud_group_zmax = 1e30f;
     }
     float cx0 = 1e30f, cx1 = -1e30f;                        /* x extent of the textured picture (side bars) */
     split_wide = 0;
@@ -812,25 +830,10 @@ void dc_pvr_gl_render(int scale) {
      * to the right edge (with the small flat icons next to it, Rush's coins); the panel's map and
      * timer then sit just left of the right-hand HUD */
     float side_dx = view_dx + panel_dx;                      /* from the view's edge to the screen's */
-    /* a full-screen shade over both views (Rush's pause) and what is drawn above it (the menu) belong
-     * to the whole screen: they stay centred and the shade covers the full width */
-    float ovl_z = 1e30f;
-    if (split_wide && dc_pvr_gl_hud_z > 0)
-        for (int i = 0; i < f.npolys; i++) {
-            const pvr_poly *p = &f.polys[i]; const pvr_vtx *v = f.verts + p->first;
-            if (p->n < 3 || ((p->isp >> 25) & 1) || v[0].z < dc_pvr_gl_hud_z) continue;
-            float x0 = 1e30f, x1 = -1e30f, y0 = 1e30f, y1 = -1e30f; int flat = 1;
-            for (int k = 0; k < p->n; k++) {
-                if (v[k].x < x0) x0 = v[k].x; if (v[k].x > x1) x1 = v[k].x;
-                if (v[k].y < y0) y0 = v[k].y; if (v[k].y > y1) y1 = v[k].y;
-                if (v[k].z != v[0].z) flat = 0;
-            }
-            if (flat && x0 <= 1.f && x1 >= RW - 1.f && y1 - y0 > f.height * 0.8f && v[0].z < ovl_z) ovl_z = v[0].z;
-        }
-    hud_group_zmax = ovl_z;
     if (split_wide && dc_pvr_gl_hud_z > 0 && dc_pvr_gl_hud_move) {
         if (f.npolys > cap_side) { cap_side = f.npolys + 1024; hud_side = realloc(hud_side, (size_t)cap_side); }
         memset(hud_side, 0, (size_t)f.npolys);
+        hud_group_zmax = ovl_z;
         hud_group(&f, (int)panel_x, hud_side);
         hud_group_zmax = 1e30f;
         /* boxes of the right-moving HUD pieces, and the small flat polygons next to them */
@@ -866,7 +869,13 @@ void dc_pvr_gl_render(int scale) {
         const pvr_poly *p = &f.polys[i];
         const pvr_vtx *v = f.verts + p->first;
         push_dx = 0;
-        if (hud_dx > 0 && hud_side) push_dx = hud_side[i] * hud_dx;
+        if (hud_dx > 0 && hud_side) {
+            push_dx = hud_side[i] * hud_dx;
+            if (ovl_z < 1e29f && v[0].z >= ovl_z) {           /* pause shade and menu */
+                int flat = 1; for (int k = 1; k < p->n; k++) if (v[k].z != v[0].z) flat = 0;
+                if (flat) { push_dx = 0; if (v[0].z == ovl_z) { push_wide = WW; push_rw = (float)RW; } }
+            }
+        }
         if (split_wide) {
             float mnx = 1e30f, mxx = -1e30f, mny = 1e30f, mxy = -1e30f; int flat = 1;
             for (int k = 0; k < p->n; k++) {
