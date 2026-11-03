@@ -679,10 +679,12 @@ static uint32_t h_wdmh(sh4ctx *c) {
         if (ARG(2)) dc_wr32(ARG(2), ARG(0));
         RET(0);
     case 7: case 8: {                                      /* MmBuildMdlForNonPagedPool(mdl) / MmProbeAndLockPages(mdl, mode, op) */
-        uint32_t mdl = ARG(0), start = dc_rd32(mdl + 16), count = dc_rd32(mdl + 20), ofs = dc_rd32(mdl + 24);
+        /* WDMLIB's MDL (IoAllocateMdl): Next, Size, MdlFlags, MappedSystemVa (+8), StartVa (+12, page),
+         * ByteCount (+16), ByteOffset (+20), then the page frame numbers (+24) */
+        uint32_t mdl = ARG(0), start = dc_rd32(mdl + 12), count = dc_rd32(mdl + 16), ofs = dc_rd32(mdl + 20);
         uint32_t pages = (ofs + count + 0xFFF) >> 12;
-        for (uint32_t i = 0; i < pages; i++) dc_wr32(mdl + 28 + i * 4, va_phys(start + i * 0x1000) >> 12);
-        if (m == 7) dc_wr32(mdl + 12, start + ofs);
+        for (uint32_t i = 0; i < pages; i++) dc_wr32(mdl + 24 + i * 4, va_phys(start + i * 0x1000) >> 12);
+        if (m == 7) dc_wr32(mdl + 8, start + ofs);
         RET(0);
     }
     case 9: RET(0);                                        /* MmUnlockPages */

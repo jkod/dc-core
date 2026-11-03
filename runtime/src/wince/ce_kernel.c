@@ -1,5 +1,6 @@
 /* dc-core Windows CE runtime: memory, kernel objects, threads and the scheduler, interrupts. */
 #include "ce_int.h"
+#include "dccore/aica.h"
 #include "dccore/hw.h"
 #include <stdarg.h>
 
@@ -431,7 +432,7 @@ static const struct { int bank; uint32_t bits; } holly_src[] = {
 };
 #define CE_SYSINTR_FIRST 16u
 #define MAXI 32
-static struct { uint32_t sysintr, event, seen; int enabled; } irqs[MAXI];
+static struct { uint32_t sysintr, event, seen; int enabled; unsigned fired; } irqs[MAXI];
 static int nirqs;
 static uint32_t sysintr_mask(uint32_t s, int *bank) {
     if (s < CE_SYSINTR_FIRST || s >= CE_SYSINTR_FIRST + sizeof holly_src / sizeof *holly_src) return 0;
@@ -493,7 +494,7 @@ static uint32_t h_vector(sh4ctx *c) {
              * driver), acknowledge them, and mask the SYSINTR until InterruptDone */
             irqs[i].seen |= pend[b] & bit;
             if (b != 1) dc_wr32(b == 0 ? 0xA05F6900u : 0xA05F6908u, pend[b] & bit);
-            irqs[i].enabled = 0;
+            irqs[i].enabled = 0; irqs[i].fired++;
             ce_signal(irqs[i].event);
             any = 1;
         }
@@ -531,8 +532,15 @@ void ce_irq_init(void) {
     dc_hle_register(CE_RESCHED, h_resched);
 }
 
-/* debugging: the threads and what they wait for (DC_CE_DUMP=1, at exit) */
+/* debugging: the interrupts and threads, and what they wait for (DC_CE_DUMP=1, at exit) */
 void ce_dump_threads(void) {
+    for (int i = 0; i < nirqs; i++) fprintf(stderr, "[ce] SYSINTR %u: fired %u, %s\n", irqs[i].sysintr, irqs[i].fired, irqs[i].enabled ? "enabled" : "masked");
+    const char *dir = getenv("DC_CE_DUMP_RAM");             /* also user memory and sound RAM, as files */
+    if (dir) {
+        char p[1024]; FILE *f;
+        snprintf(p, sizeof p, "%s/uram.bin", dir); if ((f = fopen(p, "wb"))) { fwrite(dc_uram, 1, DC_URAM_SIZE, f); fclose(f); }
+        snprintf(p, sizeof p, "%s/aram.bin", dir); if ((f = fopen(p, "wb"))) { fwrite(dc_aram, 1, sizeof dc_aram, f); fclose(f); }
+    }
     static const char *st[] = { "ready", "running", "waiting", "sleeping", "suspended", "dead" };
     for (int i = 0; i < nthreads; i++) {
         ce_thread *t = threads[i];

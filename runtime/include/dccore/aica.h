@@ -10,6 +10,9 @@ void     dc_aica_write(uint32_t ofs, uint32_t v, int size);
 void     dc_aica_advance(uint64_t sh4_cycles);       /* run samples (and the ARM) up to this time */
 uint64_t dc_aica_next(void);                         /* when it next needs to run */
 int      dc_aica_arm_running(void);
+/* run n samples (and the ARM) now, outside the SH-4's time: a boot step that lets the sound CPU's
+ * program initialise itself (an HLE operating system's sound set-up) */
+void     dc_aica_run_samples(uint32_t n);
 int      dc_aica_dsp_active(void);                    /* the effects DSP has a program loaded */
 /* mixed output, 44100 Hz interleaved stereo int16: copy up to `frames` frames, returns how many */
 int      dc_aica_audio_read(int16_t *dst, int frames);

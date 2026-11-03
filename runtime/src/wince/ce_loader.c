@@ -1,6 +1,7 @@
 /* dc-core Windows CE runtime: the module loader (EXE + DLLs at the addresses ce_layout.py chose). */
 #include "ce_int.h"
 #include "dccore/disc.h"
+#include "dccore/aica.h"
 #include <ctype.h>
 
 #define MAXM 96
@@ -208,6 +209,17 @@ int ce_load_arm_firmware(const char *name) {
     for (uint32_t i = 0; hdr + i + 4 <= n && i < 0x200000; i += 4) dc_wr32(0xA0800000u + i, rd32le(f + hdr + i));
     dc_wr32(0xA0702C00u, 0);                                   /* run */
     free(f);
+    /* What the OS's sound set-up does at boot, before any game: once the program has initialised
+     * (its shared-memory header at 0xEC points to its block), the position of its message ring
+     * (0xE4) is saved in that block, where SNDCORE takes its read position from whenever DirectSound
+     * opens. Without it SNDCORE reads 0 and its message thread loops for ever. */
+    for (int i = 0; i < 100 && !dc_rd32(0xA08000ECu); i++) dc_aica_run_samples(441);    /* up to 1 s */
+    uint32_t blk = dc_rd32(0xA08000ECu);
+    if (blk && blk < 0x1FFFF0u) {
+        uint32_t at = 0xA0800000u + ((blk + 8u) & ~4u);
+        if (!dc_rd32(at)) dc_wr32(at, dc_rd32(0xA08000E4u));
+        TRACE("%s ready: block %06X, message ring at %06X", name, blk, dc_rd32(0xA08000E4u));
+    } else fprintf(stderr, "[ce] %s: the sound CPU's program did not start\n", name);
     return 0;
 }
 
