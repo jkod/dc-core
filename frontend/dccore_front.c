@@ -218,6 +218,19 @@ static void read_input(void) {
         #undef JB
     }
 #endif
+    /* only the focused window plays: a controller can be read by every program at once, so with two
+     * ports open both would follow it (the pads are polled with background events allowed, so a
+     * console window that kept focus doesn't make the pad look dead; one click on the game fixes that) */
+#ifndef __SWITCH__
+    {
+        static int bg = -1;
+        if (bg < 0) { const char *e = getenv("DC_BACKGROUND_INPUT"); bg = cfg.background_input || (e && *e && *e != '0'); }
+        if (!bg && win && !(SDL_GetWindowFlags(win) & SDL_WINDOW_INPUT_FOCUS)) {
+            b = 0; jx = jy = 128; lt = rt = 0;
+            for (int p = 1; p < 4; p++) { dc_pad[p].buttons = 0; dc_pad[p].jx = dc_pad[p].jy = 128; dc_pad[p].lt = dc_pad[p].rt = 0; }
+        }
+    }
+#endif
     /* debugging: DC_PRESS="[P/]field:buttons[:fields],..." holds Dreamcast buttons (DC_BTN_* mask, hex)
      * from that presented field on, for `fields` fields (default 10), on port P (A-D, default A; a port
      * named here counts as connected); extra bits 16 L trigger, 17 R trigger, 18 stick left, 19 stick right,

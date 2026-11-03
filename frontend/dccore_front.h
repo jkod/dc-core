@@ -31,6 +31,9 @@ typedef struct {
     int stats;                  /* print fields / renders / emulated vs wall time on exit and every 5 s */
     int vsync;                  /* wait for the display's refresh when showing a frame (no tearing; the
                                    game then runs at the display's rate if that is below the console's) */
+    int background_input;       /* read controllers and keys while the window is not focused (default:
+                                   only the focused window gets input, so two ports running side by side
+                                   don't both follow one pad); DC_BACKGROUND_INPUT=1 does the same */
 } dc_front_config;
 int  dc_front_open(const dc_front_config *cfg);   /* 0 = ok */
 void dc_front_close(void);
