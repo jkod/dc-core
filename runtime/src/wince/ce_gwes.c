@@ -192,7 +192,18 @@ FN(SelectObject) { RET(0x00030000u); }
 FN(DeleteObject) { RET(1); }
 FN(GetStockObject) { RET(0x00030000u + ARG(0) * 4); }
 FN(CreateFontIndirectW) { char f[64]; ce_wstr(ARG(0) + 28, f, sizeof f); TRACE("CreateFontIndirect %s %d", f, (int)dc_rd32(ARG(0))); RET(gdi_next += 4); }
-FN(EnumFontFamiliesW) { ce_unimpl("EnumFontFamiliesW"); RET(1); }
+FN(EnumFontFamiliesW) {       /* (hdc, family, proc, lparam): one TrueType family, the one asked for (or Arial) */
+    uint32_t lf = ce_alloc(92 + 60, 4), tm = lf + 92;
+    char fam[32]; ce_wstr(ARG(1), fam, sizeof fam);
+    if (!fam[0]) snprintf(fam, sizeof fam, "Arial");
+    dc_wr32(lf, (uint32_t)-16); dc_wr32(lf + 16, 400); dc_wr8(lf + 23, 0);
+    ce_put_wstr(lf + 28, fam, 32);
+    dc_wr32(tm, 16); dc_wr32(tm + 4, 13); dc_wr32(tm + 8, 3); dc_wr32(tm + 20, 7); dc_wr32(tm + 24, 16);
+    TRACE("EnumFontFamilies %s", fam);
+    uint32_t r = ce_call(ARG(2), 4, lf, tm, 4 /* TRUETYPE_FONTTYPE */, ARG(3));
+    ce_free(lf);
+    RET(r);
+}
 FN(CreateBitmapFromPointer) { ce_unimpl("CreateBitmapFromPointer"); RET(gdi_next += 4); }
 FN(CreateDIBSection) { ce_unimpl("CreateDIBSection"); RET(0); }
 FN(GetDeviceCaps) {
