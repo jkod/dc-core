@@ -465,6 +465,8 @@ static uint32_t rd(uint32_t a, int size) {
     if (m >= 0x005F6800u && m < 0x005F8000u) {
         uint32_t v = (m & 0xFFFC) == 0x689C ? 0x0Bu : SBR(m & 0xFFFC);   /* SB_SBREV: a retail console's system bus
                                                                         * revision (Tennis 2K2 picks its graphics init by it) */
+        if ((m & 0xFFFC) == 0x6880) v = 8;                              /* SB_TFREM: the TA FIFO is always drained
+                                                                        * (8 free 32-byte blocks; Windows CE's DDHAL waits for them) */
         return size == 4 ? v : size == 2 ? (v >> ((m & 2) * 8)) & 0xFFFF : (v >> ((m & 3) * 8)) & 0xFF;
     }
     if (m >= 0x005F8000u && m < 0x005FA000u) {

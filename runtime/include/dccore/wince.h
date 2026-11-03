@@ -43,6 +43,10 @@ void ce_reg_set_string(const char *key, const char *name, const char *v);
  * WDMLIB!InitWDM loads the WDM drivers listed under HKLM\WDMDrivers\BuiltIn, like wdevice.exe) */
 void ce_add_startup(const char *dll, const char *fn);
 
+/* load the AICA's ARM7 program from the disc into sound RAM and start it (CE: armcom.drv, which the
+ * ROM loads at boot; SNDCORE expects it running). After ce_init. */
+int  ce_load_arm_firmware(const char *name);
+
 extern int ce_trace;            /* 1: log API calls (DC_CE_TRACE=1), 2: also every switch between threads */
 uint32_t ce_milliseconds(void); /* the guest's GetTickCount */
 

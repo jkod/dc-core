@@ -195,6 +195,17 @@ uint32_t ce_get_proc(uint32_t h, const char *fname, uint32_t ord) {
 }
 
 
+/* the sound CPU's program: the CE ROM loads armcom.drv into sound RAM at boot and starts the ARM7 */
+int ce_load_arm_firmware(const char *name) {
+    uint8_t *f; uint32_t n;
+    if (read_disc_file(name, &f, &n)) return -1;
+    dc_wr32(0xA0702C00u, 1);                                   /* ARM in reset */
+    for (uint32_t i = 0; i + 4 <= n && i < 0x200000; i += 4) dc_wr32(0xA0800000u + i, rd32le(f + i));
+    dc_wr32(0xA0702C00u, 0);                                   /* run */
+    free(f);
+    return 0;
+}
+
 static uint32_t cmdline_va;
 static struct { const char *dll, *fn; } startup[8]; static int nstartup;
 void ce_add_startup(const char *dll, const char *fn) { if (nstartup < 8) { startup[nstartup].dll = dll; startup[nstartup].fn = fn; nstartup++; } }

@@ -299,7 +299,8 @@ FN(VirtualCopy) {             /* (dst, src, size, prot): PAGE_PHYSICAL 0x400 -> 
     uint32_t dst = ARG(0), src = ARG(1), size = ARG(2), prot = ARG(3);
     uint32_t to = (prot & 0x400) ? phys_to_va(src << 8) : src;
     TRACE("VirtualCopy %08X <- %08X (%X bytes, prot %X)", dst, to, size, prot);
-    if (dst >= CE_MAPS_LO && dst < CE_MAPS_HI) { dc_hw_map(dst, to, size); RET(1); }
+    size = ((dst & 0xFFFu) + size + 0xFFFu) & ~0xFFFu;     /* whole pages, like the MMU (AICA's 0x702C00 sits in the page of 0x702000) */
+    if (dst >= CE_MAPS_LO && dst < CE_MAPS_HI) { dc_hw_map(dst & ~0xFFFu, to & ~0xFFFu, size); RET(1); }
     ce_unimpl("VirtualCopy into committed memory");
     RET(0);
 }
@@ -525,7 +526,7 @@ FN(KernelIoControl) {         /* (code, in, insize, out, outsize, &ret) */
 FN(SetStoreQueueBase) {      /* the store queue area 0xE0000000.. writes to this physical address on */
     TRACE("SetStoreQueueBase %08X", ARG(0));
     dc_sq_base = 0xA0000000u | (ARG(0) & 0x1FFFFFFFu);
-    RET(1);
+    RET(0xE0000000u);           /* the store queue area's address, which now writes there */
 }
 FN(AddEventAccess) { RET(1); }
 /* ---- the kernel's WDM HAL API set ("WDMH"), which WDMLIB's Hal and Mm functions call. User memory
