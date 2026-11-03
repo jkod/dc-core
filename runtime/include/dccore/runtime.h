@@ -26,6 +26,9 @@ int   dc_load_memory(const uint8_t *data, uint32_t len, uint32_t addr);   /* cal
  * dc_use_code(dc_fn_table, dc_fn_count) goes back to the unprefixed one. */
 void  dc_use_code(const void *table, size_t count);
 sh4fn dc_lookup(uint32_t addr);
+/* the recompiled function at addr itself, past any dc_hle_register override of it (an override that
+ * wraps the original: set c->entry = addr, call it, then dc_call what it returns), NULL if none */
+sh4fn dc_lookup_recompiled(uint32_t addr);
 void  dc_hle_register(uint32_t addr, sh4fn fn);   /* replace a guest function with native code */
 /* every address in [lo, hi) runs fn, which tells them apart by c->entry (P1 fold of the address) */
 void  dc_hle_register_range(uint32_t lo, uint32_t hi, sh4fn fn);

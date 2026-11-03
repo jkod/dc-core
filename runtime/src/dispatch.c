@@ -95,6 +95,7 @@ static sh4fn lookup_slow(uint32_t addr) {
         if (addr - alias[i].dst < alias[i].len) return lookup_table(alias[i].src + (addr - alias[i].dst));
     return lookup_table(addr);
 }
+sh4fn dc_lookup_recompiled(uint32_t addr) { return lookup_table((addr & 0x1FFFFFFFu) | 0x80000000u); }
 sh4fn dc_lookup(uint32_t addr) {
     addr = (addr & 0x1FFFFFFFu) | 0x80000000u;   /* fold P0/P2 mirrors onto P1 */
     uint32_t k = (addr >> 1) & (LCACHE - 1);
