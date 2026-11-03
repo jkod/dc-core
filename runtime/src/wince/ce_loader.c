@@ -81,10 +81,11 @@ int ce_init(sh4ctx *c, const ce_module_desc *d, int n, const char **bad) {
     ce_ctx = c;
     { const char *e = getenv("DC_CE_TRACE"); if (e) ce_trace = atoi(e); }
     if (!dc_uram) {
-        /* the low 16 MB of the user address space is the console's RAM itself, so drivers' DMA buffers
-         * have physical addresses (0x0C000000 + va) the hardware model can reach */
+        /* the user address space is the console's RAM itself (its low 16 MB, all of it with
+         * DC_RAM_32MB), so drivers' DMA buffers have physical addresses (0x0C000000 + va) the
+         * hardware model can reach */
         dc_uram = calloc(1, DC_URAM_SIZE);
-        if (dc_ram) { memcpy(dc_uram, dc_ram, 0x1000000); free(dc_ram); }
+        if (dc_ram) { memcpy(dc_uram, dc_ram, DC_RAM_SIZE); free(dc_ram); }
         dc_ram = dc_uram;
     }
     for (int i = 0; i < n && nmods < MAXM; i++) {

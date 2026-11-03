@@ -10,6 +10,10 @@ target_include_directories(dccore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/runtime/inc
 add_library(dccore_wince STATIC runtime/src/wince/ce_kernel.c runtime/src/wince/ce_loader.c runtime/src/wince/ce_api.c
             runtime/src/wince/ce_gwes.c)
 target_link_libraries(dccore_wince PUBLIC dccore)
+option(DCCORE_RAM_32MB "32 MB of RAM (Windows CE games: the whole user address space has physical addresses)" OFF)
+if(DCCORE_RAM_32MB)
+  target_compile_definitions(dccore PUBLIC DC_RAM_32MB)
+endif()
 set(DCCORE_MSVC_JOBS 4 CACHE STRING "MSVC: generated files compiled at the same time (/MP)")
 if(MSVC)
   target_compile_definitions(dccore PUBLIC _CRT_SECURE_NO_WARNINGS)

@@ -187,7 +187,7 @@ void dc_trap(sh4ctx *c, uint32_t pc, const char *what) {
 int dc_load_binary(const char *path, uint32_t addr) {
     FILE *f = fopen(path, "rb");
     if (!f) return -1;
-    size_t n = fread(dc_ram + DC_RAM_OFS(addr), 1, 0x1000000 - DC_RAM_OFS(addr), f);
+    size_t n = fread(dc_ram + DC_RAM_OFS(addr), 1, DC_RAM_SIZE - DC_RAM_OFS(addr), f);
     fclose(f);
     img_base = (addr & 0x1FFFFFFFu) | 0x80000000u; img_end = img_base + (uint32_t)n;
     return (int)n;
@@ -203,7 +203,7 @@ int dc_load_memory(const uint8_t *data, uint32_t len, uint32_t addr) {
 }
 
 void dc_init(sh4ctx *c) {
-    if (!dc_ram) dc_ram = (uint8_t *)calloc(1, 0x1000000);
+    if (!dc_ram) dc_ram = (uint8_t *)calloc(1, DC_RAM_SIZE);
     memset(c, 0, sizeof *c);
     dc_current_ctx = c;
     c->r[15] = 0x8C00F400u;             /* where the boot ROM leaves the stack (games keep data at the top of RAM) */

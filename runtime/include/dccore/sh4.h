@@ -45,7 +45,15 @@ void     dc_hw_wr32(uint32_t a, uint32_t v);
 void     dc_hw_pref(uint32_t a);          /* store-queue flush etc. */
 
 #define DC_IS_RAM(a) (((a) & 0x1C000000u) == 0x0C000000u)
-#define DC_RAM_OFS(a) ((a) & 0x00FFFFFFu)
+/* DC_RAM_32MB (CMake DCCORE_RAM_32MB, Windows CE games): 32 MB of RAM at 0x0C000000, the user
+ * address space's whole size, so that every user address has a physical one (0x0C000000 + va) for
+ * the drivers' DMA. Otherwise the console's 16 MB, mirrored at 0x0D000000. */
+#ifdef DC_RAM_32MB
+#define DC_RAM_SIZE 0x02000000u
+#else
+#define DC_RAM_SIZE 0x01000000u
+#endif
+#define DC_RAM_OFS(a) ((a) & (DC_RAM_SIZE - 1u))
 
 /* User address space (Windows CE games, see dccore/wince.h): when dc_uram is set, the 32 MB of
  * virtual addresses 0x00000000..0x01FFFFFF -- and their P1 fold 0x80000000..0x81FFFFFF, which is

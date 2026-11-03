@@ -162,7 +162,7 @@ static int gd_exec(int cmd, uint32_t *p) {
         TR("bios: gd read lba %u x%u -> %08X\n", lba, n, dst);
         if (dc_bios_read_hook) dc_bios_read_hook(lba, n, dst);
         if (!DC_IS_RAM(dst)) return -1;
-        if (DC_RAM_OFS(dst) + n * 2048 > 0x1000000) return -1;
+        if (DC_RAM_OFS(dst) + n * 2048 > DC_RAM_SIZE) return -1;
         last_lba = lba + n;
         if (dc_disc_read(lba, n, dc_ram + DC_RAM_OFS(dst))) return -1;
         if (dc_gd_dma_irq && (cmd == 17 || cmd == 34)) dc_raise(1u << 14);   /* GD-DMA end interrupt (opt-in) */
