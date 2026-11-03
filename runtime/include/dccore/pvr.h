@@ -49,6 +49,13 @@ extern float dc_pvr_gl_aspect;        /* widescreen: the window's width / height
  * and anisotropic filtering up to this many samples where the driver supports it */
 extern int dc_pvr_gl_mipmaps;
 extern float dc_pvr_gl_anisotropy;
+/* texture packs: textures are named <hash>_<w>x<h>.png by a hash of their decoded pixels. With
+ * dc_pvr_gl_tex_dump set to a folder, every texture the game uploads is saved there once; with
+ * dc_pvr_gl_tex_pack set, a PNG of that name in that folder (any size: upscaled, redrawn) is used
+ * instead. Counters: textures written / distinct textures replaced so far. */
+extern const char *dc_pvr_gl_tex_dump;
+extern const char *dc_pvr_gl_tex_pack;
+extern unsigned long dc_pvr_gl_tex_dumped, dc_pvr_gl_tex_replaced;
 /* widescreen HUD: polygons with every vertex at the same 1/w, at least this, are treated as 2D
  * overlay, and those in the left / right third of the 4:3 picture move to the edges (0 = off; a
  * per-game value: Rush 2049 draws its HUD at 1/w 1.0 (panels) and 1000+ (sprites), so 1.0) */

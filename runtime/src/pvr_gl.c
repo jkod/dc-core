@@ -379,6 +379,87 @@ static void ensure_fbo(int w, int h) {
     fb_w = w; fb_h = h;
 }
 
+/* ------------------------------------------------------------------ texture packs
+ * Textures are named by a hash of their decoded pixels and size: <hash>_<w>x<h>.png. With a dump
+ * folder set, every texture the game uploads is saved there once; with a pack folder set, a PNG of
+ * that name there (any size, e.g. upscaled) is uploaded in its place. */
+#define STBI_ONLY_PNG
+#define STB_IMAGE_STATIC
+#define STB_IMAGE_IMPLEMENTATION
+#define STB_IMAGE_WRITE_STATIC
+#define STB_IMAGE_WRITE_IMPLEMENTATION
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+#pragma GCC diagnostic ignored "-Wsign-compare"
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"
+#endif
+#include "../third_party/stb_image.h"
+#include "../third_party/stb_image_write.h"
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+#ifdef _WIN32
+#include <direct.h>
+#define tex_mkdir(d) _mkdir(d)
+#else
+#define tex_mkdir(d) mkdir(d, 0755)
+#endif
+#include <sys/stat.h>
+const char *dc_pvr_gl_tex_dump;
+const char *dc_pvr_gl_tex_pack;
+unsigned long dc_pvr_gl_tex_dumped, dc_pvr_gl_tex_replaced;
+
+static uint64_t tex_hash(const uint32_t *px, int w, int h) {
+    uint64_t x = 0x9E3779B97F4A7C15ull ^ ((uint64_t)(uint32_t)w << 32 | (uint32_t)h);
+    size_t n = (size_t)w * (size_t)h;
+    for (size_t i = 0; i < n; i++) {
+        x ^= px[i]; x *= 0xFF51AFD7ED558CCDull; x ^= x >> 32;
+    }
+    x ^= x >> 33; x *= 0xC4CEB9FE1A85EC53ull; x ^= x >> 33;
+    return x;
+}
+/* hashes seen: bit 0 dumped, bit 1 looked up in the pack, bit 2 the pack has it */
+#define TEXSEEN (1u << 16)
+static struct { uint64_t h; unsigned flags; } tex_seen[TEXSEEN];
+static unsigned *tex_flags(uint64_t h) {
+    for (unsigned i = (unsigned)h & (TEXSEEN - 1), n = 0; n < TEXSEEN; i = (i + 1) & (TEXSEEN - 1), n++) {
+        if (tex_seen[i].h == h) return &tex_seen[i].flags;
+        if (!tex_seen[i].h) { tex_seen[i].h = h; tex_seen[i].flags = 0; return &tex_seen[i].flags; }
+    }
+    static unsigned spare; spare = 3; return &spare;   /* full: neither dump nor replace */
+}
+static void tex_name(char *out, size_t n, const char *dir, uint64_t h, int w, int hh) {
+    snprintf(out, n, "%s/%016llx_%dx%d.png", dir, (unsigned long long)h, w, hh);
+}
+static void tex_dump(const pvr_texinfo *ti, uint64_t h) {
+    static int made;
+    if (!made) { tex_mkdir(dc_pvr_gl_tex_dump); made = 1; }
+    char path[1024]; tex_name(path, sizeof path, dc_pvr_gl_tex_dump, h, ti->w, ti->h);
+    FILE *f = fopen(path, "rb");
+    if (f) { fclose(f); return; }
+    size_t n = (size_t)ti->w * (size_t)ti->h;
+    uint8_t *rgba = malloc(n * 4);
+    if (!rgba) return;
+    for (size_t i = 0; i < n; i++) {
+        uint32_t p = ti->px[i];
+        rgba[i * 4] = (uint8_t)(p >> 16); rgba[i * 4 + 1] = (uint8_t)(p >> 8); rgba[i * 4 + 2] = (uint8_t)p; rgba[i * 4 + 3] = (uint8_t)(p >> 24);
+    }
+    if (stbi_write_png(path, ti->w, ti->h, 4, rgba, ti->w * 4)) dc_pvr_gl_tex_dumped++;
+    else { static int warned; if (!warned++) fprintf(stderr, "pvr_gl: cannot write %s\n", path); }
+    free(rgba);
+}
+/* a replacement for this texture from the pack (RGBA bytes, free with stbi_image_free), or NULL */
+static uint8_t *tex_replacement(const pvr_texinfo *ti, uint64_t h, unsigned *flags, int *w, int *hh) {
+    if ((*flags & 2) && !(*flags & 4)) return NULL;
+    char path[1024]; tex_name(path, sizeof path, dc_pvr_gl_tex_pack, h, ti->w, ti->h);
+    int comp = 0;
+    uint8_t *px = stbi_load(path, w, hh, &comp, 4);
+    *flags |= 2;
+    if (px) { *flags |= 4; if (!(*flags & 8)) { dc_pvr_gl_tex_replaced++; *flags |= 8; } }
+    return px;
+}
+
 static GLuint texture_for(uint32_t tcw, uint32_t tsp) {
     pvr_texinfo ti;
     pvr_get_texture(tcw, tsp, &ti);
@@ -397,7 +478,21 @@ static GLuint texture_for(uint32_t tcw, uint32_t tsp) {
     if (slot < 0) { slot = oldest; p_glDeleteTextures(1, &gtex[slot].name); gtex[slot].name = 0; }
     GLuint n; p_glGenTextures(1, &n); p_glBindTexture(GL_TEXTURE_2D, n);
     p_glPixelStorei(GL_UNPACK_ALIGNMENT, 4);
-    p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, ti.w, ti.h, 0, GL_BGRA, GL_UNSIGNED_BYTE, ti.px);
+    uint8_t *rep = NULL; int rw = 0, rh = 0;
+    static const char *pack_seen; static int pack_ok;
+    if (dc_pvr_gl_tex_pack != pack_seen) {             /* only when the folder is there */
+        struct stat st; pack_seen = dc_pvr_gl_tex_pack;
+        pack_ok = pack_seen && stat(pack_seen, &st) == 0;
+        if (pack_ok) fprintf(stderr, "pvr_gl: texture pack %s\n", pack_seen);
+    }
+    if (dc_pvr_gl_tex_dump || pack_ok) {
+        uint64_t h = tex_hash(ti.px, ti.w, ti.h);
+        unsigned *fl = tex_flags(h);
+        if (dc_pvr_gl_tex_dump && !(*fl & 1)) { *fl |= 1; tex_dump(&ti, h); }
+        if (pack_ok) rep = tex_replacement(&ti, h, fl, &rw, &rh);
+    }
+    if (rep) { p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, rw, rh, 0, GL_RGBA, GL_UNSIGNED_BYTE, rep); stbi_image_free(rep); }
+    else p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, ti.w, ti.h, 0, GL_BGRA, GL_UNSIGNED_BYTE, ti.px);
     if (dc_pvr_gl_mipmaps) p_glGenerateMipmap(GL_TEXTURE_2D);
     gtex[slot].mips = dc_pvr_gl_mipmaps;
     gtex[slot].id = ti.id; gtex[slot].name = n; gtex[slot].last = frame_no;

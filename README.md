@@ -12,6 +12,7 @@ Nothing here contains game data. Every tool works on the player's own disc image
 | `tools/recomp/sh4recomp.py` | SH-4 → C static recompiler: full integer + FPU ISA (PR/SZ/FR modes, XMTRX, fsca/fipr/ftrv), delay slots, call-target discovery, in-function jump tables |
 | `runtime/` | CPU context, RAM/hardware access, dispatch table, HLE overrides, call hooks |
 | `tools/assets/pvr.py` | PowerVR2 texture decoder (twiddled, VQ, small VQ, rect, palettised, mipmaps) → PNG |
+| `tools/textures/upscale.py` | texture packs: upscales a port's texture dump with Real-ESRGAN (GPU program or CPU) — see below |
 | `tests/` | recompiler unit tests (hand-assembled SH-4), PVR round-trip tests |
 
 ## Recompiling a game
@@ -36,6 +37,30 @@ dc_hle_register(0x8C014D6A, my_native_sqrt);    // or replace one with your own 
 
 In CMake, `dccore_add_recomp(game BIN path/1ST_READ.BIN FUNCS funcs.txt)` builds the
 generated code as a static library.
+
+## Texture packs
+
+The GL renderer can replace any texture with a PNG of any size. Textures are named by a hash
+of their decoded pixels: `<hash>_<w>x<h>.png`.
+
+- `dc_pvr_gl_tex_dump = "dir"` saves every texture the game uploads into `dir`, once each
+  (ports: `--dump-textures`). Play through the parts of the game you want covered.
+- `dc_pvr_gl_tex_pack = "dir"` uploads `dir/<name>.png` in place of the texture of that name
+  (ports: a `textures` folder next to the program). Missing files fall back to the original.
+
+To make a pack, upscale the dump:
+
+```sh
+# GPU (fast): realesrgan-ncnn-vulkan from https://github.com/xinntao/Real-ESRGAN/releases
+python3 tools/textures/upscale.py textures_dump textures --exe path/to/realesrgan-ncnn-vulkan --models path/to/models
+# CPU (slow): pip install ncnn pillow numpy, models/ from the same release
+python3 tools/textures/upscale.py textures_dump textures --models path/to/models
+```
+
+Each texture is wrapped at its edges before upscaling so tiling stays seamless, and on/off
+alpha (cut-outs) stays on/off. Any PNG editor works for hand fixes: keep the file name.
+A pack is tied to the game's texture data, never to a dc-core version, as long as the
+texture decoder keeps decoding the same pixels.
 
 ## Status
 
