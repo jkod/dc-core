@@ -109,6 +109,11 @@ static void cdda_play(uint32_t start, uint32_t end, int repeat) {
     cdda.playing = end > start; cdda.paused = 0; cdda.pos = 588;
     TR("bios: cdda play lba %u..%u repeat %d\n", start, end, cdda.repeat);
 }
+/* for ports that drive CD audio themselves (Windows CE's CD-ROM device) */
+void dc_cdda_play(uint32_t start, uint32_t end, int repeat) { cdda_play(start, end, repeat); }
+void dc_cdda_pause(int on) { cdda.paused = on; }
+void dc_cdda_stop(void) { cdda.playing = 0; }
+int  dc_cdda_status(uint32_t *lba) { if (lba) *lba = cdda.cur; return cdda.playing ? (cdda.paused ? 2 : 1) : 0; }
 int dc_cdda_frame(int16_t *l, int16_t *r) {
     if (!cdda.playing || cdda.paused) return 0;
     if (cdda.pos >= 588) {

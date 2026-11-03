@@ -4,6 +4,7 @@
 #include "ce_int.h"
 #include "dccore/hw.h"
 #include "dccore/disc.h"
+#include "dccore/bios.h"
 #include <stdarg.h>
 #include <ctype.h>
 
@@ -12,6 +13,7 @@
 
 static void set_error(uint32_t e) { if (ce_cur) ce_cur->last_error = e; }
 static uint32_t wdm_proc(const char *name);
+static uint32_t cdrom_ioctl(sh4ctx *c);
 
 /* ------------------------------------------------------------------ calling guest code */
 uint32_t ce_call(uint32_t fn, int n, ...) {
@@ -511,6 +513,60 @@ FN(GetFileAttributesW) {
     if (dc_disc_find(p, &lba, &size)) RET(0xFFFFFFFFu);
     RET(0x01);                /* read only */
 }
+/* the GD-ROM drive's audio controls (NT CD-ROM IOCTLs) on dc-core's CD audio player */
+static uint32_t msf_lba(uint32_t m, uint32_t s, uint32_t f) { return (m * 60 + s) * 75 + f - 150; }
+static void lba_msf(uint32_t lba, uint32_t p) { uint32_t a = lba + 150; dc_wr8(p, 0); dc_wr8(p + 1, (uint8_t)(a / 4500)); dc_wr8(p + 2, (uint8_t)(a / 75 % 60)); dc_wr8(p + 3, (uint8_t)(a % 75)); }
+static uint32_t cdrom_ioctl(sh4ctx *c) {
+    uint32_t code = ARG(1), in = ARG(2), out = ARG(4), outsz = ARG(5), retp = ARG(6), ret = 0;
+    TRACE("CD-ROM ioctl %08X in %08X/%u out %08X/%u ovl %08X", code, in, ARG(3), out, outsz, ARG(7));
+    switch (code) {
+    case 0x00024000u: {           /* READ_TOC: CDROM_TOC { Length[2] BE, First, Last, TRACK_DATA[100] (8 bytes) } */
+        int n = dc_disc_track_count();
+        if (outsz < 4u + 8u * (uint32_t)(n + 1)) break;
+        uint32_t len = 2 + 8u * (uint32_t)(n + 1);
+        dc_wr8(out, (uint8_t)(len >> 8)); dc_wr8(out + 1, (uint8_t)len); dc_wr8(out + 2, 1); dc_wr8(out + 3, (uint8_t)n);
+        uint32_t end = 0;
+        for (int i = 0; i <= n; i++) {
+            uint32_t lba = 0, sec = 0, e = out + 4 + 8u * (uint32_t)i; int data = 0;
+            if (i < n) dc_disc_track_info(i, &lba, &data, &sec); else lba = end;
+            if (lba + sec > end) end = lba + sec;
+            dc_wr8(e, 0); dc_wr8(e + 1, (uint8_t)((data ? 4 : 0) << 4 | 1)); dc_wr8(e + 2, (uint8_t)(i < n ? i + 1 : 0xAA)); dc_wr8(e + 3, 0);
+            lba_msf(lba, e + 4);
+        }
+        ret = 4 + 8u * (uint32_t)(n + 1);
+        break;
+    }
+    case 0x00024018u:             /* PLAY_AUDIO_MSF { M S F (start), M S F (end) } */
+        TRACE("CD audio play %u:%u:%u .. %u:%u:%u", dc_rd8(in), dc_rd8(in + 1), dc_rd8(in + 2), dc_rd8(in + 3), dc_rd8(in + 4), dc_rd8(in + 5));
+        dc_cdda_play(msf_lba(dc_rd8(in), dc_rd8(in + 1), dc_rd8(in + 2)), msf_lba(dc_rd8(in + 3), dc_rd8(in + 4), dc_rd8(in + 5)), 0);
+        break;
+    case 0x00024004u: break;      /* SEEK_AUDIO_MSF */
+    case 0x00024008u: dc_cdda_stop(); break;
+    case 0x0002400Cu: dc_cdda_pause(1); break;
+    case 0x00024010u: dc_cdda_pause(0); break;
+    case 0x0002402Cu: {           /* READ_Q_CHANNEL: SUB_Q_CURRENT_POSITION */
+        uint32_t lba; int st = dc_cdda_status(&lba);
+        if (outsz < 16) break;
+        for (uint32_t i = 0; i < 16; i++) dc_wr8(out + i, 0);
+        dc_wr8(out + 1, st == 1 ? 0x11 : st == 2 ? 0x12 : 0x13);
+        dc_wr8(out + 3, 12); dc_wr8(out + 4, 1); dc_wr8(out + 5, 0x01);
+        int n = dc_disc_track_count();
+        for (int i = 0; i < n; i++) { uint32_t tl, ts; int d; dc_disc_track_info(i, &tl, &d, &ts); if (lba >= tl && lba < tl + ts) dc_wr8(out + 6, (uint8_t)(i + 1)); }
+        dc_wr8(out + 7, 1); lba_msf(lba, out + 8);
+        ret = 16;
+        break;
+    }
+    case 0x00024014u: case 0x00024028u: ret = 0; break;   /* GET/SET_VOLUME */
+    default:
+        TRACE("DeviceIoControl CD-ROM code %08X", code);
+    }
+    if (retp) dc_wr32(retp, ret);
+    if (ARG(7)) {                 /* OVERLAPPED { Internal, InternalHigh, Offset, OffsetHigh, hEvent }: done now */
+        dc_wr32(ARG(7), 0); dc_wr32(ARG(7) + 4, ret);
+        if (dc_rd32(ARG(7) + 16)) ce_signal(dc_rd32(ARG(7) + 16));
+    }
+    return 1;
+}
 FN(DeviceIoControl) {         /* (h, code, in, insize, out, outsize, &ret, ovl) */
     ce_obj *o = ce_handle(ARG(0));
     if (o && o->type == OB_FILE && o->max == 1) {
@@ -519,8 +575,8 @@ FN(DeviceIoControl) {         /* (h, code, in, insize, out, outsize, &ret, ovl) 
         if (ce_trace > 1) TRACE("DeviceIoControl %s code %08X -> %u", o->name, ARG(1), r);
         RET(r);
     }
+    if (o && o->type == OB_FILE && o->max == 2) RET(cdrom_ioctl(c));
     TRACE("DeviceIoControl %08X (%s) code %08X", ARG(0), o ? o->name : "?", ARG(1));
-    if (o && o->type == OB_FILE && o->max == 2) { if (ARG(6)) dc_wr32(ARG(6), 0); RET(1); }
     ce_unimpl("DeviceIoControl");
     RET(0);
 }

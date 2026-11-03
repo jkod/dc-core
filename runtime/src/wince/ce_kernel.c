@@ -510,9 +510,24 @@ void ce_irq_init(void) {
     dc_hle_register(CE_RESCHED, h_resched);
 }
 
+/* debugging: the threads and what they wait for (DC_CE_DUMP=1, at exit) */
+void ce_dump_threads(void) {
+    static const char *st[] = { "ready", "running", "waiting", "sleeping", "suspended", "dead" };
+    for (int i = 0; i < nthreads; i++) {
+        ce_thread *t = threads[i];
+        fprintf(stderr, "[ce] t%u prio %d %s start %08X pr %08X r15 %08X", t->id, t->prio, st[t->state], t->start, t->regs.pr, t->regs.r[15]);
+        for (int k = 0; k < t->nwait; k++) {
+            ce_obj *o = ce_handle(t->waits[k]);
+            fprintf(stderr, " wait %08X(%d %s sig %d)", t->waits[k], o ? o->type : -1, o ? o->name : "", o ? o->signaled : 0);
+        }
+        fputc('\n', stderr);
+    }
+}
+
 /* ------------------------------------------------------------------ process start */
 int ce_run_main(sh4ctx *c, uint32_t entry) {
     main_fiber = dc_fiber_current();
+    if (getenv("DC_CE_DUMP")) atexit(ce_dump_threads);
     ce_thread_create(entry, 0, 0x40000, 0);
     (void)c;
     schedule();
