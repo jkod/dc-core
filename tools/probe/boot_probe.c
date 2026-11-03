@@ -184,10 +184,29 @@ static void shot_check(uint64_t f) {
         if (*p == ',') p++; else break;
     }
 }
+static void press_check(uint64_t f);
 static int rendered;
-static void on_render_sw(void) { renders++; dc_pvr_sw_render(); rendered++; }
+/* DC_SHOT_LAZY=1: software-render only in the 8 vblanks before a shot (much faster long runs; effects that
+ * read back earlier renders, such as render-to-texture, can be missing from the pictures) */
+static int shot_soon(void) {
+    const char *p = getenv("DC_SHOT");
+    while (p && *p) {
+        unsigned long v = strtoul(p, (char **)&p, 10);
+        if (v >= cur_frame && v < cur_frame + 8) return 1;
+        if (*p == ',') p++; else break;
+    }
+    return 0;
+}
+static void on_render_sw(void) {
+    static int lazy = -1;
+    if (lazy < 0) lazy = getenv("DC_SHOT_LAZY") != NULL;
+    renders++;
+    if (lazy && !shot_soon()) return;
+    dc_pvr_sw_render(); rendered++;
+}
 static void on_vblank(uint64_t f) {
     cur_frame = f;
+    press_check(f);
     if (getenv("DC_SHOT")) shot_check(f);
     if (getenv("DC_PVRDBG") && (uint64_t)atoll(getenv("DC_PVRDBG")) == f) dc_pvr_sw_debug = 1;
     if (getenv("DC_HIGHLIGHT")) {   /* DC_HIGHLIGHT=frame: classes 1..4 on the following 4 renders */
@@ -207,6 +226,28 @@ static void on_vblank(uint64_t f) {
         if (v == f) { char b[64]; snprintf(b, sizeof b, "ramdump_f%05lu.bin", v); FILE *o = fopen(b, "wb"); if (o) { fwrite(dc_ram, 1, 0x1000000, o); fclose(o); } }
         if (*p == ',') p++; else break;
     }
+}
+/* DC_PRESS="field:buttons[:fields],...": hold Dreamcast buttons (DC_BTN_* mask, hex) on port A from that
+ * vblank on, for `fields` vblanks (default 10); like the player's DC_PRESS (bits 16/17 triggers, 18/19
+ * stick left/right), so menus can be driven headless */
+static void press_check(uint64_t f) {
+    const char *q = getenv("DC_PRESS");
+    if (!q) return;
+    uint16_t b = 0; uint8_t lt = 0, rt = 0, jx = 128;
+    while (*q) {
+        char *e; unsigned long at = strtoul(q, &e, 0), m = 0, d = 10; q = e;
+        if (*q == ':') { m = strtoul(q + 1, &e, 16); q = e; }
+        if (*q == ':') { d = strtoul(q + 1, &e, 0); q = e; }
+        if (f >= at && f < at + d) {
+            b |= (uint16_t)m;
+            if (m & (1ul << 16)) lt = 255;
+            if (m & (1ul << 17)) rt = 255;
+            if (m & (1ul << 18)) jx = 0;
+            if (m & (1ul << 19)) jx = 255;
+        }
+        if (*q == ',') q++; else break;
+    }
+    dc_pad[0].buttons = b; dc_pad[0].lt = lt; dc_pad[0].rt = rt; dc_pad[0].jx = jx; dc_pad[0].jy = 128;
 }
 static void trap(sh4ctx *c, uint32_t pc, const char *w) { printf("TRAP %s @%08X\n", w, pc); }
 static void alrm(int s) { report("timeout"); if (getenv("DC_HWSTATS")) hw_report(); _exit(0); }
@@ -244,6 +285,7 @@ int main(int argc, char **argv) {
     if (getenv("DC_CABLE")) dc_cable = atoi(getenv("DC_CABLE"));
     if (getenv("DC_GD_DMA_IRQ")) dc_gd_dma_irq = 1;   /* Tennis 2K2 */
     if (!getenv("DC_NOPAD")) dc_maple_install();   /* a standard controller on port A */
+    if (getenv("DC_VMU") && dc_vmu_attach(0, getenv("DC_VMU"))) fprintf(stderr, "cannot use VMU %s\n", getenv("DC_VMU"));
     if (getenv("DC_CALLCOST")) dc_call_cost = (uint32_t)atoi(getenv("DC_CALLCOST"));
     if (getenv("DC_FPS")) dc_hw.on_render = on_render_count;
     if (getenv("DC_SHOT")) { dc_pvr_sw_install(); dc_hw.on_render = on_render_sw; }   /* frame count for logs; DC_DUMP_FRAMES dumps */
