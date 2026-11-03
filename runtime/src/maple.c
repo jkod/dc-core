@@ -107,6 +107,11 @@ static int vmu_cmd(int port, int cmd, uint32_t send, int words, uint32_t recv, u
         return 1;
     }
     case CMD_GETMINFO: {
+        if (func == FUNC_LCD) {                               /* 48x32 dots - 1, one colour, no contrast levels */
+            uint32_t w[2] = { FUNC_LCD, 47u | 31u << 8 | 0x10u << 16 | 2u << 24 };
+            reply(recv, RE_DATA, src, me, w, 2);
+            return 1;
+        }
         if (func != FUNC_STORAGE) { reply(recv, RE_BADFUNC, src, me, NULL, 0); return 1; }
         uint32_t w[7] = { FUNC_STORAGE, 255u | 0u << 16, 255u | 254u << 16, 1u | 253u << 16, 13u | 0u << 16, 200u | 31u << 16, 0 };
         reply(recv, RE_DATA, src, me, w, 7);
