@@ -350,6 +350,7 @@ int dc_pvr_gl_widescreen;
 float dc_pvr_gl_aspect;                /* window width / height for the widescreen target (0 = 16:9) */
 float dc_pvr_gl_hud_z;
 float dc_pvr_gl_hud_zmax;
+int dc_pvr_gl_hud_exact;
 int dc_pvr_gl_clip_2d;
 static float disp_aspect = 4.f / 3.f;
 static float last_ww, last_rw, last_rh;   /* the last render's target width and picture size, console units */
@@ -781,7 +782,7 @@ static void hud_group(const pvr_frame *f, int RW, signed char *side) {
         int flat = 1, near = 1; float x0 = v[0].x, x1 = v[0].x, y0 = v[0].y, y1 = v[0].y;
         for (int k = 0; k < p->n; k++) {
             /* nearly flat (within 2% in 1/w) counts as flat: Space Race's map shadow tilts a little */
-            if (fabsf(v[k].z - v[0].z) > 0.02f * v[0].z) flat = 0;
+            if (dc_pvr_gl_hud_exact ? v[k].z != v[0].z : fabsf(v[k].z - v[0].z) > 0.02f * v[0].z) flat = 0;
             if (v[k].z < dc_pvr_gl_hud_z || (v[k].z >= hud_group_zmax && i >= hud_group_imin) || (dc_pvr_gl_hud_zmax > 0 && v[k].z >= dc_pvr_gl_hud_zmax)) near = 0;
             if (v[k].x < x0) x0 = v[k].x; if (v[k].x > x1) x1 = v[k].x;
             if (v[k].y < y0) y0 = v[k].y; if (v[k].y > y1) y1 = v[k].y;
@@ -789,7 +790,7 @@ static void hud_group(const pvr_frame *f, int RW, signed char *side) {
         if (!near) continue;
         /* small 3D HUD models (Rush's spinning coins) count; up to a fifth of the width: Space Race's
          * commentator frame grows past 15% as it slides out, and must keep moving with the portrait */
-        if (!flat && x1 - x0 > RW * 0.2f) continue;
+        if (!flat && (dc_pvr_gl_hud_exact || x1 - x0 > RW * 0.2f)) continue;
         if (x1 - x0 > RW * 0.9f) continue;                    /* full-width bars and fades stay */
         if (n == cap) { cap = cap ? cap * 2 : 1024; b = realloc(b, (size_t)cap * sizeof *b); }
         b[n].x0 = x0; b[n].y0 = y0; b[n].x1 = x1; b[n].y1 = y1; b[n].poly = i; b[n].parent = n; n++;

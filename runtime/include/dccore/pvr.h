@@ -52,6 +52,10 @@ extern float dc_pvr_gl_hud_z;
  * markers that follow the 3D scene but are drawn flat in front of it (Tennis 2K2's "1P" / "COM" at
  * 1/w 8 and 50, its HUD at 1.0 - 3.5) */
 extern float dc_pvr_gl_hud_zmax;
+/* widescreen HUD: only polygons with every vertex at exactly the same 1/w are HUD (no tolerance, no small
+ * 3D models). For games whose HUD is exactly flat while 3D models share its depth range (Jet Set Radio's
+ * title logo at 1/w 1.0 - 1.17, its HUD at 1.11 - 1.14 and 6.67) (default 0) */
+extern int dc_pvr_gl_hud_exact;
 /* widescreen: frames without a 3D scene reaching past the 4:3 picture (2D menus) are cut to the 4:3
  * picture, so the side bars replace what the game draws beyond its edges (default 0) */
 extern int dc_pvr_gl_clip_2d;
