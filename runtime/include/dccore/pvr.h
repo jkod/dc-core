@@ -26,7 +26,8 @@ void dc_pvr_gl_read(uint8_t *rgb, int *w, int *h);
 void dc_pvr_gl_read_window(uint8_t *rgb, int win_w, int win_h);   /* the presented window (before swapping), RGB8 */
 extern int dc_pvr_gl_fill_lines;    /* show only the lines the game draws, filling the window height (default 1) */
 extern int dc_pvr_gl_side_fill;     /* widescreen: fill empty side bars with the picture's edge colour (default 1) */
-extern int dc_pvr_gl_letterbox_4_3;  /* widescreen: frames with cut-scene letterbox bars are shown at 4:3, black sides (default 1) */
+extern int dc_pvr_gl_letterbox_4_3;  /* widescreen: frames with cut-scene letterbox bars are shown at 4:3, black sides (default 1);
+                                      * 0: shown wide like the rest, the bars stretched across the full width */
 extern int dc_pvr_gl_tile_clamp;     /* big screen-parallel textured pieces with UVs in 0..1 sample clamped to their UV range: no seams between 2D background tiles when scaled up (default 1) */
 extern int dc_pvr_gl_keep_outside;    /* a render of under 3/4 of the lines into a buffer rendered whole before keeps that picture outside its clip, as on the console (default 1) */
 extern int dc_pvr_gl_letterbox_zoom;  /* widescreen: with dc_pvr_gl_letterbox_4_3, the picture between the bars is cropped to the window's shape and fills it (default 0) */

@@ -426,6 +426,39 @@ static void push(const pvr_vtx *v) {
         g->v = 1.f - g->y / cap[cap_uv].rh;
     }
 }
+/* Triangles reaching outside the render target are clipped to it here, not by the GPU. Games send
+ * polygons that cross the camera plane with 1/w clamped and screen positions far off screen (Jet Set
+ * Radio's road and crosswalk near the camera: 1/w 1.0 at x 38000, y 7700). The GPU's own clipping of
+ * those gave the interpolated 1/w a wrong slope (26% too steep on llvmpipe), so the road won the depth
+ * test against the crosswalk painted on it and the crosswalk's near stripes vanished in some frames.
+ * Clipping here is exact: x, y, 1/w and every value premultiplied by 1/w are linear in screen space,
+ * which is how the shaders interpolate them. Bounds are in console units (the target spans
+ * [-(WW - RW) / 2, RW + (WW - RW) / 2] x [0, RH]), one unit of margin. */
+static float tgt_x0 = -1e30f, tgt_y0 = -1e30f, tgt_x1 = 1e30f, tgt_y1 = 1e30f;
+static pvr_vtx clip_lerp(const pvr_vtx *a, const pvr_vtx *b, float t) {
+    pvr_vtx r;
+    float za = a->z * (1.f - t), zb = b->z * t, z = za + zb;
+    float ia = z > 0 ? za / z : 1.f - t, ib = z > 0 ? zb / z : t;     /* weights of the attributes themselves */
+    r.x = a->x + (b->x - a->x) * t; r.y = a->y + (b->y - a->y) * t; r.z = z;
+    r.u = a->u * ia + b->u * ib; r.v = a->v * ia + b->v * ib; r.u1 = a->u1 * ia + b->u1 * ib; r.v1 = a->v1 * ia + b->v1 * ib;
+    for (int k = 0; k < 4; k++) {
+        r.c[k] = a->c[k] * ia + b->c[k] * ib; r.o[k] = a->o[k] * ia + b->o[k] * ib;
+        r.c1[k] = a->c1[k] * ia + b->c1[k] * ib; r.o1[k] = a->o1[k] * ia + b->o1[k] * ib;
+    }
+    return r;
+}
+/* Sutherland-Hodgman against one edge: keeps x (axis 0) or y (axis 1) >= lim, or <= lim with below */
+static int clip_edge(const pvr_vtx *in, int n, pvr_vtx *out, int axis, float lim, int below) {
+    int m = 0;
+    for (int i = 0; i < n; i++) {
+        const pvr_vtx *a = &in[i], *b = &in[(i + 1) % n];
+        float da = (axis ? a->y : a->x) - lim, db = (axis ? b->y : b->x) - lim;
+        if (below) { da = -da; db = -db; }
+        if (da >= 0) out[m++] = *a;
+        if ((da >= 0) != (db >= 0)) out[m++] = clip_lerp(a, b, da / (da - db));
+    }
+    return m;
+}
 /* triangle with the PVR's culling (sign of the screen area; odd strip triangles are flipped) */
 static void tri(const pvr_poly *p, const pvr_vtx *a, const pvr_vtx *b, const pvr_vtx *c, int flip, float cull_small) {
     float area = (b->x - a->x) * (c->y - a->y) - (b->y - a->y) * (c->x - a->x);
@@ -435,7 +468,21 @@ static void tri(const pvr_poly *p, const pvr_vtx *a, const pvr_vtx *b, const pvr
     if (cull == 1 && fabsf(area) < cull_small) return;
     if (cull == 2 && sarea < 0) return;
     if (cull == 3 && sarea > 0) return;
-    push(a); push(b); push(c);
+    /* the bounds where the triangle lands after push() shifts it (HUD and split-screen moves); full-screen
+     * quads stretched to the edges or showing a capture are placed by their corners: left alone */
+    float x0 = tgt_x0 - push_dx, x1 = tgt_x1 - push_dx;
+    if (push_wide > 0 || cap_uv >= 0 ||
+        (a->x >= x0 && a->x <= x1 && b->x >= x0 && b->x <= x1 && c->x >= x0 && c->x <= x1 &&
+         a->y >= tgt_y0 && a->y <= tgt_y1 && b->y >= tgt_y0 && b->y <= tgt_y1 && c->y >= tgt_y0 && c->y <= tgt_y1)) {
+        push(a); push(b); push(c); return;
+    }
+    pvr_vtx p0[9], p1[9]; int n;
+    p0[0] = *a; p0[1] = *b; p0[2] = *c;
+    if ((n = clip_edge(p0, 3, p1, 0, x0, 0)) < 3) return;
+    if ((n = clip_edge(p1, n, p0, 0, x1, 1)) < 3) return;
+    if ((n = clip_edge(p0, n, p1, 1, tgt_y0, 0)) < 3) return;
+    if ((n = clip_edge(p1, n, p0, 1, tgt_y1, 1)) < 3) return;
+    for (int k = 1; k + 1 < n; k++) { push(&p0[0]); push(&p0[k]); push(&p0[k + 1]); }   /* same winding */
 }
 
 static unsigned char *poly_hud; static const pvr_poly *poly_base;
@@ -1098,6 +1145,8 @@ void dc_pvr_gl_render(int scale) {
             }
         if (r0 < 1e29f && p1 > -1e29f) panel_dx = r0 + view_dx + side_dx - 8.f - p1;   /* map right edge 8 px left of the HUD */
     }
+    /* the render target in console units (see tri) */
+    { float o = (WW - (float)RW) * 0.5f + 1.f; tgt_x0 = -o; tgt_x1 = (float)RW + o; tgt_y0 = -1.f; tgt_y1 = (float)RH + 1.f; }
     for (int i = 0; i < f.npolys; i++) {
         const pvr_poly *p = &f.polys[i];
         const pvr_vtx *v = f.verts + p->first;
@@ -1125,6 +1174,10 @@ void dc_pvr_gl_render(int scale) {
             else if (flat && v[0].z >= dc_pvr_gl_hud_z && dc_pvr_gl_hud_z > 0) push_dx = view_dx + out * side_dx;   /* the views' HUD (drawn unclipped) */
         }
         if (poly_cap[i]) { push_dx = 0; push_wide = WW; push_rw = (float)RW; cap_uv = poly_cap[i] - 1; }
+        /* letterboxed scenes shown wide (dc_pvr_gl_letterbox_4_3 off): the game's bars stop at the 4:3
+         * edges, so they are stretched across the full width (Jet Set Radio's tutorial and cut-scenes) */
+        else if (dc_pvr_gl_widescreen && !dc_pvr_gl_letterbox_4_3 && WW > (float)RW + 1.f && letterbox_bar(p, v, RW, f.height))
+            { push_dx = 0; push_wide = WW; push_rw = (float)RW; }
         spans[i].first = nverts;
         if (p->sprite) { tri(p, &v[0], &v[1], &v[2], 0, cull_small); tri(p, &v[0], &v[2], &v[3], 0, cull_small); }
         else for (int k = 0; k + 2 < p->n; k++) tri(p, &v[k], &v[k + 1], &v[k + 2], k & 1, cull_small);
