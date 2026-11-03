@@ -864,12 +864,15 @@ static void hud_group(const pvr_frame *f, int RW, signed char *side) {
         if (n == cap) { cap = cap ? cap * 2 : 1024; b = realloc(b, (size_t)cap * sizeof *b); }
         b[n].x0 = x0; b[n].y0 = y0; b[n].x1 = x1; b[n].y1 = y1; b[n].poly = i; b[n].parent = n; n++;
     }
-    /* in the console's pixels: anything within 6 joins; in the same row (vertical overlap) within
-     * 32, so a menu line's labels and values move or stay together (Rush's "PLAYERS 1 2 3 4") */
+    /* in the console's pixels: anything within 6 joins; in the same row (vertical overlap, pieces of
+     * a similar height) within 32, so a menu line's labels and values move or stay together (Rush's
+     * "PLAYERS 1 2 3 4"), but a tall HUD piece beside a centred line of text does not pull that line
+     * aside (Re-Volt's position arrow next to "PRESS START BUTTON TO CONTINUE") */
     const float gap = 6.f, row_gap = 32.f;
     for (int i = 0; i < n; i++)
         for (int j = i + 1; j < n; j++) {
-            int same_row = b[i].y0 < b[j].y1 && b[j].y0 < b[i].y1;
+            float hi = b[i].y1 - b[i].y0, hj = b[j].y1 - b[j].y0;
+            int same_row = b[i].y0 < b[j].y1 && b[j].y0 < b[i].y1 && hi < hj * 2.5f && hj < hi * 2.5f;
             float gx = same_row ? row_gap : gap;
             if (b[i].x0 > b[j].x1 + gx || b[j].x0 > b[i].x1 + gx) continue;
             if (b[i].y0 > b[j].y1 + gap || b[j].y0 > b[i].y1 + gap) continue;
