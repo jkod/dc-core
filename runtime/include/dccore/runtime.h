@@ -34,7 +34,8 @@ void  dc_set_miss_handler(dc_miss_fn f);
 void  dc_set_trap_handler(dc_trap_fn f);
 void  dc_set_call_hook(dc_call_hook f);          /* sees every dc_call (tracing/profiling) */
 void  dc_set_hw(const dc_hw_ops *ops);
-extern uint32_t dc_call_cost;
+extern uint32_t dc_call_cost;           /* SH-4 cycles charged per call (default 40) */
+extern uint32_t dc_loop_cost;           /* ... per backward branch (default 16); lower both to give a game more CPU time */
 /* Interpreter fallback: an address with no recompiled code is interpreted instead of reaching the
  * miss handler (which then only sees jumps into data). dc_interp_all interprets everything but
  * HLE functions (env DC_INTERP_ALL=1, for checking the recompiler); DC_INTERP=0 turns it off.

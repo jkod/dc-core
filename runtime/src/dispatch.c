@@ -10,6 +10,7 @@ extern const size_t dc_fn_count;
 
 uint8_t *dc_ram;
 uint32_t dc_call_cost = 40;   /* SH-4 cycles charged per call/jump through the dispatcher */
+uint32_t dc_loop_cost = 16;   /* ... and per backward branch (a loop iteration) */
 sh4ctx *dc_current_ctx;
 const float *dc_fsca_table;
 

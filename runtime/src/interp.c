@@ -327,7 +327,7 @@ uint32_t dc_interp(sh4ctx *c, uint32_t pc) {
             continue;
         }
         /* jumps */
-        if (t <= pc) DC_TICK(c, 16);                             /* loop: let time pass / interrupts in */
+        if (t <= pc) DC_TICK(c, dc_loop_cost);                           /* loop: let time pass / interrupts in */
         if (leave_to(t)) return t;
         pc = t;
     }

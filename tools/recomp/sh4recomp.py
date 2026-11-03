@@ -401,7 +401,7 @@ class Translator:
     def goto_or_call(self, t, start, end, here=None):
         if start <= t < end and (t & 1) == 0:
             if here is not None and t <= here:          # loop: let time pass / interrupts in
-                return "{ DC_TICK(c, 16); goto L_%08X; }" % t
+                return "{ DC_TICK(c, dc_loop_cost); goto L_%08X; }" % t
             return "goto L_%08X;" % t
         return "return %s;" % h(t)
 

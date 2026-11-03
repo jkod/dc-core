@@ -120,6 +120,7 @@ static inline void sh4_set_sr(sh4ctx *c, uint32_t v) {
  * interrupt by calling the game's handler at VBR+0x600. */
 extern uint64_t dc_next_event;
 void dc_events(struct sh4ctx *c);
+extern uint32_t dc_loop_cost;      /* cycles charged per backward branch (default 16); dc_call_cost per call */
 #define DC_TICK(c, n) do { (c)->cycles += (n); if ((c)->cycles >= dc_next_event) dc_events(c); } while (0)
 static inline void sh4_swap_fbank(sh4ctx *c) {
     uint32_t tmp[16];
