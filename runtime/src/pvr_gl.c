@@ -1276,7 +1276,7 @@ void dc_pvr_gl_render(int scale) {
     p_glUniform1f(U.offx, (WW - (float)RW) * 0.5f);
     p_glUniform1i(U.tex, 0); p_glUniform1i(U.quad, 0); p_glUniform1i(U.hud, 0);
     p_glUniform1f(U.pt_ref, (dc_pvr_reg(0x11C) & 255) / 255.f);
-    { uint32_t fr = dc_pvr_reg(0x0B0), fv = dc_pvr_reg(0x0AC), den = dc_pvr_reg(0x0B4);
+    { uint32_t fr = dc_pvr_reg(0x0B0), fv = dc_pvr_reg(0x0B4), den = dc_pvr_reg(0x0B8);   /* FOG_COL_RAM, FOG_COL_VERT, FOG_DENSITY */
       p_glUniform3f(U.fog_ram, ((fr >> 16) & 255) / 255.f, ((fr >> 8) & 255) / 255.f, (fr & 255) / 255.f);
       p_glUniform3f(U.fog_vert, ((fv >> 16) & 255) / 255.f, ((fv >> 8) & 255) / 255.f, (fv & 255) / 255.f);
       p_glUniform1f(U.fog_den, ((den >> 8) & 255) / 128.f * ldexpf(1.f, (int8_t)(den & 255)));

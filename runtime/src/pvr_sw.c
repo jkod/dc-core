@@ -408,7 +408,7 @@ static int hscale;                     /* SCALER_CTL horizontal: scene is twice 
 /* fog table: FOG_DENSITY scales 1/w; the exponent and top mantissa bits of the result pick one of
  * 128 entries, the next mantissa bits blend its two halves (as the PVR does) */
 static float fog_table(float invw) {
-    uint32_t den = REG(0x0B4);
+    uint32_t den = REG(0x0B8);                       /* FOG_DENSITY */
     float mant = ((den >> 8) & 255) / 128.f;
     int ex = (int8_t)(den & 255);
     float fw = mant * ldexpf(1.f, ex) * invw;
@@ -454,7 +454,7 @@ static void shade(const poly *p, int set, const vtx *a, const vtx *b, const vtx 
     if (ofs) for (int k = 0; k < 3; k++) { out[k] += off[k]; if (out[k] > 1) out[k] = 1; }
     if (fogm != 2) {                                  /* 0 table, 1 vertex (offset alpha), 3 table mode 2 */
         float fc[3], f;
-        if (fogm == 1) { unpack_rgb(REG(0x0AC), fc); f = off[3]; }
+        if (fogm == 1) { unpack_rgb(REG(0x0B4), fc); f = off[3]; }
         else { unpack_rgb(REG(0x0B0), fc); f = fog_table(z); }
         if (fogm == 3) { for (int k = 0; k < 3; k++) out[k] = fc[k]; out[3] = f; }
         else for (int k = 0; k < 3; k++) out[k] = out[k] * (1 - f) + fc[k] * f;
