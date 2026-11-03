@@ -1119,7 +1119,12 @@ void dc_pvr_gl_render(int scale) {
                 int y0 = f.polys[i].uy0 > f.clip_y0 ? f.polys[i].uy0 : f.clip_y0, y1 = f.polys[i].uy1 < f.clip_y1 + 1 ? f.polys[i].uy1 : f.clip_y1 + 1;
                 if (y1 > y0 && (y1 - y0 < (f.clip_y1 - f.clip_y0 + 1) * 3 / 4 || f.polys[i].ux1 - f.polys[i].ux0 < f.width * 3 / 4)) split = 1;
             }
-        if (n3d >= 50 && wide3d && !split) hud_dx = (WW - (float)RW) * 0.5f;
+        /* a letterboxed scene (a cut-scene shown wide): its text is subtitles, laid out for the picture,
+         * not HUD. Jet Set Radio types its lines out: a short line sat in the left third and was pushed to
+         * the edge, then jumped back once it grew past the middle */
+        int bars = 0;
+        for (int i = 0; i < f.npolys && !bars; i++) bars = letterbox_bar(&f.polys[i], f.verts + f.polys[i].first, RW, f.height);
+        if (n3d >= 50 && wide3d && !split && !bars) hud_dx = (WW - (float)RW) * 0.5f;
     }
     /* HUD pieces are grouped first (pieces that touch or nearly touch: the letters of a line, the
      * parts of a panel), then each group moves as a whole by where its centre is, so centred text
