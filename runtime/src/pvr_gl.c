@@ -487,6 +487,10 @@ static void tri(const pvr_poly *p, const pvr_vtx *a, const pvr_vtx *b, const pvr
 }
 
 static unsigned char *poly_hud; static const pvr_poly *poly_base;
+/* per polygon: bit 0 (bit 1 for the second parameter set) when its UVs stay within one copy of the
+ * texture (0..1): it samples clamped to the texture's edge, so bilinear filtering at a border doesn't
+ * read the opposite side (a seam where two textures meet: Space Race's start banner) */
+static unsigned char *poly_edge;
 static void set_poly_state(const pvr_poly *p, int set) {
     uint32_t tsp = set ? p->tsp1 : p->tsp, tcw = set ? p->tcw1 : p->tcw;
     int tex = (p->isp >> 25) & 1;
@@ -510,6 +514,9 @@ static void set_poly_state(const pvr_poly *p, int set) {
         int cu = (tsp >> 16) & 1, cv = (tsp >> 15) & 1, fu = (tsp >> 18) & 1, fv = (tsp >> 17) & 1;
         p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, cu ? GL_CLAMP_TO_EDGE : fu ? GL_MIRRORED_REPEAT : GL_REPEAT);
         p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, cv ? GL_CLAMP_TO_EDGE : fv ? GL_MIRRORED_REPEAT : GL_REPEAT);
+        if (poly_edge && poly_base && ((poly_edge[p - poly_base] >> set) & 1)) {
+            p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        }
         }
     }
     static const GLenum depth_fn[8] = { GL_NEVER, 0x0201, GL_EQUAL, 0x0203, 0x0204, 0x0205, GL_GEQUAL, GL_ALWAYS };
@@ -539,7 +546,7 @@ static int cmp_sort(const void *a, const void *b) {
 
 /* Draw batching: consecutive polygons with the same render state go out in one call (menus can
  * have thousands of small polygons, and per-call overhead dominates). Draw order is unchanged. */
-typedef struct { uint32_t isp, tsp, tcw; int list, set, mark, blend, uclip, ux0, uy0, ux1, uy1, hud; float ub[4]; int cap; } bkey;
+typedef struct { uint32_t isp, tsp, tcw; int list, set, mark, blend, uclip, ux0, uy0, ux1, uy1, hud; float ub[4]; int cap, edge; } bkey;
 /* HUD polygons (flat, at or above dc_pvr_gl_hud_z) get the sharper texture filter */
 int dc_pvr_gl_hud_sharp = 1;
 int dc_pvr_gl_hud_move = 1;
@@ -584,7 +591,8 @@ static void batch_add(const pvr_poly *p, int set, int mark, int blend, int first
     if (!count) return;
     bkey k = { p->isp, set ? p->tsp1 : p->tsp, set ? p->tcw1 : p->tcw, p->list, set, mark, blend,
                p->uclip, p->uclip ? p->ux0 : 0, p->uclip ? p->uy0 : 0, p->uclip ? p->ux1 : 0, p->uclip ? p->uy1 : 0,
-               ((p->tsp >> 13) & 3) ? is_hud(p) : (is_hud(p) & 2), {0, 0, 0, 0}, poly_cap && poly_base ? poly_cap[p - poly_base] : 0 }; /* bicubic for bilinear-filtered HUD textures only */
+               ((p->tsp >> 13) & 3) ? is_hud(p) : (is_hud(p) & 2), {0, 0, 0, 0}, poly_cap && poly_base ? poly_cap[p - poly_base] : 0,
+               poly_edge && poly_base ? (poly_edge[p - poly_base] >> set) & 1 : 0 }; /* bicubic for bilinear-filtered HUD textures only */
     if (k.hud & 2) memcpy(k.ub, poly_uvbox[p - poly_base], sizeof k.ub);
     if (!B.valid || memcmp(&k, &B.key, sizeof k)) {
         batch_flush();
@@ -910,7 +918,7 @@ void dc_pvr_gl_render(int scale) {
     int RW = f.width * (f.hscale ? 2 : 1), RH = f.height;
     last_rw = (float)RW; last_rh = (float)RH;
     {   static int cap_hud;
-        if (f.npolys > cap_hud) { cap_hud = f.npolys + 1024; poly_hud = realloc(poly_hud, (size_t)cap_hud); poly_uvbox = realloc(poly_uvbox, (size_t)cap_hud * sizeof *poly_uvbox); poly_cap = realloc(poly_cap, (size_t)cap_hud); }
+        if (f.npolys > cap_hud) { cap_hud = f.npolys + 1024; poly_hud = realloc(poly_hud, (size_t)cap_hud); poly_uvbox = realloc(poly_uvbox, (size_t)cap_hud * sizeof *poly_uvbox); poly_cap = realloc(poly_cap, (size_t)cap_hud); poly_edge = realloc(poly_edge, (size_t)cap_hud); }
         poly_base = f.polys;
         for (int i = 0; i < f.npolys; i++) {
             const pvr_poly *p = &f.polys[i]; const pvr_vtx *v = f.verts + p->first;
@@ -940,6 +948,12 @@ void dc_pvr_gl_render(int scale) {
                 if (v[k].u > ub[2]) ub[2] = v[k].u; if (v[k].v > ub[3]) ub[3] = v[k].v;
             }
             poly_hud[i] = (unsigned char)((flat && dc_pvr_gl_hud_sharp ? 1 : 0) | (one ? 2 : 0));
+            int e0 = dc_pvr_gl_tile_clamp && p->n >= 3 && ((p->isp >> 25) & 1), e1 = e0 && p->twovol;
+            for (int k = 0; k < p->n && (e0 || e1); k++) {
+                if (v[k].u < -0.001f || v[k].u > 1.001f || v[k].v < -0.001f || v[k].v > 1.001f) e0 = 0;
+                if (v[k].u1 < -0.001f || v[k].u1 > 1.001f || v[k].v1 < -0.001f || v[k].v1 > 1.001f) e1 = 0;
+            }
+            poly_edge[i] = (unsigned char)(e0 | (e1 << 1));
         }
     }
     /* widescreen: a target as wide as the window (16:9 until the frontend reports its shape) with the
