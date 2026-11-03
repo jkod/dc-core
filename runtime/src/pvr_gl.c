@@ -1224,18 +1224,35 @@ void dc_pvr_gl_render(int scale) {
         p_glColorMask(0, 0, 0, 0); p_glDepthMask(0);
         p_glUniform1i(U.textured, 0); p_glUniform1i(U.fog, 2); p_glUniform1i(U.pt, 0); p_glUniform1i(U.set, 0);
         int any = 0;
+        /* the parity bit changes only under the volume's triangles: resolving and clearing it is limited
+         * to their bounding box. Soulcalibur's shadows are hundreds of one-triangle volumes per frame, and
+         * two full-screen passes for each of them left the GPU fill-bound in fights. */
+        float bx0 = 1e30f, bx1 = -1e30f, by0 = 1e30f, by1 = -1e30f, kx = (float)fb_w / WW, ky = (float)fb_h / (float)RH;
         for (int i = 0; i < f.nmods; i++) {
             const pvr_modtri *m = &f.mods[i];
             if (m->list != 1) continue;
             p_glEnable(GL_DEPTH_TEST); p_glDepthFunc(GL_GEQUAL);
             p_glStencilMask(1); p_glStencilFunc(GL_ALWAYS, 0, 0xFF); p_glStencilOp(GL_KEEP, GL_KEEP, GL_INVERT);
             p_glDrawArrays(GL_TRIANGLES, mod_first + i * 3, 3);
+            for (int k = 0; k < 3; k++) {
+                if (m->x[k] < bx0) bx0 = m->x[k]; if (m->x[k] > bx1) bx1 = m->x[k];
+                if (m->y[k] < by0) by0 = m->y[k]; if (m->y[k] > by1) by1 = m->y[k];
+            }
             if (m->inst == 1 || m->inst == 2) {            /* volume closed: parity -> bit 2, clear parity */
+                {   /* GL pixels of the box (rows go up), a pixel of margin, inside the render's own scissor */
+                    float fx0 = (bx0 + sc_off) * kx - 1.f, fx1 = (bx1 + sc_off) * kx + 2.f;
+                    float fy0 = (float)fb_h - by1 * ky - 1.f, fy1 = (float)fb_h - by0 * ky + 2.f;
+                    int x0 = fx0 < (float)sc_x ? sc_x : (int)fx0, x1 = fx1 > (float)(sc_x + sc_w) ? sc_x + sc_w : (int)fx1;
+                    int y0 = fy0 < (float)sc_y ? sc_y : (int)fy0, y1 = fy1 > (float)(sc_y + sc_h) ? sc_y + sc_h : (int)fy1;
+                    scissor(x0, y0, x1 - x0, y1 - y0);
+                    bx0 = by0 = 1e30f; bx1 = by1 = -1e30f;
+                }
                 p_glDisable(GL_DEPTH_TEST);
                 p_glStencilMask(4); p_glStencilFunc(GL_EQUAL, 4 | (m->inst == 1 ? 1 : 0), 1); p_glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE);
                 draw_quad(0, 0, 0, 0);
                 p_glStencilMask(1); p_glStencilFunc(GL_ALWAYS, 0, 0xFF); p_glStencilOp(GL_ZERO, GL_ZERO, GL_ZERO);
                 draw_quad(0, 0, 0, 0);
+                scissor(sc_x, sc_y, sc_w, sc_h);           /* the next volume's triangles: the whole render */
                 any = 1;
             }
         }
