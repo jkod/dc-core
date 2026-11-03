@@ -224,7 +224,7 @@ static void sink(int kind, int list, const uint32_t *w, int words) {
 }
 
 /* ------------------------------------------------------------------ textures */
-typedef struct { uint32_t tcw, tsp_size, pal_gen, gen, start, end; int w, h; uint32_t *px; uint64_t id; } tex_t;
+typedef struct { uint32_t tcw, tsp_size, pal_gen, pal_hash, gen, start, end; int w, h; uint32_t *px; uint64_t id; } tex_t;
 #define TEX_CACHE 512
 static tex_t tcache[TEX_CACHE];
 static int ntc;
@@ -239,6 +239,16 @@ static uint32_t conv16(int fmt, uint16_t p) { return fmt == 1 ? rgb565(p) : fmt 
 static uint32_t palette(uint32_t i) {
     uint32_t e = REG(0x1000 + (i & 1023) * 4), mode = REG(0x108) & 3;
     return mode == 0 ? argb1555((uint16_t)e) : mode == 1 ? rgb565((uint16_t)e) : mode == 2 ? argb4444((uint16_t)e) : e;
+}
+/* the palette entries a paletted texture uses (16 for 4 bpp, 256 for 8 bpp) and the palette format,
+ * hashed: palette RAM writes bump one global generation, and games that rewrite palettes every frame
+ * (Soulcalibur) would otherwise make every paletted texture decode and upload again each frame */
+static uint32_t pal_hash(uint32_t tcw) {
+    int fmt = (tcw >> 27) & 7;
+    uint32_t base = fmt == 5 ? ((tcw >> 21) & 63) << 4 : ((tcw >> 25) & 3) << 8, n = fmt == 5 ? 16 : 256;
+    uint32_t h = 2166136261u ^ (REG(0x108) & 3);
+    for (uint32_t i = 0; i < n; i++) { h ^= REG(0x1000 + ((base + i) & 1023) * 4); h *= 16777619u; }
+    return h;
 }
 static uint32_t yuv_px(int y, int u, int v) {
     float r = y + 1.375f * (v - 128), g = y - 0.34375f * (u - 128) - 0.6875f * (v - 128), b = y + 1.71875f * (u - 128);
@@ -269,7 +279,10 @@ static tex_t *get_tex(uint32_t tcw, uint32_t tsp) {
     for (int i = 0; i < ntc; i++) {
         tex_t *c = &tcache[i];
         if (c->tcw != tcw || c->tsp_size != sz) continue;
-        if (page_gen(c->start, c->end) == c->gen && (!palfmt || c->pal_gen == dc_pal_gen)) return c;
+        if (page_gen(c->start, c->end) == c->gen) {
+            if (!palfmt || c->pal_gen == dc_pal_gen) return c;
+            if (pal_hash(tcw) == c->pal_hash) { c->pal_gen = dc_pal_gen; return c; }   /* its own entries unchanged */
+        }
         free(c->px); *c = tcache[--ntc];                     /* stale: decode again */
         break;
     }
@@ -284,7 +297,7 @@ static tex_t *get_tex(uint32_t tcw, uint32_t tsp) {
     int pitch = w;                                           /* texels per row in memory */
     if (linear && stride) { pitch = (int)(REG(0x0E4) & 31) * 32; if (pitch <= 0) pitch = w; }
     if (mip) h = w;                                          /* mip-mapped textures are square */
-    t->tcw = tcw; t->tsp_size = sz; t->pal_gen = dc_pal_gen; t->w = w; t->h = h; t->id = ++tex_ids;
+    t->tcw = tcw; t->tsp_size = sz; t->pal_gen = dc_pal_gen; t->pal_hash = palfmt ? pal_hash(tcw) : 0; t->w = w; t->h = h; t->id = ++tex_ids;
     t->px = malloc((size_t)w * h * 4);
     int lw = 0; while ((1 << lw) < w) lw++;
     uint32_t cb = addr;                                      /* VQ codebook: always at the texture address */
