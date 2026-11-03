@@ -670,7 +670,7 @@ int dc_pvr_gl_tile_clamp = 1;
 int dc_pvr_gl_letterbox_zoom;
 int dc_pvr_gl_show_4_3;
 static GLuint bar_prog, edge_tex[2], edge_fbo[2];
-static GLint bar_x0, bar_x1, bar_tex;
+static GLint bar_x0, bar_x1, bar_tex, bar_flat, bar_col;
 static const char *bar_vs =
 "#version 330 core\n"
 "layout(location=0) in vec3 a_pos;\n"
@@ -678,8 +678,11 @@ static const char *bar_vs =
 "void main() { float t = (a_pos.x + 1.0) * 0.5; gl_Position = vec4(mix(u_x0, u_x1, t), a_pos.y, 0.0, 1.0); v_y = (a_pos.y + 1.0) * 0.5; }\n";
 static const char *bar_fs =
 "#version 330 core\n"
-"in float v_y; uniform sampler2D u_tex; out vec4 o_col;\n"
+"in float v_y; uniform sampler2D u_tex; uniform int u_flat; uniform vec3 u_col; out vec4 o_col;\n"
 "void main() {\n"
+/* an edge of one flat colour (the white of Tecmo's logo screen, a plain backdrop) continues as
+ * exactly that colour, so the bars don't show */
+"  if (u_flat != 0) { o_col = vec4(u_col, 1.0); return; }\n"
 
 "  vec3 c = textureLod(u_tex, vec2(0.5, v_y), 3.0).rgb;\n"
 "  float l = max(c.r, max(c.g, c.b));\n"
@@ -699,6 +702,7 @@ static void bars_init(void) {
     if (!ok) { bar_prog = 0; return; }
     bar_x0 = p_glGetUniformLocation(bar_prog, "u_x0"); bar_x1 = p_glGetUniformLocation(bar_prog, "u_x1");
     bar_tex = p_glGetUniformLocation(bar_prog, "u_tex");
+    bar_flat = p_glGetUniformLocation(bar_prog, "u_flat"); bar_col = p_glGetUniformLocation(bar_prog, "u_col");
     for (int i = 0; i < 2; i++) {
         p_glGenTextures(1, &edge_tex[i]); p_glBindTexture(GL_TEXTURE_2D, edge_tex[i]);
         p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, EDGE_W, EDGE_H, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
@@ -715,11 +719,21 @@ static void draw_bars(int px0, int px1, int y0, int y1, int left, int right) {
     if (!bar_prog || px0 <= 0 || y1 <= y0) return;
     if (px1 >= fb_w || px1 - px0 < 8) return;
     int strip = (px1 - px0) / 40 > 2 ? (px1 - px0) / 40 : 2;
+    int flat[2] = { 0, 0 }; float col[2][3] = { { 0 } };
     for (int i = 0; i < 2; i++) {
         int sx = i ? px1 - 1 - strip : px0 + 1;         /* inside the picture, past its (often dark) edge pixel */
         p_glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo); p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, edge_fbo[i]);
         p_glBlitFramebuffer(sx, y0, sx + strip, y1, 0, 0, EDGE_W, EDGE_H, GL_COLOR_BUFFER_BIT, GL_LINEAR);
         p_glBindTexture(GL_TEXTURE_2D, edge_tex[i]); p_glGenerateMipmap(GL_TEXTURE_2D);
+        /* one flat colour down the whole edge (every texel within 3% of the first)? */
+        static uint8_t px[EDGE_W * EDGE_H * 4];
+        p_glBindFramebuffer(GL_READ_FRAMEBUFFER, edge_fbo[i]); p_glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        p_glReadPixels(0, 0, EDGE_W, EDGE_H, GL_RGBA, GL_UNSIGNED_BYTE, px);
+        int same = 1;
+        for (int k = 1; k < EDGE_W * EDGE_H && same; k++)
+            for (int ch = 0; ch < 3; ch++) if (abs((int)px[k * 4 + ch] - (int)px[ch]) > 8) { same = 0; break; }
+        flat[i] = same;
+        for (int ch = 0; ch < 3; ch++) col[i][ch] = px[ch] / 255.f;
     }
     p_glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     p_glViewport(0, 0, fb_w, fb_h);
@@ -732,6 +746,7 @@ static void draw_bars(int px0, int px1, int y0, int y1, int left, int right) {
         if (!(i ? right : left)) continue;
         float a = i ? (float)(px1 - 1) : 0.f, b = i ? (float)fb_w : (float)(px0 + 1);   /* cover the edge pixel */
         p_glUniform1f(bar_x0, a / fb_w * 2.f - 1.f); p_glUniform1f(bar_x1, b / fb_w * 2.f - 1.f);
+        p_glUniform1i(bar_flat, flat[i]); p_glUniform3f(bar_col, col[i][0], col[i][1], col[i][2]);
         p_glBindTexture(GL_TEXTURE_2D, edge_tex[i]);
         p_glDrawArrays(GL_TRIANGLES, quad_first, 6);
     }
