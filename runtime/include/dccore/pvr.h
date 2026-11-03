@@ -10,6 +10,8 @@ extern "C" {
  * (returns -1 when the display is off). */
 void dc_pvr_sw_install(void);
 extern int dc_pvr_sw_debug;
+/* the game set the render clip to 0..0: the render writes nothing visible, the framebuffer keeps its picture */
+int dc_pvr_clip_empty(void);
 extern int dc_pvr_sw_highlight;   /* debug: paint a texture class magenta */   /* set: the next render lists its polygons on stderr */
 int  dc_pvr_sw_render(void);
 int  dc_pvr_display(uint8_t *rgb, int maxw, int maxh, int *w, int *h);

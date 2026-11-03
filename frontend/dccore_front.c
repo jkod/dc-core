@@ -125,6 +125,8 @@ static int shows_render(void) {
 }
 
 static void on_render(void) {
+    /* clip 0..0 (Soulcalibur's VS screen while the stage loads): nothing is drawn, the picture stays */
+    if (dc_pvr_clip_empty()) { renders++; last_render_frame = (unsigned long)vblanks; return; }
     /* render to texture (FB_W_SOF1 bit 24): the frame goes into VRAM as a texture the game draws later
      * (Tennis 2K2's crossfades), not to the screen; the software renderer writes it there */
     if ((dc_pvr_reg(0x060) >> 24) & 1) {
@@ -400,14 +402,19 @@ static void on_vblank(uint64_t f) {
         /* with vsync the swap already waits for the display; sleep only when more than a field ahead
          * (a display faster than 60 Hz), so a 60 Hz display isn't made to skip a refresh now and then */
         double ahead = cfg.vsync ? 0.017 : 0.0;
-        /* with sound (and no vsync) the sound card's clock paces the game: the queue is held near 60 ms,
+        /* with sound (and no vsync) the sound card's clock paces the game: the queue is held near 30 ms,
          * so it never runs dry (stutter) or overflows (dropped blocks), whatever the drift between the
          * wall clock, SDL_Delay's granularity and the card. The wall clock only bounds it: never more
          * than 50 ms ahead of real time. DC_PACE=clock: wall clock only (as before). */
         static int by_clock = -1;
         if (by_clock < 0) { const char *e = getenv("DC_PACE"); by_clock = e && !strcmp(e, "clock"); }
         if (audio && !cfg.vsync && !by_clock) {
-            const Uint32 target = 44100 * 4 * 60 / 1000;    /* bytes: 60 ms of 16-bit stereo */
+            /* the queue swings between the target and the target plus a field (a field's samples arrive
+             * at once) and drains while the next field is emulated; 30 ms above a 512-frame device buffer
+             * keeps sound about 50 ms behind the picture instead of 100. DC_AUDIO_MS sets the target. */
+            static Uint32 target;
+            if (!target) { const char *e = getenv("DC_AUDIO_MS"); int ms = e ? atoi(e) : 30; if (ms < 10) ms = 10; if (ms > 200) ms = 200;
+                           target = (Uint32)(44100 * 4 * ms / 1000); }
             while (SDL_GetQueuedAudioSize(audio) > target && emu > real - 0.05) {
                 SDL_Delay(1);
                 now = SDL_GetPerformanceCounter(); real = (double)(now - t0_count) / (double)freq;
@@ -479,7 +486,12 @@ int dc_front_open(const dc_front_config *c) {
     }
     if (!cfg.no_audio) {
         SDL_AudioSpec want = {0}, have;
-        want.freq = 44100; want.format = AUDIO_S16SYS; want.channels = 2; want.samples = 1024;
+        want.freq = 44100; want.format = AUDIO_S16SYS; want.channels = 2;
+#ifdef __SWITCH__
+        want.samples = 1024;
+#else
+        want.samples = 512;                                /* 11.6 ms: little latency on top of the queue */
+#endif
         audio = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
         if (audio) SDL_PauseAudioDevice(audio, 0);
         else fprintf(stderr, "audio: %s (continuing without sound)\n", SDL_GetError());

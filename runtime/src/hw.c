@@ -47,6 +47,7 @@ int dc_vram_ext_write(uint32_t ofs, const void *data, uint32_t len) {
     return 0;
 }
 uint32_t dc_pal_gen;                 /* bumped on palette RAM writes */
+int dc_pvr_clip_written;              /* the game has set FB_X_CLIP / FB_Y_CLIP */
 #define VRAM_TOUCH(o) (dc_vram_gen[((o) & 0x7FFFFF) >> 12]++)
 uint32_t dc_vram32_gen[0x800];       /* per 4 KB of the 32-bit area: bumped on writes through it (framebuffers) */
 #define VRAM32_TOUCH(o) (dc_vram32_gen[((o) & 0x7FFFFF) >> 12]++)
@@ -535,6 +536,7 @@ static void wr(uint32_t a, uint32_t v, int size) {
     if (m >= 0x005F8000u && m < 0x005FA000u) {
         uint32_t o = m - 0x005F8000u;
         PVR(o & 0x1FFC) = v;
+        if ((o & 0x1FFC) == 0x068 || (o & 0x1FFC) == 0x06C) dc_pvr_clip_written = 1;   /* see dc_pvr_clip_empty */
         if (dc_hw.on_pvr_write) dc_hw.on_pvr_write(o, v);
         if (o >= 0x1000 && o < 0x2000) dc_pal_gen++;                       /* palette RAM */
         if (o == 0x108) dc_pal_gen++;                                      /* palette format */

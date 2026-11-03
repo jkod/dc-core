@@ -711,6 +711,15 @@ static void fb_done(const fb_target *t) {
         for (uint32_t pg = t->sof >> 12; pg <= ((t->sof + (uint32_t)t->HO * t->stride) >> 12) && pg < 0x800; pg++) dc_vram_gen[pg]++;
 }
 
+/* A render whose clip the game set to 0..0 (FB_X_CLIP = FB_Y_CLIP = 0) writes at most one pixel: the
+ * framebuffer keeps its picture. Soulcalibur renders its VS screen like this while it loads the stage's
+ * textures over the VS screen's, so the picture stays frozen for the wipe that follows. Clip registers
+ * the game never wrote (power-on 0) still mean the whole screen. */
+extern int dc_pvr_clip_written;
+int dc_pvr_clip_empty(void) {
+    return dc_pvr_clip_written && (REG(0x068) & 0x07FF07FFu) == 0 && (REG(0x06C) & 0x03FF03FFu) == 0;
+}
+
 /* the render's size: FB_X_CLIP / FB_Y_CLIP maxima */
 void dc_pvr_target_size(int *w, int *h) {
     uint32_t xc = REG(0x068), yc = REG(0x06C);
@@ -779,8 +788,13 @@ int dc_pvr_sw_render(void) {
     /* write the framebuffer. FB_W_SOF1 bit 24: render to texture, written in the 64-bit (texture)
      * layout, not the 32-bit framebuffer one (Tennis 2K2 captures frames this way for its crossfades) */
     fb_target t = fb_target_of(W, H);
-    for (int y = 0; y < t.HO; y++)
-        for (int x = 0; x < t.WO; x++) {
+    /* a framebuffer gets the clip rectangle only (FB_X_CLIP / FB_Y_CLIP minima too): a band render keeps
+     * the picture above and left of it, as on the console; a texture target is written whole */
+    int x0 = t.tex ? 0 : (int)(xc & 0x7FF), y0 = t.tex ? 0 : (int)(yc & 0x3FF);
+    if (x0 >= t.WO) x0 = 0;
+    if (y0 >= t.HO) y0 = 0;
+    for (int y = y0; y < t.HO; y++)
+        for (int x = x0; x < t.WO; x++) {
             float c[4];
             if (hscale) { const float *p0 = cbuf + (y * RW + 2 * x) * 4, *p1 = p0 + 4; for (int k = 0; k < 4; k++) c[k] = (p0[k] + p1[k]) * 0.5f; }
             else memcpy(c, cbuf + (y * RW + x) * 4, 16);
