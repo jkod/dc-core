@@ -27,6 +27,11 @@ void dc_coro_install(uint32_t setjmp_addr, uint32_t longjmp_addr, size_t host_st
 /* A routine that switches tasks by swapping stacks and ending with rte into the other task (a
  * middleware/OS task switch). Each entry point is hooked separately. */
 void dc_coro_add_switch(uint32_t addr);
+/* A routine that switches tasks by swapping stacks and going on with rts or a jump on the other
+ * stack: a scheduler entering a task (rts into it), a task's yield or exit (back into the scheduler's
+ * loop). Each entry point is hooked separately. starts_task: the routine enters a new task on a fresh
+ * stack (its entry point as the return address); any task left waiting on that stack has ended. */
+void dc_coro_add_stack_switch(uint32_t addr, int starts_task);
 /* Leave every guest thread and task switch of the running executable (another one is about to
  * start, e.g. the game after an intro executable): continue at `jb`, a host setjmp taken on the
  * program's main stack before the guest code ran. The hooks of dc_coro_install / dc_coro_add_switch

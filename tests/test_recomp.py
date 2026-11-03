@@ -162,6 +162,28 @@ t("coro_setjmp_split_caller", {
   "dc_wr32(0x8C100100u, 0x8C0F0000u); dc_wr32(0x8C100104u, %du); dc_wr32(0x8C100200u, 0);"
   "dc_coro_install(%du, %du, 0);" % (T, S, L),
   "c.r[0] == 3 && dc_coro_count() == 1")
+# a task system that swaps stacks and goes on with rts / a jump (dccore/coro.h dc_coro_add_stack_switch,
+# like Dead or Alive 2's): main enters a task 3 times; the task counts and yields back each time.
+#   START (+0x40, new task) / RESUME (+0x60): push pr ; [SAVED] = r15 ; r15 = [TSP] ; pop pr ; rts
+#   YIELD (+0x80): push pr ; [TSP] = r15 ; r15 = [SAVED] ; pop pr ; bra BACK (+0xA0: rts)
+#   TASK (+0xC0, entry pushed on its stack by setup): for (;;) { [CNT]++; YIELD(); }
+SV, TSP, CNT = 0x8C100000, 0x8C100004, 0x8C100008
+ldl = lambda n, pc, lit: 0xD000 | n << 8 | ((lit - ((pc + 4) & ~3)) // 4)
+def _enter(at):   # START / RESUME at offset `at`, literals at at+0x10
+    return [0x4F22, ldl(1, at + 2, at + 0x10), 0x21F2, ldl(1, at + 6, at + 0x14), 0x6F12, 0x4F26, 0x000B, 0x0009] + lw(SV) + lw(TSP)
+t("coro_stack_switch_tasks", {
+    0x00: [0x4F22, ldl(1, 0x02, 0x20), 0x410B, 0x0009, ldl(1, 0x08, 0x24), 0x410B, 0x0009,
+           ldl(1, 0x0E, 0x24), 0x410B, 0x0009, ldl(1, 0x14, 0x28), 0x6012, 0x4F26, 0x000B, 0x0009, 0x0009]
+          + lw(BASE + 0x40) + lw(BASE + 0x60) + lw(CNT),
+    0x40: _enter(0x40), 0x60: _enter(0x60),
+    0x80: [0x4F22, ldl(1, 0x82, 0x90), 0x21F2, ldl(1, 0x86, 0x94), 0x6F12, 0x4F26, 0xA008, 0x0009] + lw(TSP) + lw(SV),
+    0xA0: [0x000B, 0x0009],
+    0xC0: [ldl(1, 0xC0, 0xD4), 0x6012, 0x7001, 0x2102, ldl(2, 0xC8, 0xD8), 0x420B, 0x0009, 0xAFF7, 0x0009, 0x0009]
+          + lw(CNT) + lw(BASE + 0x80)},
+  "dc_wr32(0x8C0EFFFCu, %du); dc_wr32(%du, 0x8C0EFFFCu); dc_wr32(%du, 0);"
+  "dc_coro_add_stack_switch(%du, 1); dc_coro_add_stack_switch(%du, 0); dc_coro_add_stack_switch(%du, 0);"
+  % (BASE + 0xC0, TSP, CNT, BASE + 0x40, BASE + 0x60, BASE + 0x80),
+  "c.r[0] == 3 && dc_coro_count() == 1")
 # 0x0000 in a delay slot: hardware runs it as a no-op (compilers leave it after jmp in C++ thunks)
 #   mov.l @(lit),r1 ; jmp @r1 ; .word 0 ; ... ; at 0x20: mov #5,r0 ; rts ; nop
 t("zero_in_delay_slot", {0: [0xD102, 0x412B, 0x0000, 0x0009, 0x0009, 0x0009,

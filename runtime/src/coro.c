@@ -120,6 +120,7 @@ typedef struct coro {
     int refs;                    /* live slots owned by this coroutine */
     uint32_t sp_key;             /* suspended in a stack switch: resumed when a task with this r15 is loaded */
     int sp_waiting;
+    uint32_t resume_pc;          /* stack switch (rts / jump): where the task that resumed us said to go on (0 = rts) */
     int started, is_main;
 } coro;
 
@@ -197,7 +198,7 @@ static coro *new_coro(void) {
     }
     hctx_main_init(&main_coro.uc);
     hctx_make(&k->uc, &k->stack, stack_bytes, coro_main);
-    k->pending = NULL; k->refs = 0; k->started = 1; k->sp_waiting = 0;
+    k->pending = NULL; k->refs = 0; k->started = 1; k->sp_waiting = 0; k->resume_pc = 0;
     return k;
 }
 
@@ -243,7 +244,7 @@ void dc_coro_install(uint32_t setjmp_addr, uint32_t lj_addr, size_t host_stack) 
  * another task's and returns into it with rte (PC = spc). A task calls it like a function, so it
  * is resumed with the r15 it called with; that r15 identifies its suspended host coroutine. */
 #define MAX_SW 8
-static struct { uint32_t addr; sh4fn orig; } sw[MAX_SW];
+static struct { uint32_t addr; sh4fn orig; int kind; } sw[MAX_SW];   /* kind: 0 rte, 1 stack switch, 2 stack start */
 static int nsw;
 
 /* The switch routine's own frame need not be balanced to the byte (pushes on one entry path,
@@ -286,13 +287,56 @@ static uint32_t h_switch(sh4ctx *c) {
     return 0;
 }
 
-void dc_coro_add_switch(uint32_t addr) {
+static void add_switch(uint32_t addr, int kind, sh4fn handler) {
     addr = (addr & 0x1FFFFFFFu) | 0x80000000u;
     sh4fn f = dc_lookup(addr);
     if (!f || nsw == MAX_SW) { fprintf(stderr, "dc-core: cannot hook task switch at %08X\n", addr); return; }
-    sw[nsw].addr = addr; sw[nsw].orig = f; nsw++;
-    dc_hle_register(addr, h_switch);
+    sw[nsw].addr = addr; sw[nsw].orig = f; sw[nsw].kind = kind; nsw++;
+    dc_hle_register(addr, handler);
 }
+void dc_coro_add_switch(uint32_t addr) { add_switch(addr, 0, h_switch); }
+
+/* ---- task switches that swap stacks and go on with rts or a jump (dc_coro_add_stack_switch) ----
+ * Like a scheduler that saves its registers, stores its r15, loads a task's r15 and returns into the
+ * task with rts, while the task's yield saves the task, loads the scheduler's r15 back and jumps into
+ * the scheduler's loop (Dead or Alive 2's task system). The routine's own code does the switch; then
+ * the host switches to the coroutine waiting on the new r15 (or starts one at the continuation for a
+ * new task) and tells it where to go on: the routine's jump target, or 0 for rts to the restored pr. */
+static uint32_t h_stack_switch(sh4ctx *c) {
+    uint32_t at = c->entry, r15 = c->r[15];
+    sh4fn orig = NULL; int start = 0;
+    for (int i = 0; i < nsw; i++) if (sw[i].addr == at) { orig = sw[i].orig; start = sw[i].kind == 2; }
+    uint32_t next = orig(c);                 /* stacks swapped; next: a jump on the other stack (0: rts to pr) */
+    uint32_t d = c->r[15] > r15 ? c->r[15] - r15 : r15 - c->r[15];
+    if (d <= 256) return next;               /* stayed on this stack */
+    coro *to = NULL;
+    if (start) {                             /* a new task on that stack: whatever waited there has ended */
+        for (int i = -1; i < ncoros; i++) {
+            coro *k = i < 0 ? &main_coro : &coros[i];
+            if (k == cur || !k->sp_waiting) continue;
+            uint32_t e = k->sp_key > c->r[15] ? k->sp_key - c->r[15] : c->r[15] - k->sp_key;
+            if (e <= 256 && !k->is_main) k->sp_waiting = 0;
+        }
+    } else to = waiting_on(c->r[15]);
+    cur->sp_key = r15; cur->sp_waiting = 1;
+    if (!to) {
+        start_pc = next ? next : c->pr;
+        to = new_coro();
+        if (dc_coro_trace) fprintf(stderr, "coro: stack switch %08X starts coro %ld at %08X (r15 %08X)\n",
+                                   at, (long)(to - coros), start_pc, c->r[15]);
+    } else {
+        to->resume_pc = next;
+        if (dc_coro_trace) fprintf(stderr, "coro: stack switch %08X resumes %s%ld (key %08X, r15 %08X, at %08X)\n",
+                                   at, to->is_main ? "main" : "coro", to->is_main ? 0L : (long)(to - coros), to->sp_key,
+                                   c->r[15], next ? next : c->pr);
+    }
+    to->sp_waiting = 0;
+    switch_to(to);
+    /* resumed: the routine that switched back loaded our registers and said where to go on */
+    uint32_t pc = cur->resume_pc; cur->resume_pc = 0;
+    return pc;
+}
+void dc_coro_add_stack_switch(uint32_t addr, int starts_task) { add_switch(addr, starts_task ? 2 : 1, h_stack_switch); }
 
 /* ---- leaving a whole executable (dc_coro_reset) */
 void dc_coro_reset(jmp_buf *jb) {

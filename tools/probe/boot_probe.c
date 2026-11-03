@@ -234,6 +234,11 @@ int main(int argc, char **argv) {
         while (*p) { dc_coro_add_switch((uint32_t)strtoul(p, (char **)&p, 16)); while (*p == ',') p++; }
         dc_coro_trace = getenv("DC_CORO_TRACE") != NULL;
     }
+    if (getenv("DC_STACK_SWITCH")) {   /* stack-swapping task switches (rts / jump): addr,addr,...; +addr starts a task */
+        const char *p = getenv("DC_STACK_SWITCH");
+        while (*p) { int st = *p == '+'; if (st) p++; dc_coro_add_stack_switch((uint32_t)strtoul(p, (char **)&p, 16), st); while (*p == ',') p++; }
+        dc_coro_trace = getenv("DC_CORO_TRACE") != NULL;
+    }
     if (getenv("DC_HWSTATS")) dc_hw_read_hook = hw_read;
     dc_hw.on_vblank = on_vblank;
     if (getenv("DC_CABLE")) dc_cable = atoi(getenv("DC_CABLE"));
