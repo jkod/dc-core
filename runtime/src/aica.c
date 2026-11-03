@@ -53,6 +53,7 @@ static uint32_t level_reg(void) {
 enum { EG_ATTACK, EG_DECAY1, EG_DECAY2, EG_RELEASE };
 typedef struct {
     int playing, looped;
+    int keyed;                        /* keyed on and not keyed off since (a sample that ran out stays keyed) */
     double pos;                       /* sample position (fractional) */
     int eg_state; double att;         /* envelope */
     /* ADPCM */
@@ -86,7 +87,7 @@ static double eg_step(double ms) { return ms <= 0 ? 1024.0 : 1024.0 / (ms * 44.1
 
 static void key_on(int c) {
     chan_t *h = &ch[c];
-    h->playing = 1; h->pos = 0; h->looped = 0;
+    h->playing = 1; h->keyed = 1; h->pos = 0; h->looped = 0;
     h->eg_state = EG_ATTACK; h->att = 0x3FF;
     if (eff_rate(c, creg(c, 4) & 31) >= 62) h->att = 0;     /* instant attack */
     h->adpcm_sig = 0; h->adpcm_step = 127; h->adpcm_at = 0; h->loop_saved = 0; h->cur = 0; h->adpcm_prev = 0;
@@ -94,8 +95,11 @@ static void key_on(int c) {
 static void key_execute(void) {
     for (int c = 0; c < 64; c++) {
         int kyonb = (creg(c, 0) >> 14) & 1;
-        if (kyonb && !ch[c].playing) key_on(c);
-        else if (!kyonb && ch[c].playing && ch[c].eg_state != EG_RELEASE) ch[c].eg_state = EG_RELEASE;
+        /* Key on only a slot that is keyed off (stopped or releasing), as the AICA does: a one-shot
+         * sample that ran out keeps its slot keyed, and games leave KYONB set on it (Soulcalibur), so
+         * restarting every finished KYONB slot replayed old effects with each new sound. */
+        if (kyonb && !ch[c].keyed) key_on(c);
+        else if (!kyonb && ch[c].keyed) { ch[c].keyed = 0; if (ch[c].playing) ch[c].eg_state = EG_RELEASE; }
     }
 }
 
