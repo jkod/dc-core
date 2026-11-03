@@ -246,6 +246,7 @@ static uint64_t hblank_events(uint64_t now, uint64_t f, uint32_t lines) {
     return (l / lines) * f + (l % lines) * f / lines;                     /* that line's start */
 }
 
+static void maple_dma(void);
 void dc_events(sh4ctx *c) {
     uint64_t now = c->cycles, f = field_cycles(), field = now / f;
     uint32_t lines = total_lines();
@@ -256,6 +257,7 @@ void dc_events(sh4ctx *c) {
     if (now >= at_in && last_vbin_field != field) {
         last_vbin_field = field; SBR(ISTNRM) |= 1u << 3; frame_count++;
         if (dc_hw.on_vblank) dc_hw.on_vblank(frame_count);
+        if ((SBR(0x6C10) & 1) && (SBR(0x6C14) & 1)) maple_dma();      /* SB_MDTSEL 1: Maple DMA started by vblank */
     }
     if (now >= at_out && last_vbout_field != field) { last_vbout_field = field; SBR(ISTNRM) |= 1u << 4; }
     uint64_t hb_next = hblank_events(now, f, lines);
@@ -422,7 +424,7 @@ static void sb_dma(uint32_t o, uint32_t v) {
         uint32_t src = *p4reg(0xFFA00020u), len = SBR(0x6804), dst = SBR(0x6800);
         if (dc_dma_src_hook) src = dc_dma_src_hook(src);
         uint32_t so = DC_RAM_OFS(src);
-        if (DC_IS_RAM(src) && so + len <= 0x1000000u) {
+        if (DC_IS_RAM(src) && so + len <= DC_RAM_SIZE) {
             uint32_t m = dst & 0x1FFFFFFFu;
             if (m >= 0x10000000u && m < 0x14000000u) ta_area_write(m, dc_ram + so, len);
             else copy_words(dst, src, len);
