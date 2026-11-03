@@ -42,6 +42,9 @@ typedef struct dc_fiber dc_fiber;
 dc_fiber *dc_fiber_current(void);
 dc_fiber *dc_fiber_new(void (*fn)(void *arg), void *arg, size_t stack_bytes);   /* 0: 2 MB */
 void dc_fiber_switch(dc_fiber *to);
+/* start a fiber over with a new function, on its own stack (not the running fiber: one that
+ * ended, whose function is parked for good) */
+void dc_fiber_reset(dc_fiber *f, void (*fn)(void *arg), void *arg);
 
 #ifdef __cplusplus
 }

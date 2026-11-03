@@ -66,13 +66,19 @@ FN(SetThreadPriority) {
 FN(GetThreadPriority) { ce_thread *t = ce_thread_of(ARG(0)); RET(t ? (uint32_t)t->prio : 0x7FFFFFFFu); }
 FN(GetExitCodeThread) {
     ce_thread *t = ce_thread_of(ARG(0));
+    ce_obj *o = ce_handle(ARG(0));
+    if (!t && o && o->type == OB_THREAD) { dc_wr32(ARG(1), (uint32_t)o->count); RET(1); }   /* ended, slot reused */
     if (!t) RET(0);
     dc_wr32(ARG(1), t->state == TH_DEAD ? t->exit_code : 259u /* STILL_ACTIVE */);
     RET(1);
 }
 FN(Sleep) { ce_sleep(ARG(0)); RET(0); }
 FN(SleepTillTick) { ce_sleep(1); RET(0); }
-FN(WaitForSingleObject) { uint32_t h = ARG(0); RET(ce_wait(&h, 1, 0, ARG(1))); }
+FN(WaitForSingleObject) {
+    uint32_t h = ARG(0), r = ce_wait(&h, 1, 0, ARG(1));
+    if (r == WAIT_FAILED) TRACE("WaitForSingleObject %08X: not a handle (pr %08X)", h, c->pr);
+    RET(r);
+}
 FN(WaitForMultipleObjects) {
     uint32_t n = ARG(0), hs[CE_MAXWAIT];
     if (n > CE_MAXWAIT) n = CE_MAXWAIT;
@@ -144,7 +150,7 @@ FN(CloseHandle) {
     if (!o) RET(0);
     if (o->type == OB_FILE && o->max == 1 && o->refs == 1) { uint32_t f = wdm_proc("CloseWDMDevice"), fo = o->lba; if (f) ce_call(f, 1, fo);
       if (dc_rd32(fo + 24) & 2) { ce_handle_close(dc_rd32(fo + 48)); ce_handle_close(dc_rd32(fo + 52)); }
-      ce_free(fo); }
+      ce_call(wdm_proc("ObDereferenceObject"), 1, fo); }
     ce_handle_close(h);
     RET(1);
 }
@@ -442,12 +448,17 @@ static uint32_t open_device(uint32_t wname, const char *name, uint32_t flags) {
     uint32_t open = wdm_proc("OpenWDMDevice");
     if (!open) return INVALID_HANDLE;
     /* OpenWDMDevice(&file, name) -> BOOL fills in a file object (the device first) that the other calls
-     * take: it stays allocated, zeroed, as the handle's data */
-    uint32_t file = ce_alloc(CE_WDM_FILE, 4);
+     * take. It is an object manager object (WDMLIB references it around requests), made with
+     * ObCreateObject and holding one reference, zeroed, as the handle's data. */
+    uint32_t tmp = ce_alloc(4, 4), file = 0;
+    if (ce_call(wdm_proc("ObCreateObject"), 5, CE_WDM_FILE, 0, 0, tmp, 0) == 0) file = dc_rd32(tmp);
+    ce_free(tmp);
+    if (!file) return INVALID_HANDLE;
     for (uint32_t i = 0; i < CE_WDM_FILE; i += 4) dc_wr32(file + i, 0);
+    ce_call(wdm_proc("ObReferenceObjectByPointer"), 1, file);
     uint32_t r = ce_call(open, 2, file, wname + 8 * 2), dev = dc_rd32(file);   /* the name in the "Device" directory */
     TRACE("OpenWDMDevice %s -> %u, device %08X", name, r, dev);
-    if (!r || !dev) ce_free(file);
+    if (!r || !dev) ce_call(wdm_proc("ObDereferenceObject"), 1, file);
     else if (!(flags & 0x40000000u)) {                     /* no FILE_FLAG_OVERLAPPED: synchronous file object, */
         dc_wr32(file + 24, 2);                             /* whose calls wait for the request's completion event */
         dc_wr32(file + 48, new_event(0, 0));               /* (+48) under a lock (+52) */
@@ -632,7 +643,9 @@ FN(SetStoreQueueBase) {      /* the store queue area 0xE0000000.. writes to this
     dc_hw_map(0xE0000000u + (CE_DRVMEM_PHYS - 0x0C000000u), 0xAC000000u | (CE_DRVMEM_PHYS & 0x00FFFFFFu), CE_DRVMEM_LEN);
     RET(0xE0000000u);           /* the store queue area's address, which now writes there */
 }
-FN(AddEventAccess) { RET(1); }
+/* another process's (here: the drivers') use of an event, which it ends with CloseHandle: WDMLIB's
+ * IoCompleteRequest closes the request's event after setting it */
+FN(AddEventAccess) { ce_obj *o = ce_handle(ARG(0)); if (!o || o->type != OB_EVENT) RET(0); o->refs++; RET(1); }
 /* ---- the kernel's WDM HAL API set ("WDMH"), which WDMLIB's Hal and Mm functions call. User memory
  * below 16 MB is the console's RAM (dc_ram aliases it), so its physical address is 0x0C000000 + va. */
 #define CE_WDMH_SET 0x20u

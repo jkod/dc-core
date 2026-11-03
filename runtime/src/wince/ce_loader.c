@@ -201,8 +201,11 @@ uint32_t ce_get_proc(uint32_t h, const char *fname, uint32_t ord) {
 int ce_load_arm_firmware(const char *name) {
     uint8_t *f; uint32_t n;
     if (read_disc_file(name, &f, &n)) return -1;
+    /* a 12-byte header, then the image for sound RAM 0 (its vectors: FIQ at 0x1C is the file's 0x28,
+     * and its variables at 0x200.. are the file's zeros at 0x20C..) */
+    const uint32_t hdr = 12;
     dc_wr32(0xA0702C00u, 1);                                   /* ARM in reset */
-    for (uint32_t i = 0; i + 4 <= n && i < 0x200000; i += 4) dc_wr32(0xA0800000u + i, rd32le(f + i));
+    for (uint32_t i = 0; hdr + i + 4 <= n && i < 0x200000; i += 4) dc_wr32(0xA0800000u + i, rd32le(f + hdr + i));
     dc_wr32(0xA0702C00u, 0);                                   /* run */
     free(f);
     return 0;

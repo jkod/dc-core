@@ -236,8 +236,23 @@ static void thread_main(void *arg) {
 }
 
 ce_thread *ce_thread_create(uint32_t start, uint32_t param, uint32_t stack, int suspended) {
-    if (nthreads == MAXT) { fprintf(stderr, "[ce] too many threads\n"); return NULL; }
-    ce_thread *t = calloc(1, sizeof *t);
+    /* a thread that ended gives its slot, guest stack and fiber to the new one (games start short
+     * worker threads all the time); its handle stays signalled, with the exit code */
+    ce_thread *t = NULL;
+    dc_fiber *fiber = NULL;
+    for (int i = 0; i < nthreads && !t; i++) if (threads[i]->state == TH_DEAD && threads[i] != ce_cur) {
+        t = threads[i];
+        ce_obj *o = ce_handle(t->handle);
+        if (o && o->type == OB_THREAD && o->thread == t) { o->thread = NULL; o->count = (int)t->exit_code; }
+        ce_free(t->stack_lo);
+        fiber = t->fiber;
+        memset(t, 0, sizeof *t);
+    }
+    if (!t) {
+        if (nthreads == MAXT) { fprintf(stderr, "[ce] too many threads\n"); return NULL; }
+        t = calloc(1, sizeof *t);
+        threads[nthreads++] = t;
+    }
     if (!stack) stack = 0x10000;
     if (stack < 0x10000) stack = 0x10000;
     t->stack_lo = ce_alloc(stack, 16); t->stack_hi = t->stack_lo + stack;
@@ -250,10 +265,10 @@ ce_thread *ce_thread_create(uint32_t start, uint32_t param, uint32_t stack, int 
     t->regs.r[4] = param; t->regs.r[15] = t->stack_hi - 32;
     t->regs.sr_rest = 0; t->regs.fpscr = 0x00040001u; t->regs.vbr = CE_VBR;
     t->regs.pr = CE_THREAD_EXIT;
-    t->fiber = dc_fiber_new(thread_main, t, 0);
+    if (fiber) { t->fiber = fiber; dc_fiber_reset(fiber, thread_main, t); }
+    else t->fiber = dc_fiber_new(thread_main, t, 0);
     t->state = suspended ? TH_SUSPENDED : TH_READY; t->suspend = suspended ? 1 : 0;
     t->wake_at = ~0ull;
-    threads[nthreads++] = t;
     TRACE("CreateThread %08X(%08X) -> t%u handle %08X%s", start, param, t->id, t->handle, suspended ? " suspended" : "");
     return t;
 }
