@@ -562,17 +562,53 @@ static void mod_tri(const modtri *m) {
             if (z >= zbuf[i]) mvbuf[i] ^= 1;          /* volume surface between the eye and the pixel */
         }
 }
+static int mv_dbg;                              /* the frame dc_pvr_sw_debug describes: volume statistics */
 static void modifier_volumes(void) {
-    int n = RW * RH, any = 0;
+    int n = RW * RH, any = 0, nvol = 0, insts[4] = {0};
     memset(mvbuf, 0, (size_t)n); memset(mvacc, 0, (size_t)n);
     for (int k = 0; k < nmt; k++) {
         const modtri *m = &mt[k];
         if (m->list != 1) continue;
+        insts[m->inst & 3]++;
         mod_tri(m);
         if (m->inst == 1 || m->inst == 2) {           /* last triangle of a volume */
             for (int i = 0; i < n; i++) { if ((mvbuf[i] & 1) == (m->inst == 1)) mvacc[i] = 1; }
-            memset(mvbuf, 0, (size_t)n); any = 1;
+            memset(mvbuf, 0, (size_t)n); any = 1; nvol++;
         }
+    }
+    if (mv_dbg) {
+        int in = 0, nopoly = 0, sh = 0, unsh = 0;
+        for (int i = 0; i < n; i++) if (mvacc[i]) { in++; if (dbuf[i].pid < 0) nopoly++; else if (pl[dbuf[i].pid].shadow) sh++; else unsh++; }
+        fprintf(stderr, "pvr: %d volumes (triangle instructions %d/%d/%d/%d), %d pixels inside: %d on shadow-flag polygons, %d on others, %d with no opaque polygon\n",
+                nvol, insts[0], insts[1], insts[2], insts[3], in, sh, unsh, nopoly);
+        int k0 = 0;
+        for (int k = 0; k < nmt; k++) {
+            const modtri *m = &mt[k];
+            if (m->list != 1 || !(m->inst == 1 || m->inst == 2)) continue;
+            float bx0 = 1e30f, bx1 = -1e30f, by0 = 1e30f, by1 = -1e30f, bz0 = 1e30f, bz1 = -1e30f;
+            for (int j = k0; j <= k; j++) for (int q = 0; q < 3; q++) {
+                const modtri *t = &mt[j]; if (t->list != 1) continue;
+                if (t->x[q] < bx0) bx0 = t->x[q]; if (t->x[q] > bx1) bx1 = t->x[q]; if (t->y[q] < by0) by0 = t->y[q]; if (t->y[q] > by1) by1 = t->y[q];
+                if (t->z[q] < bz0) bz0 = t->z[q]; if (t->z[q] > bz1) bz1 = t->z[q]; }
+            int cx = (int)((bx0 + bx1) / 2), cy = (int)((by0 + by1) / 2);
+            float zb = cx >= 0 && cx < RW && cy >= 0 && cy < RH ? zbuf[cy * RW + cx] : -1;
+            fprintf(stderr, "pvr: volume %d tris x %.1f..%.1f y %.1f..%.1f z %g..%g, surface z %g at its centre\n", k - k0 + 1, bx0, bx1, by0, by1, bz0, bz1, zb);
+            if (getenv("DC_MVDUMP") && bx1 > 200 && bx0 < 440 && by1 > 300)
+                for (int gy = 0; gy < 4; gy++) for (int gx = 0; gx < 6; gx++) {
+                    float px = bx0 + (bx1 - bx0) * (gx + 0.5f) / 6, py = by0 + (by1 - by0) * (gy + 0.5f) / 4;
+                    int ix = (int)px, iy = (int)py; if (ix < 0 || iy < 0 || ix >= RW || iy >= RH) continue;
+                    int i = iy * RW + ix, cross = 0; char zs[200]; int zl = 0; zs[0] = 0;
+                    for (int j = k0; j <= k; j++) { const modtri *t = &mt[j]; float w0, w1, w2;
+                        float area = (t->x[1] - t->x[0]) * (t->y[2] - t->y[0]) - (t->y[1] - t->y[0]) * (t->x[2] - t->x[0]); if (area == 0) continue;
+                        if (!inside(t->x[0], t->y[0], t->x[1], t->y[1], t->x[2], t->y[2], ix + .5f, iy + .5f, 1.f / area, &w0, &w1, &w2)) continue;
+                        float z = w0 * t->z[0] + w1 * t->z[1] + w2 * t->z[2]; cross += z >= zbuf[i];
+                        if (zl < 180) zl += snprintf(zs + zl, sizeof zs - zl, " %.4f", z); }
+                    int pid = dbuf[i].pid;
+                    fprintf(stderr, "   px %d,%d surface z %.4f list %d shadow %d: faces%s -> %d in front\n", ix, iy, zbuf[i], pid >= 0 ? pl[pid].list : -1, pid >= 0 ? pl[pid].shadow : -1, zs, cross);
+                }
+            k0 = k + 1;
+        }
+        mv_dbg = 0;
     }
     if (!any) return;
     uint32_t shad = REG(0x074);
@@ -771,7 +807,7 @@ int dc_pvr_sw_render(void) {
             fprintf(stderr, " poly list %d n %d sprite %d isp %08X tsp %08X tcw %08X v0 %.1f,%.1f,%.2f uv %.3f,%.3f c %.2f %.2f %.2f %.2f tex@%06X: %02X%02X %02X%02X %02X%02X\n", pl[i].list, pl[i].n, pl[i].sprite,
                     pl[i].isp, pl[i].tsp, pl[i].tcw, v->x, v->y, v->z, v->u, v->v, v->c[0], v->c[1], v->c[2], v->c[3], ta,
                     dc_vram[ta + 1], dc_vram[ta], dc_vram[ta + 3], dc_vram[ta + 2], dc_vram[ta + 0x401], dc_vram[ta + 0x400]); }
-        dc_pvr_sw_debug = 0;
+        dc_pvr_sw_debug = 0; mv_dbg = 1;
     }
     for (int i = 0; i < RW * RH; i++) { memcpy(cbuf + i * 4, bg, 16); zbuf[i] = bz; dbuf[i].pid = -1; }
     for (int i = 0; i < npl; i++) if (pl[i].list == 0) { cur_pid = i; draw_poly(&pl[i]); }
