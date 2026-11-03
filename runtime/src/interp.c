@@ -107,6 +107,7 @@ static int step(sh4ctx *c, uint32_t pc, uint32_t op) {
         case 0x8:
             if (n != 0) return -1;
             switch (m) { case 0: c->t = 0; return 1; case 1: c->t = 1; return 1; case 2: c->mach = c->macl = 0; return 1;
+                         case 3: return 1;   /* ldtlb: no MMU model */
                          case 4: c->s = 0; return 1; case 5: c->s = 1; return 1; }
             return -1;
         case 0x9:

@@ -302,7 +302,8 @@ int main(int argc, char **argv) {
     dc_set_call_hook(hook); dc_set_miss_handler(miss); dc_set_trap_handler(trap);
     signal(SIGALRM, alrm); alarm(argc > 3 ? atoi(argv[3]) : 10);
     C.pr = 0xDEAD0000u;
-    dc_call(&C, 0x8C010000u);
+    /* DC_ENTRY=hex: start somewhere else than the load address (e.g. past a dev-kit debug stub) */
+    dc_call(&C, getenv("DC_ENTRY") ? (uint32_t)strtoul(getenv("DC_ENTRY"), 0, 16) : 0x8C010000u);
     report("returned");
     return 0;
 }

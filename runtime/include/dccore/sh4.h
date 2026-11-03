@@ -111,8 +111,9 @@ void dc_trap(sh4ctx *c, uint32_t pc, const char *what);
 extern uint32_t dc_coro_setjmp_addr;
 jmp_buf *dc_coro_setjmp_slot(sh4ctx *c);              /* before the call: slot for buffer r4 */
 void dc_coro_setjmp_done(sh4ctx *c, jmp_buf *slot);   /* after it: remember r15/pr/coroutine */
+/* the target may be any mirror of the setjmp address (Propeller Arena calls it through P0) */
 #define DC_CALL_SETJMP(c, t) do { uint32_t sjt_ = (t); \
-    if (sjt_ == dc_coro_setjmp_addr) { jmp_buf *sjb_ = dc_coro_setjmp_slot(c); dc_call(c, sjt_); \
+    if (((sjt_ & 0x1FFFFFFFu) | 0x80000000u) == dc_coro_setjmp_addr) { jmp_buf *sjb_ = dc_coro_setjmp_slot(c); dc_call(c, sjt_); \
         dc_coro_setjmp_done(c, sjb_); if (sjb_) (void)DC_SETJMP(*sjb_); } \
     else dc_call(c, sjt_); } while (0)
 

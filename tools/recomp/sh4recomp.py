@@ -110,6 +110,7 @@ class Translator:
             if lo == 0x8 and n == 0:
                 t = {0: "c->t = 0;", 1: "c->t = 1;", 2: "c->mach = c->macl = 0;", 4: "c->s = 0;", 5: "c->s = 1;"}.get(m)
                 if t: return e(t)
+                if m == 3: return e("", "ldtlb")   # no MMU model: TLB loads (a dev-kit monitor's) do nothing
             if lo == 0x9:
                 if op == 0x0009: return e("", "nop")
                 if op == 0x0019: return e("c->m = c->q = c->t = 0;", "div0u")

@@ -467,6 +467,8 @@ static uint32_t rd(uint32_t a, int size) {
         if ((a & 0xFFFFFF00u) == 0xFFD80000u) for (int ch = 0; ch < 3; ch++) tmu_sync(ch, now);
         uint32_t v = *p4reg(a);
         if ((a & 0xFFFFFFFCu) == 0xFF800030u) v = port_a();
+        if ((a & 0xFFFFFFFCu) == 0xFF000030u) v = 0x040205C1u;   /* PVR: a retail console's SH7091 (bit 7 set; dev-kit
+                                                                  * debug stubs, e.g. Propeller Arena's, check it) */
         return size == 4 ? v : size == 2 ? (v >> ((a & 2) * 8)) & 0xFFFF : (v >> ((a & 3) * 8)) & 0xFF;
     }
     uint32_t m = a & 0x1FFFFFFFu;
