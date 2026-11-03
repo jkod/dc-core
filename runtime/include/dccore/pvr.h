@@ -75,6 +75,9 @@ int  dc_pvr_gl_capture_to_vram(int scale);
 extern int dc_pvr_gl_tsort2;
 extern int dc_pvr_gl_split_panel_x;   /* widescreen: split-screen views clipped to [0, x) beside a side panel become full width (0 = off) */
 extern int dc_pvr_gl_hud_move;        /* widescreen: HUD pieces move out to the screen edges (default 1) */
+/* widescreen HUD: a group of touching pieces that spans most of the width moves piece by piece instead of
+ * staying centred: a fighting game's health bars joined by the timer between them (Dead or Alive 2) (default 0) */
+extern int dc_pvr_gl_hud_split_wide;
 extern int dc_pvr_gl_hud_sharp;       /* HUD textures (flat polygons at >= dc_pvr_gl_hud_z) get a bicubic filter (default 1) */
 #ifdef __cplusplus
 }

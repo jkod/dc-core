@@ -595,6 +595,7 @@ typedef struct { uint32_t isp, tsp, tcw; int list, set, mark, blend, uclip, ux0,
 /* HUD polygons (flat, at or above dc_pvr_gl_hud_z) get the sharper texture filter */
 int dc_pvr_gl_hud_sharp = 1;
 int dc_pvr_gl_hud_move = 1;
+int dc_pvr_gl_hud_split_wide;
 static int is_hud(const pvr_poly *p) { return poly_hud && poly_base ? poly_hud[p - poly_base] : 0; }
 static float (*poly_uvbox)[4];          /* per polygon: its UV range (2D overlay pieces that sample clamped to it) */
 /* scissor: the frame's clip rectangle, narrowed per polygon by the PVR's user tile clip (split screen) */
@@ -879,12 +880,41 @@ static void hud_group(const pvr_frame *f, int RW, signed char *side) {
     float *gx0 = malloc(sizeof(float) * (size_t)(n ? n : 1) * 2), *gx1 = gx0 + (n ? n : 1);
     for (int i = 0; i < n; i++) { gx0[i] = 1e30f; gx1[i] = -1e30f; }
     for (int i = 0; i < n; i++) { int r = hud_find(b, i); if (b[i].x0 < gx0[r]) gx0[r] = b[i].x0; if (b[i].x1 > gx1[r]) gx1[r] = b[i].x1; }
+    /* dc_pvr_gl_hud_split_wide: in a group that spans most of the screen, pieces that touch directly
+     * (within a pixel: a bar and its end caps, a portrait and its frame) form the units that move */
+    int *sub = NULL; float *sx0 = NULL, *sx1 = NULL;
+    if (dc_pvr_gl_hud_split_wide && n) {
+        sub = malloc(sizeof(int) * (size_t)n); sx0 = malloc(sizeof(float) * (size_t)n * 2); sx1 = sx0 + n;
+        for (int i = 0; i < n; i++) sub[i] = i;
+        for (int i = 0; i < n; i++) {
+            int r = hud_find(b, i);
+            if (gx1[r] - gx0[r] <= RW * 0.6f) continue;
+            for (int j = i + 1; j < n; j++) {
+                if (hud_find(b, j) != r) continue;
+                if (b[i].x0 > b[j].x1 + 1.f || b[j].x0 > b[i].x1 + 1.f || b[i].y0 > b[j].y1 + 1.f || b[j].y0 > b[i].y1 + 1.f) continue;
+                int a = i, c = j;
+                while (sub[a] != a) a = sub[a];
+                while (sub[c] != c) c = sub[c];
+                if (a != c) sub[c] = a;
+            }
+        }
+        for (int i = 0; i < n; i++) { sx0[i] = 1e30f; sx1[i] = -1e30f; }
+        for (int i = 0; i < n; i++) {
+            int a = i; while (sub[a] != a) a = sub[a];
+            sub[i] = a;
+            if (b[i].x0 < sx0[a]) sx0[a] = b[i].x0; if (b[i].x1 > sx1[a]) sx1[a] = b[i].x1;
+        }
+    }
     for (int i = 0; i < n; i++) {
         int r = hud_find(b, i);
         float cx = (gx0[r] + gx1[r]) * 0.5f;
-        if (gx1[r] - gx0[r] > RW * 0.6f) continue;           /* spans most of the screen: centred layout */
+        if (gx1[r] - gx0[r] > RW * 0.6f) {                   /* spans most of the screen: centred layout */
+            if (!sub) continue;
+            cx = (sx0[sub[i]] + sx1[sub[i]]) * 0.5f;          /* or by the pieces it touches directly */
+        }
         side[b[i].poly] = cx < RW / 3.f ? -1 : cx > RW * 2.f / 3.f ? 1 : 0;
     }
+    free(sub); free(sx0);
     free(gx0);
 }
 
