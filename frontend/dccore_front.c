@@ -428,7 +428,7 @@ int dc_front_open(const dc_front_config *c) {
     if (!glc) { fprintf(stderr, "OpenGL 3.3: %s\n", SDL_GetError()); return -1; }
     if (cfg.vsync) {                                       /* adaptive (late frames don't wait) where offered */
         if (SDL_GL_SetSwapInterval(-1) != 0 && SDL_GL_SetSwapInterval(1) != 0)
-            fprintf(stderr, "vsync not available: %s\n", SDL_GetError());
+            { fprintf(stderr, "vsync not available: %s\n", SDL_GetError()); cfg.vsync = 0; }
         else fprintf(stderr, "vsync on (%s)\n", SDL_GL_GetSwapInterval() < 0 ? "adaptive" : "every refresh");
     } else SDL_GL_SetSwapInterval(0);
     if (dc_pvr_gl_init(getproc)) return -1;
