@@ -400,7 +400,21 @@ static void on_vblank(uint64_t f) {
         /* with vsync the swap already waits for the display; sleep only when more than a field ahead
          * (a display faster than 60 Hz), so a 60 Hz display isn't made to skip a refresh now and then */
         double ahead = cfg.vsync ? 0.017 : 0.0;
-        if (emu > real + ahead) SDL_Delay((Uint32)((emu - real - ahead) * 1000.0));
+        /* with sound (and no vsync) the sound card's clock paces the game: the queue is held near 60 ms,
+         * so it never runs dry (stutter) or overflows (dropped blocks), whatever the drift between the
+         * wall clock, SDL_Delay's granularity and the card. The wall clock only bounds it: never more
+         * than 50 ms ahead of real time. DC_PACE=clock: wall clock only (as before). */
+        static int by_clock = -1;
+        if (by_clock < 0) { const char *e = getenv("DC_PACE"); by_clock = e && !strcmp(e, "clock"); }
+        if (audio && !cfg.vsync && !by_clock) {
+            const Uint32 target = 44100 * 4 * 60 / 1000;    /* bytes: 60 ms of 16-bit stereo */
+            while (SDL_GetQueuedAudioSize(audio) > target && emu > real - 0.05) {
+                SDL_Delay(1);
+                now = SDL_GetPerformanceCounter(); real = (double)(now - t0_count) / (double)freq;
+            }
+            if (real - emu > 0.25 || emu - real > 0.05) { t0_count = now; t0_cycles = dc_current_ctx->cycles; }
+        }
+        else if (emu > real + ahead) SDL_Delay((Uint32)((emu - real - ahead) * 1000.0));
         else if (real - emu > 0.25) { t0_count = now; t0_cycles = dc_current_ctx->cycles; }   /* too slow: don't try to catch up */
     }
 }
