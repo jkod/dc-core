@@ -559,6 +559,8 @@ static void batch_add(const pvr_poly *p, int set, int mark, int blend, int first
  * shows its blurred, darkened average (vertical gradient kept). No readback. */
 int dc_pvr_gl_side_fill = 1;
 int dc_pvr_gl_letterbox_4_3 = 1;
+int dc_pvr_gl_tile_clamp = 1;
+int dc_pvr_gl_letterbox_zoom;
 int dc_pvr_gl_show_4_3;
 static GLuint bar_prog, edge_tex[2], edge_fbo[2];
 static GLint bar_x0, bar_x1, bar_tex;
@@ -637,6 +639,8 @@ static float pic_offy;
  * (GL rows go up) holding those lines; 0/0 = the whole picture. */
 int dc_pvr_gl_fill_lines = 1;
 static int pic_y0, pic_y1;
+/* a letterboxed cut-scene zoomed to fill the window: the FBO rectangle between the bars (0 = none) */
+static int zoom_x0, zoom_x1, zoom_y0, zoom_y1;
 /* debug (DC_GL_DEBUG): draw a known 4x4 texture through the real shader and read the result back,
  * at several 1/w depths and filter settings, and log what the driver produced */
 static void gl_selftest(void) {
@@ -855,7 +859,18 @@ void dc_pvr_gl_render(int scale) {
              * but scaled up, bilinear filtering at the piece's edge also reads the texel next to it.
              * Art cut into pieces (Bomberman Online's PAUSE logo: two halves stacked in one texture)
              * otherwise gets a dark seam where the pieces meet */
-            int one = flat;
+            /* the same for a big screen-parallel piece at any depth: 2D backgrounds cut into tiles
+             * (Looney Tunes Space Race's menus) otherwise show thin lines where the tiles meet */
+            int tile = 0;
+            if (!flat && dc_pvr_gl_tile_clamp && p->n >= 3 && ((p->isp >> 25) & 1) && ((p->tsp >> 13) & 3)) {
+                float x0 = v[0].x, x1 = v[0].x, y0 = v[0].y, y1 = v[0].y; tile = 1;
+                for (int k = 1; k < p->n; k++) {
+                    if (v[k].z != v[0].z) { tile = 0; break; }
+                    if (v[k].x < x0) x0 = v[k].x; if (v[k].x > x1) x1 = v[k].x; if (v[k].y < y0) y0 = v[k].y; if (v[k].y > y1) y1 = v[k].y;
+                }
+                if (tile && (x1 - x0 < 64.f || y1 - y0 < 64.f)) tile = 0;
+            }
+            int one = flat || tile;
             float *ub = poly_uvbox[i]; ub[0] = ub[1] = 1e30f; ub[2] = ub[3] = -1e30f;
             for (int k = 0; k < p->n && one; k++) {
                 if (v[k].u < 0.f || v[k].u > 1.f || v[k].v < 0.f || v[k].v > 1.f) one = 0;
@@ -1008,6 +1023,19 @@ void dc_pvr_gl_render(int scale) {
     int lbox = dc_pvr_gl_widescreen && dc_pvr_gl_show_4_3;
     if (dc_pvr_gl_widescreen && dc_pvr_gl_letterbox_4_3 && (f.clip_y1 - f.clip_y0 + 1) * 4 >= f.height * 3)   /* not in a band */
         for (int i = 0; i < f.npolys && !lbox; i++) lbox = letterbox_bar(&f.polys[i], f.verts + f.polys[i].first, RW, f.height);
+    /* dc_pvr_gl_letterbox_zoom: the picture between the bars is cropped to the window's shape and fills it */
+    float lb_top = 0.f, lb_bot = (float)f.height;
+    if (lbox && !dc_pvr_gl_show_4_3 && dc_pvr_gl_letterbox_zoom)
+        for (int i = 0; i < f.npolys; i++) {
+            const pvr_vtx *v = f.verts + f.polys[i].first;
+            if (!letterbox_bar(&f.polys[i], v, RW, f.height)) continue;
+            float y0 = v[0].y, y1 = v[0].y;
+            for (int k = 1; k < f.polys[i].n; k++) { if (v[k].y < y0) y0 = v[k].y; if (v[k].y > y1) y1 = v[k].y; }
+            if (y0 <= 1.f && y1 > lb_top) lb_top = y1;
+            if (y1 >= f.height - 1.f && y0 < lb_bot) lb_bot = y0;
+        }
+    if (lb_top > 0.f && lb_bot == (float)f.height) lb_bot = (float)f.height - lb_top;   /* one bar seen: the same below */
+    if (lb_bot == (float)f.height && lb_top == 0.f) lb_bot = lb_top = -1.f;            /* no zoom */
     float cx0 = 1e30f, cx1 = -1e30f;                        /* x extent of the textured picture (side bars) */
     split_wide = 0;
     if (dc_pvr_gl_widescreen && dc_pvr_gl_split_panel_x > 0 && dc_pvr_gl_split_panel_x < f.width)
@@ -1134,6 +1162,11 @@ void dc_pvr_gl_render(int scale) {
     }
     { int sx0 = dc_pvr_gl_widescreen ? 0 : (int)((f.clip_x0 * (float)fb_w) / f.width), sx1 = dc_pvr_gl_widescreen ? fb_w : (int)(((f.clip_x1 + 1) * (float)fb_w) / f.width);
       if (lbox) { float o = (WW - (float)RW) * 0.5f, k = (float)fb_w / WW; sx0 = (int)ceilf(o * k); sx1 = (int)floorf((o + (float)RW) * k); }
+      zoom_x0 = zoom_x1 = zoom_y0 = zoom_y1 = 0;
+      if (lbox && lb_bot > lb_top && lb_bot - lb_top >= f.height / 3.f) {
+          zoom_x0 = sx0; zoom_x1 = sx1;
+          zoom_y0 = fb_h - (int)floorf(lb_bot * (float)scale); zoom_y1 = fb_h - (int)ceilf(lb_top * (float)scale);
+      }
       else if (dc_pvr_gl_widescreen && band) {             /* a quarter: its side of the screen, out to that edge */
         float o = (WW - (float)RW) * 0.5f, k = (float)fb_w / WW, kx = (float)RW / (float)f.width;
         if (f.clip_x0 > 0) sx0 = (int)floorf((o + (float)f.clip_x0 * kx) * k + 0.5f);
@@ -1282,8 +1315,20 @@ void dc_pvr_gl_render(int scale) {
     }
     pic_offy = ((float)(f.height - 1 - f.clip_y1) - (float)f.clip_y0) * 0.5f / (float)f.height;
     pic_y0 = fb_h - (f.clip_y1 + 1) * scale; pic_y1 = fb_h - f.clip_y0 * scale;
-    if (pic_y0 < 0 || pic_y1 > fb_h || (pic_y1 - pic_y0) * 4 < fb_h * 3) pic_y0 = pic_y1 = 0;   /* odd clip or one band: whole picture */
+    /* odd clip or one band (a split-screen view, a loading screen's progress bar): the whole picture
+     * where it is, not centred on the band (Looney Tunes Space Race's loading bar near the bottom) */
+    if (pic_y0 < 0 || pic_y1 > fb_h || (pic_y1 - pic_y0) * 4 < fb_h * 3) { pic_y0 = pic_y1 = 0; pic_offy = 0; }
     p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+/* the window as presented (call before swapping), RGB8 top row first, */
+void dc_pvr_gl_read_window(uint8_t *rgb, int win_w, int win_h) {
+    uint8_t *tmp = malloc((size_t)win_w * win_h * 4);
+    p_glBindFramebuffer(GL_FRAMEBUFFER, 0); p_glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    p_glReadPixels(0, 0, win_w, win_h, GL_RGBA, GL_UNSIGNED_BYTE, tmp);
+    for (int y = 0; y < win_h; y++)
+        for (int x = 0; x < win_w; x++) memcpy(rgb + ((size_t)y * win_w + x) * 3, tmp + ((size_t)(win_h - 1 - y) * win_w + x) * 4, 3);
+    free(tmp);
 }
 
 void dc_pvr_gl_read(uint8_t *rgb, int *w, int *h) {
@@ -1311,7 +1356,7 @@ void dc_pvr_gl_capture(int scale) {
     if (c == NCAP) c = old;
     /* swap the screen's target for the capture's, draw, swap back (with what the present uses) */
     GLuint sf = fbo, st = color_tex, sd = depth_rb; int sw = fb_w, sh = fb_h;
-    float sa = disp_aspect, so = pic_offy, sww = last_ww, srw = last_rw, srh = last_rh; int sy0 = pic_y0, sy1 = pic_y1;
+    float sa = disp_aspect, so = pic_offy, sww = last_ww, srw = last_rw, srh = last_rh; int sy0 = pic_y0, sy1 = pic_y1, zx0 = zoom_x0, zx1 = zoom_x1, zy0 = zoom_y0, zy1 = zoom_y1;
     if (cap[c].tex) {                   /* keep what is there now: the pass may draw it again (a trail) */
         if (cap[NCAP].w != cap[c].w || cap[NCAP].h != cap[c].h || !cap[NCAP].tex) {
             if (cap[NCAP].tex) { p_glDeleteFramebuffers(1, &cap[NCAP].fbo); p_glDeleteTextures(1, &cap[NCAP].tex); }
@@ -1340,7 +1385,7 @@ void dc_pvr_gl_capture(int scale) {
     cap[c].fbo = fbo; cap[c].tex = color_tex; cap[c].depth = depth_rb; cap[c].w = fb_w; cap[c].h = fb_h;
     cap[c].addr = addr; cap[c].ww = last_ww; cap[c].rw = last_rw; cap[c].rh = last_rh; cap[c].frame = frame_no;
     fbo = sf; color_tex = st; depth_rb = sd; fb_w = sw; fb_h = sh;
-    disp_aspect = sa; pic_offy = so; pic_y0 = sy0; pic_y1 = sy1; last_ww = sww; last_rw = srw; last_rh = srh;
+    disp_aspect = sa; pic_offy = so; pic_y0 = sy0; pic_y1 = sy1; zoom_x0 = zx0; zoom_x1 = zx1; zoom_y0 = zy0; zoom_y1 = zy1; last_ww = sww; last_rw = srw; last_rh = srh;
     p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
@@ -1355,7 +1400,14 @@ void dc_pvr_gl_present(int win_w, int win_h, int stretch) {
     p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
     p_glViewport(0, 0, win_w, win_h);
     p_glClearColor(0, 0, 0, 1); p_glClear(GL_COLOR_BUFFER_BIT);
-    if (dc_pvr_gl_fill_lines && pic_y1 > pic_y0) {         /* the drawn lines fill the height */
+    if (zoom_x1 > zoom_x0 && zoom_y1 > zoom_y0) {          /* a letterboxed cut-scene, cropped to fill the window */
+        float px = disp_aspect * (float)fb_h / (float)fb_w;    /* a target pixel's shape */
+        float sw = (float)(zoom_x1 - zoom_x0) * px, shh = (float)(zoom_y1 - zoom_y0), want = (float)dw / (float)dh;
+        int x0 = zoom_x0, x1 = zoom_x1, y0 = zoom_y0, y1 = zoom_y1;
+        if (sw / shh > want) { int c = (int)(((float)(x1 - x0) - want * shh / px) * 0.5f); x0 += c; x1 -= c; }
+        else { int c = (int)((shh - sw / want) * 0.5f); y0 += c; y1 -= c; }
+        p_glBlitFramebuffer(x0, y0, x1, y1, dx, dy, dx + dw, dy + dh, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    } else if (dc_pvr_gl_fill_lines && pic_y1 > pic_y0) {         /* the drawn lines fill the height */
         p_glBlitFramebuffer(0, pic_y0, fb_w, pic_y1, dx, dy, dx + dw, dy + dh, GL_COLOR_BUFFER_BIT, GL_LINEAR);
     } else {
         int sh = (int)(pic_offy * (float)dh + (pic_offy >= 0 ? 0.5f : -0.5f));   /* centre the drawn lines (GL rows go up) */
@@ -1370,7 +1422,7 @@ void dc_pvr_gl_load_rgb(const uint8_t *rgb, int w, int h) {
     if (!ready || w <= 0 || h <= 0) return;
     if (!fbo) ensure_fbo(w, h);
     disp_aspect = 4.f / 3.f;                               /* a CPU-drawn screen: always 4:3 */
-    pic_offy = 0; pic_y0 = pic_y1 = 0;
+    pic_offy = 0; pic_y0 = pic_y1 = 0; zoom_x0 = zoom_x1 = zoom_y0 = zoom_y1 = 0;
     uint8_t *tmp = malloc((size_t)w * h * 3);
     for (int y = 0; y < h; y++) memcpy(tmp + (size_t)(h - 1 - y) * w * 3, rgb + (size_t)y * w * 3, (size_t)w * 3);
     if (w == fb_w && h == fb_h) {                          /* same size: straight into the picture */

@@ -23,9 +23,12 @@ int  dc_pvr_gl_init(void *(*getproc)(const char *name));
 void dc_pvr_gl_render(int scale);
 void dc_pvr_gl_present(int win_w, int win_h, int stretch);
 void dc_pvr_gl_read(uint8_t *rgb, int *w, int *h);
+void dc_pvr_gl_read_window(uint8_t *rgb, int win_w, int win_h);   /* the presented window (before swapping), RGB8 */
 extern int dc_pvr_gl_fill_lines;    /* show only the lines the game draws, filling the window height (default 1) */
 extern int dc_pvr_gl_side_fill;     /* widescreen: fill empty side bars with the picture's edge colour (default 1) */
 extern int dc_pvr_gl_letterbox_4_3;  /* widescreen: frames with cut-scene letterbox bars are shown at 4:3, black sides (default 1) */
+extern int dc_pvr_gl_tile_clamp;     /* big screen-parallel textured pieces with UVs in 0..1 sample clamped to their UV range: no seams between 2D background tiles when scaled up (default 1) */
+extern int dc_pvr_gl_letterbox_zoom;  /* widescreen: with dc_pvr_gl_letterbox_4_3, the picture between the bars is cropped to the window's shape and fills it (default 0) */
 extern int dc_pvr_gl_hud_before_shade;  /* widescreen: polygons drawn before a full-screen pause shade are HUD even when
                                          * they lie above it (they keep moving); only those after it are the menu (default 0) */
 extern int dc_pvr_gl_show_4_3;       /* widescreen: set by a port for screens framed for 4:3 (e.g. a 2D title picture over a 3D

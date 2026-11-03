@@ -259,10 +259,14 @@ static void print_stats(void) {
     fprintf(stderr, "dc-core: %lu fields, %lu renders, %.1f s emulated in %.1f s (%.0f%% speed)\n",
             presented, renders, emu, wall, wall > 0 ? emu / wall * 100 : 0);
 }
+/* debugging: DC_SHOTS_WINDOW=1 makes screenshots show the window as presented, not the rendered picture */
+static uint8_t win_rgb[1920 * 1080 * 3 * 4]; static int win_rgb_w, win_rgb_h;
+static int shot_window(void) { static int v = -1; if (v < 0) { const char *e = getenv("DC_SHOTS_WINDOW"); v = e && *e == '1'; } return v; }
 static void screenshot_to(const char *path) {
     int w = 0, h = 0;
     static uint8_t *rgb; rgb = realloc(rgb, 1920 * 4 * 1440 * 4 * 3);
-    dc_pvr_gl_read(rgb, &w, &h);
+    if (shot_window() && win_rgb_w) { w = win_rgb_w; h = win_rgb_h; memcpy(rgb, win_rgb, (size_t)w * h * 3); }
+    else dc_pvr_gl_read(rgb, &w, &h);
     if (w <= 0) return;
     SDL_Surface *s = SDL_CreateRGBSurfaceWithFormatFrom(rgb, w, h, 24, w * 3, SDL_PIXELFORMAT_RGB24);
     char name[64]; snprintf(name, sizeof name, "screenshot_%04lu.bmp", presented);
@@ -341,6 +345,7 @@ static void on_vblank(uint64_t f) {
         int dw, dh; SDL_GL_GetDrawableSize(win, &dw, &dh);
         if (cfg.widescreen && dh > 0) dc_pvr_gl_aspect = (float)dw / (float)dh;   /* the next frame fills the window */
         dc_pvr_gl_present(dw, dh, 0);
+        if (shot_window() && dw * dh <= 1920 * 1080 * 4) { dc_pvr_gl_read_window(win_rgb, dw, dh); win_rgb_w = dw; win_rgb_h = dh; }
         SDL_GL_SwapWindow(win);
         need_present = 0;
     }
