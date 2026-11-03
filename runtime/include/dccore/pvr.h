@@ -57,6 +57,9 @@ extern int dc_pvr_gl_clip_2d;
 /* render to texture (FB_W_SOF1 bit 24) in widescreen: also draw the pass at full width, for
  * full-screen quads that show that texture later (call at STARTRENDER, with dc_pvr_sw_render) */
 void dc_pvr_gl_capture(int scale);
+/* the same, and the picture also goes to the texture in VRAM (read back from GL, instead of a software
+ * render): 0 when GL cannot (not widescreen / not ready), then use dc_pvr_sw_render + dc_pvr_gl_capture */
+int  dc_pvr_gl_capture_to_vram(int scale);
 extern int dc_pvr_gl_split_panel_x;   /* widescreen: split-screen views clipped to [0, x) beside a side panel become full width (0 = off) */
 extern int dc_pvr_gl_hud_move;        /* widescreen: HUD pieces move out to the screen edges (default 1) */
 extern int dc_pvr_gl_hud_sharp;       /* HUD textures (flat polygons at >= dc_pvr_gl_hud_z) get a bicubic filter (default 1) */

@@ -1418,6 +1418,17 @@ void dc_pvr_gl_read(uint8_t *rgb, int *w, int *h) {
  * capture at the screen's full width; full-screen quads that show that texture later draw the
  * capture instead, so a crossfade over a captured frame (Tennis 2K2's replays) covers the 16:9
  * picture. The texture in VRAM (dc_pvr_sw_render) stays as it is for everything else. */
+void dc_pvr_sw_store(const uint8_t *rgba, int w, int h);
+void dc_pvr_target_size(int *w, int *h);
+static int capture_vram;                 /* dc_pvr_gl_capture_to_vram: also store the picture in VRAM */
+static void capture_readback(int c);
+int dc_pvr_gl_capture_to_vram(int scale) {
+    if (!ready || !dc_pvr_gl_widescreen) return 0;
+    capture_vram = 1;
+    dc_pvr_gl_capture(scale);
+    capture_vram = 0;
+    return 1;
+}
 void dc_pvr_gl_capture(int scale) {
     if (!ready || !dc_pvr_gl_widescreen) return;
     uint32_t addr = dc_pvr_reg(0x060) & 0x7FFFFF;
@@ -1454,6 +1465,7 @@ void dc_pvr_gl_capture(int scale) {
     }
     cap[c].fbo = fbo; cap[c].tex = color_tex; cap[c].depth = depth_rb; cap[c].w = fb_w; cap[c].h = fb_h;
     cap[c].addr = addr; cap[c].ww = last_ww; cap[c].rw = last_rw; cap[c].rh = last_rh; cap[c].frame = frame_no;
+    if (capture_vram) capture_readback(c);
     fbo = sf; color_tex = st; depth_rb = sd; fb_w = sw; fb_h = sh;
     disp_aspect = sa; pic_offy = so; pic_y0 = sy0; pic_y1 = sy1; zoom_x0 = zx0; zoom_x1 = zx1; zoom_y0 = zy0; zoom_y1 = zy1; last_ww = sww; last_rw = srw; last_rh = srh;
     p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -1518,4 +1530,36 @@ void dc_pvr_gl_load_rgb(const uint8_t *rgb, int w, int h) {
         p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
     }
     free(tmp);
+}
+
+/* the texture the game asked for, from the capture instead of the software renderer: the 4:3 part,
+ * scaled down on the GPU to the render's size (FB_X/Y_CLIP), read back and stored in the target's
+ * format. A software render of the pass took 50-200 ms (crossfades ran at a few frames a second). */
+static void capture_readback(int c) {
+    static GLuint small_fbo, small_tex; static int sw, sh;
+    static uint8_t *px, *rows; static size_t cap_px;
+    int W, H; dc_pvr_target_size(&W, &H);
+    if (cap[c].ww <= 0 || cap[c].rh <= 0) return;
+    if (!small_fbo || sw != W || sh != H) {
+        if (small_fbo) { p_glDeleteFramebuffers(1, &small_fbo); p_glDeleteTextures(1, &small_tex); }
+        p_glGenTextures(1, &small_tex); p_glBindTexture(GL_TEXTURE_2D, small_tex);
+        p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, W, H, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        p_glGenFramebuffers(1, &small_fbo); p_glBindFramebuffer(GL_FRAMEBUFFER, small_fbo);
+        p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, small_tex, 0);
+        sw = W; sh = H;
+    }
+    if ((size_t)W * H * 4 > cap_px) { cap_px = (size_t)W * H * 4; px = realloc(px, cap_px); rows = realloc(rows, cap_px); }
+    /* the capture is cap.ww native pixels wide (the 4:3 picture in the middle) and cap.rh high */
+    float fx = (float)cap[c].w / cap[c].ww, fy = (float)cap[c].h / cap[c].rh;
+    int x0 = (int)((cap[c].ww - cap[c].rw) * 0.5f * fx + 0.5f), x1 = x0 + (int)(W * fx + 0.5f);
+    int y1 = cap[c].h, y0 = y1 - (int)(H * fy + 0.5f);
+    p_glBindFramebuffer(GL_READ_FRAMEBUFFER, cap[c].fbo); p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, small_fbo);
+    p_glDisable(GL_SCISSOR_TEST);
+    p_glBlitFramebuffer(x0, y0, x1, y1, 0, 0, W, H, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+    p_glBindFramebuffer(GL_FRAMEBUFFER, small_fbo);
+    p_glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    p_glReadPixels(0, 0, W, H, GL_RGBA, GL_UNSIGNED_BYTE, px);
+    p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    for (int y = 0; y < H; y++) memcpy(rows + (size_t)y * W * 4, px + (size_t)(H - 1 - y) * W * 4, (size_t)W * 4);   /* GL rows are bottom-up */
+    dc_pvr_sw_store(rows, W, H);
 }

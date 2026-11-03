@@ -658,6 +658,66 @@ void pvr_region_extent(int *w, int *h) {
     *w = (mx + 1) * 32; *h = (my + 1) * 32;
 }
 
+/* a pixel in the framebuffer write format (FB_W_CTRL mode, alpha threshold for 1555) */
+static uint32_t fb_pack(uint32_t mode, uint32_t athr, uint32_t r, uint32_t g, uint32_t b, uint32_t a) {
+    switch (mode) {
+    case 0: return (r >> 3) << 10 | (g >> 3) << 5 | b >> 3 | 0x8000;
+    case 1: return (r >> 3) << 11 | (g >> 2) << 5 | b >> 3;
+    case 2: return (a >> 4) << 12 | (r >> 4) << 8 | (g >> 4) << 4 | b >> 4;
+    case 3: return (a >= athr ? 0x8000u : 0) | (r >> 3) << 10 | (g >> 3) << 5 | b >> 3;
+    case 4: case 5: return r << 16 | g << 8 | b;
+    default: return a << 24 | r << 16 | g << 8 | b;
+    }
+}
+
+/* where a render writes: FB_W_SOF1, FB_W_LINESTRIDE (64-bit units), FB_W_CTRL packing; the size
+ * written (WO x HO, from the clip of W x H) */
+typedef struct { uint32_t sof, stride, mode, athr; int bpp, tex, WO, HO; } fb_target;
+static fb_target fb_target_of(int W, int H) {
+    fb_target t;
+    t.sof = REG(0x060) & 0x7FFFFF; t.stride = (REG(0x04C) & 0x1FF) * 8;
+    uint32_t ctrl = REG(0x048);
+    t.mode = ctrl & 7; t.athr = (ctrl >> 8) & 255;
+    t.bpp = t.mode <= 3 ? 2 : t.mode == 4 ? 3 : 4; t.tex = (REG(0x060) >> 24) & 1;
+    t.WO = W; t.HO = H;                                     /* no wider than a line (a 1024 clip into a 640-pixel texture) */
+    if (t.stride && t.WO * t.bpp > (int)t.stride) t.WO = (int)t.stride / t.bpp;
+    if (t.tex) {                                            /* a texture: only the tiles the region array lists, so the */
+        int rw, rh; pvr_region_extent(&rw, &rh);                /* lines past them (other textures) stay as they are */
+        if (rw > 0 && rw < t.WO) t.WO = rw;
+        if (rh > 0 && rh < t.HO) t.HO = rh;
+    }
+    return t;
+}
+static void fb_put(const fb_target *t, int x, int y, uint32_t v) {
+    uint32_t o = t->sof + (uint32_t)y * t->stride + (uint32_t)x * (uint32_t)t->bpp;
+    if (t->tex) { o &= 0x7FFFFF; for (int k = 0; k < t->bpp; k++) dc_vram[(o + k) & 0x7FFFFF] = (uint8_t)(v >> (8 * k)); }
+    else for (int k = 0; k < t->bpp; k++) wr8_area32(o + k, (uint8_t)(v >> (8 * k)));
+}
+static void fb_done(const fb_target *t) {
+    if (t->tex)                                            /* the texture cache sees the new contents */
+        for (uint32_t pg = t->sof >> 12; pg <= ((t->sof + (uint32_t)t->HO * t->stride) >> 12) && pg < 0x800; pg++) dc_vram_gen[pg]++;
+}
+
+/* the render's size: FB_X_CLIP / FB_Y_CLIP maxima */
+void dc_pvr_target_size(int *w, int *h) {
+    uint32_t xc = REG(0x068), yc = REG(0x06C);
+    int W = (int)((xc >> 16) & 0x7FF) + 1, H = (int)((yc >> 16) & 0x3FF) + 1;
+    if (W < 16 || W > 1280) W = 640;
+    if (H < 16 || H > 1024) H = 480;
+    *w = W; *h = H;
+}
+
+/* store a picture drawn elsewhere (GL) as this render's result: rgba is w x h, top row first */
+void dc_pvr_sw_store(const uint8_t *rgba, int w, int h) {
+    fb_target t = fb_target_of(w, h);
+    for (int y = 0; y < t.HO && y < h; y++)
+        for (int x = 0; x < t.WO && x < w; x++) {
+            const uint8_t *p = rgba + ((size_t)y * w + x) * 4;
+            fb_put(&t, x, y, fb_pack(t.mode, t.athr, p[0], p[1], p[2], p[3]));
+        }
+    fb_done(&t);
+}
+
 int dc_pvr_sw_render(void) {
     ctx_t *saved = ta_ctx, *rc = render_ctx();
     ta_ctx = rc;
@@ -703,41 +763,17 @@ int dc_pvr_sw_render(void) {
     if (!presort) qsort(s, nt, sizeof *s, cmp_sort);
     for (int i = 0; i < nt; i++) draw_poly(&pl[s[i].idx]);
     free(s);
-    /* write the framebuffer: FB_W_SOF1, FB_W_LINESTRIDE (64-bit units), FB_W_CTRL packing */
-    /* FB_W_SOF1 bit 24: render to texture, written in the 64-bit (texture) layout, not the 32-bit
-     * framebuffer one (Tennis 2K2 captures frames this way for its crossfades) */
-    uint32_t sof = REG(0x060) & 0x7FFFFF, stride = (REG(0x04C) & 0x1FF) * 8, ctrl = REG(0x048), mode = ctrl & 7;
-    uint32_t athr = (ctrl >> 8) & 255;
-    int bpp = mode <= 3 ? 2 : mode == 4 ? 3 : 4, tex = (REG(0x060) >> 24) & 1;
-    int WO = W, HO = H;                                    /* no wider than a line (a 1024 clip into a 640-pixel texture) */
-    if (stride && WO * bpp > (int)stride) WO = (int)stride / bpp;
-    if (tex) {                                             /* a texture: only the tiles the region array lists, so the */
-        int rw, rh; pvr_region_extent(&rw, &rh);               /* lines past them (other textures) stay as they are */
-        if (rw > 0 && rw < WO) WO = rw;
-        if (rh > 0 && rh < HO) HO = rh;
-    }
-    for (int y = 0; y < HO; y++)
-        for (int x = 0; x < WO; x++) {
+    /* write the framebuffer. FB_W_SOF1 bit 24: render to texture, written in the 64-bit (texture)
+     * layout, not the 32-bit framebuffer one (Tennis 2K2 captures frames this way for its crossfades) */
+    fb_target t = fb_target_of(W, H);
+    for (int y = 0; y < t.HO; y++)
+        for (int x = 0; x < t.WO; x++) {
             float c[4];
             if (hscale) { const float *p0 = cbuf + (y * RW + 2 * x) * 4, *p1 = p0 + 4; for (int k = 0; k < 4; k++) c[k] = (p0[k] + p1[k]) * 0.5f; }
             else memcpy(c, cbuf + (y * RW + x) * 4, 16);
-            uint32_t r = (uint32_t)(c[0] * 255 + .5f), g = (uint32_t)(c[1] * 255 + .5f), b = (uint32_t)(c[2] * 255 + .5f), a = (uint32_t)(c[3] * 255 + .5f);
-            uint32_t v;
-            switch (mode) {
-            case 0: v = (r >> 3) << 10 | (g >> 3) << 5 | b >> 3 | 0x8000; break;
-            case 1: v = (r >> 3) << 11 | (g >> 2) << 5 | b >> 3; break;
-            case 2: v = (a >> 4) << 12 | (r >> 4) << 8 | (g >> 4) << 4 | b >> 4; break;
-            case 3: v = (a >= athr ? 0x8000u : 0) | (r >> 3) << 10 | (g >> 3) << 5 | b >> 3; break;
-            case 4: v = r << 16 | g << 8 | b; break;
-            case 5: v = r << 16 | g << 8 | b; break;
-            default: v = a << 24 | r << 16 | g << 8 | b; break;
-            }
-            uint32_t o = sof + y * stride + x * bpp;
-            if (tex) { o &= 0x7FFFFF; for (int k = 0; k < bpp; k++) dc_vram[(o + k) & 0x7FFFFF] = (uint8_t)(v >> (8 * k)); }
-            else for (int k = 0; k < bpp; k++) wr8_area32(o + k, (uint8_t)(v >> (8 * k)));
+            fb_put(&t, x, y, fb_pack(t.mode, t.athr, (uint32_t)(c[0] * 255 + .5f), (uint32_t)(c[1] * 255 + .5f), (uint32_t)(c[2] * 255 + .5f), (uint32_t)(c[3] * 255 + .5f)));
         }
-    if (tex)                                               /* the texture cache sees the new contents */
-        for (uint32_t pg = sof >> 12; pg <= ((sof + (uint32_t)HO * stride) >> 12) && pg < 0x800; pg++) dc_vram_gen[pg]++;
+    fb_done(&t);
     int n = npl;
     ta_ctx = saved;
     return n;
