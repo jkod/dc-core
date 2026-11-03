@@ -219,7 +219,7 @@ static const char *fs_src =
 "flat in vec4 f_c; flat in vec4 f_o;\n"
 "uniform sampler2D u_tex;\n"
 "uniform int u_quad; uniform vec4 u_quad_col;\n"
-"uniform int u_textured, u_shade, u_use_alpha, u_ign_ta, u_offset, u_gouraud, u_fog, u_pt;\n"
+"uniform int u_textured, u_shade, u_use_alpha, u_ign_ta, u_offset, u_gouraud, u_fog, u_pt, u_tpass;\n"
 "uniform float u_pt_ref; uniform vec3 u_fog_ram, u_fog_vert; uniform float u_fog_den; uniform vec2 u_fog_tab[128];\n"
 "uniform int u_hud; uniform vec4 u_uvbox;\n"
 "out vec4 o_col;\n"
@@ -278,6 +278,8 @@ static const char *fs_src =
 "    if (u_fog == 3) px = vec4(fc, f); else px.rgb = mix(px.rgb, fc, f);\n"
 "  }\n"
 "  if (u_pt != 0 && px.a * 255.0 + 0.5 < u_pt_ref * 255.0) discard;\n"   /* in 8-bit steps like the PVR: colours divided by the interpolated 1/w can land a hair below 1.0 (NVIDIA), which dropped whole letters of Rush's text */
+"  if (u_tpass == 1 && px.a < 0.996) discard;\n"
+"  if (u_tpass == 2 && px.a >= 0.996) discard;\n"
 "  o_col = px;\n"
 "  gl_FragDepth = clamp((log2(iw) + 64.0) / 128.0, 0.0, 1.0);\n"
 "}\n";
@@ -288,7 +290,7 @@ static float depth_of(float invw) { float d = (log2f(fmaxf(invw, 1e-30f)) + 64.f
 typedef struct { float x, y, z, u, v, u1, v1, c[4], o[4], c1[4], o1[4]; } gv;
 static GLuint prog, vao, vbo, fbo, color_tex, depth_rb;
 static int fb_w, fb_h, ready;
-static struct { GLint scale, offx, set, quad, quad_col, tex, textured, shade, use_alpha, ign_ta, offset, gouraud, fog, pt, pt_ref,
+static struct { GLint scale, offx, set, quad, quad_col, tex, textured, tpass, shade, use_alpha, ign_ta, offset, gouraud, fog, pt, pt_ref,
                 fog_ram, fog_vert, fog_den, fog_tab, hud, uvbox; } U;
 static gv *verts; static int nverts, cap_verts;
 typedef struct { int first, count; } span;
@@ -328,7 +330,7 @@ int dc_pvr_gl_init(void *(*getproc)(const char *)) {
     bars_init();
 #define UL(f, n) U.f = p_glGetUniformLocation(prog, n)
     UL(scale, "u_scale"); UL(offx, "u_offx"); UL(set, "u_set"); UL(quad, "u_quad"); UL(quad_col, "u_quad_col"); UL(tex, "u_tex");
-    UL(textured, "u_textured"); UL(shade, "u_shade"); UL(use_alpha, "u_use_alpha"); UL(ign_ta, "u_ign_ta"); UL(offset, "u_offset");
+    UL(textured, "u_textured"); UL(tpass, "u_tpass"); UL(shade, "u_shade"); UL(use_alpha, "u_use_alpha"); UL(ign_ta, "u_ign_ta"); UL(offset, "u_offset");
     UL(gouraud, "u_gouraud"); UL(fog, "u_fog"); UL(pt, "u_pt"); UL(pt_ref, "u_pt_ref"); UL(hud, "u_hud"); UL(uvbox, "u_uvbox"); UL(fog_ram, "u_fog_ram");
     UL(fog_vert, "u_fog_vert"); UL(fog_den, "u_fog_den"); UL(fog_tab, "u_fog_tab");
 #undef UL
@@ -486,6 +488,17 @@ static void tri(const pvr_poly *p, const pvr_vtx *a, const pvr_vtx *b, const pvr
     for (int k = 1; k + 1 < n; k++) { push(&p0[0]); push(&p0[k]); push(&p0[k + 1]); }   /* same winding */
 }
 
+/* translucent polygons in two passes (auto-sort only): the PVR sorts translucent fragments per pixel,
+ * the GL path per polygon (by its farthest point), which put a large polygon wrongly in front of a
+ * smaller one next to it (Tennis 2K2's fence over the advertising boards in front of it). Fragments a
+ * normal alpha blend draws fully opaque come out the same in any order, so pass 1 draws just those,
+ * writing depth; pass 2 draws the rest sorted as before, behind what pass 1 drew hidden. */
+int dc_pvr_gl_tsort2 = 1;
+static int tpass;                         /* 0 off, 1 the opaque fragments, 2 the rest */
+static int two_pass_poly(const pvr_poly *p) {
+    int zmode = (p->isp >> 29) & 7;
+    return p->list == 2 && ((p->tsp >> 29) & 7) == 4 && ((p->tsp >> 26) & 7) == 5 && (zmode == 4 || zmode == 6);
+}
 static unsigned char *poly_hud; static const pvr_poly *poly_base;
 /* per polygon: bit 0 (bit 1 for the second parameter set) when its UVs stay within one copy of the
  * texture (0..1): it samples clamped to the texture's edge, so bilinear filtering at a border doesn't
@@ -524,6 +537,9 @@ static void set_poly_state(const pvr_poly *p, int set) {
     if (p->list == 4 && zmode == 0) zmode = 6;
     p_glDepthFunc(depth_fn[zmode]);
     p_glDepthMask(p->list != 2 && !((p->isp >> 26) & 1));
+    int tp = tpass && two_pass_poly(p) ? tpass : 0;
+    p_glUniform1i(U.tpass, tp);
+    if (tp == 1) p_glDepthMask(1);
 }
 static GLenum blend_src(int i) { static const GLenum t[8] = { GL_ZERO, GL_ONE, GL_DST_COLOR, GL_ONE_MINUS_DST_COLOR, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_DST_ALPHA, GL_ONE_MINUS_DST_ALPHA }; return t[i & 7]; }
 static GLenum blend_dst(int i) { static const GLenum t[8] = { GL_ZERO, GL_ONE, GL_SRC_COLOR, GL_ONE_MINUS_SRC_COLOR, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_DST_ALPHA, GL_ONE_MINUS_DST_ALPHA }; return t[i & 7]; }
@@ -1162,6 +1178,39 @@ void dc_pvr_gl_render(int scale) {
     }
     /* the render target in console units (see tri) */
     { float o = (WW - (float)RW) * 0.5f + 1.f; tgt_x0 = -o; tgt_x1 = (float)RW + o; tgt_y0 = -1.f; tgt_y1 = (float)RH + 1.f; }
+    /* a fade, flash or shade for the whole screen: flat colour (or black-modulated) rectangles at one
+     * depth that together cover the 4:3 picture once, one quad or tiles, at any depth (Tennis 2K2's
+     * white flash behind the SPT logo, the quarter tiles shading the match results). In widescreen
+     * their outer edges move out to the full width. */
+    float scr_z[4]; int nscr = 0;
+    if (dc_pvr_gl_widescreen && WW > (float)RW) {
+        enum { NT = 16 };
+        struct { float z, x0, x1, y0, y1, area; int n; } t[NT]; int nt = 0;
+        for (int i = 0; i < f.npolys; i++) {
+            const pvr_poly *p = &f.polys[i]; const pvr_vtx *v = f.verts + p->first;
+            if (p->n != 4 || !shade_poly(p, v)) continue;
+            float x0 = 1e30f, x1 = -1e30f, y0 = 1e30f, y1 = -1e30f; int rect = 1;
+            for (int k = 0; k < 4; k++) {
+                if (v[k].x < x0) x0 = v[k].x; if (v[k].x > x1) x1 = v[k].x;
+                if (v[k].y < y0) y0 = v[k].y; if (v[k].y > y1) y1 = v[k].y;
+                if (v[k].z != v[0].z) rect = 0;
+            }
+            for (int k = 0; k < 4 && rect; k++)
+                if ((fabsf(v[k].x - x0) > .5f && fabsf(v[k].x - x1) > .5f) || (fabsf(v[k].y - y0) > .5f && fabsf(v[k].y - y1) > .5f)) rect = 0;
+            float a = (x1 - x0) * (y1 - y0);
+            if (!rect || a < (float)RW * (float)RH / 20.f || x0 < -1.f || x1 > RW + 1.f) continue;
+            int j = 0; while (j < nt && t[j].z != v[0].z) j++;
+            if (j == nt) { if (nt == NT) continue; nt++; t[j].z = v[0].z; t[j].x0 = x0; t[j].x1 = x1; t[j].y0 = y0; t[j].y1 = y1; t[j].area = 0; t[j].n = 0; }
+            if (x0 < t[j].x0) t[j].x0 = x0; if (x1 > t[j].x1) t[j].x1 = x1;
+            if (y0 < t[j].y0) t[j].y0 = y0; if (y1 > t[j].y1) t[j].y1 = y1;
+            t[j].area += a; t[j].n++;
+        }
+        for (int j = 0; j < nt && nscr < 4; j++) {
+            float box = (t[j].x1 - t[j].x0) * (t[j].y1 - t[j].y0);
+            if (t[j].x0 <= 1.f && t[j].x1 >= RW - 1.f && t[j].y0 <= 1.f && t[j].y1 >= RH - 1.f
+                && t[j].area > box * 0.98f && t[j].area < box * 1.02f) scr_z[nscr++] = t[j].z;
+        }
+    }
     for (int i = 0; i < f.npolys; i++) {
         const pvr_poly *p = &f.polys[i];
         const pvr_vtx *v = f.verts + p->first;
@@ -1187,6 +1236,10 @@ void dc_pvr_gl_render(int scale) {
             else if (flat && v[0].z >= ovl_z) { push_dx = 0; if (v[0].z == ovl_z) { push_wide = WW; push_rw = (float)RW; } }   /* pause shade and menu */
             else if (mnx >= panel_x + 2.f) push_dx = panel_dx;      /* map, timer (the views' coin icons start just left of it) */
             else if (flat && v[0].z >= dc_pvr_gl_hud_z && dc_pvr_gl_hud_z > 0) push_dx = view_dx + out * side_dx;   /* the views' HUD (drawn unclipped) */
+        }
+        if (nscr && shade_poly(p, v) && p->n >= 3 && !split_wide) {
+            int flat = 1; for (int k = 1; k < p->n; k++) if (v[k].z != v[0].z) flat = 0;
+            for (int j = 0; j < nscr && flat; j++) if (scr_z[j] == v[0].z) { push_dx = 0; push_wide = WW; push_rw = (float)RW; break; }
         }
         if (poly_cap[i]) { push_dx = 0; push_wide = WW; push_rw = (float)RW; cap_uv = poly_cap[i] - 1; }
         /* letterboxed scenes shown wide (dc_pvr_gl_letterbox_4_3 off): the game's bars stop at the 4:3
@@ -1356,11 +1409,21 @@ void dc_pvr_gl_render(int scale) {
     }
     if (!presort) qsort(s, nt, sizeof *s, cmp_sort);
     p_glEnable(GL_BLEND);
+    if (!presort && dc_pvr_gl_tsort2) {
+        tpass = 1;
+        for (int k = 0; k < nt; k++) {
+            const pvr_poly *p = &f.polys[s[k].idx];
+            if (two_pass_poly(p)) batch_add(p, 0, -1, 1, spans[s[k].idx].first, spans[s[k].idx].count);
+        }
+        batch_reset();
+        tpass = 2;
+    }
     for (int k = 0; k < nt; k++) {
         const pvr_poly *p = &f.polys[s[k].idx];
         batch_add(p, 0, -1, 1, spans[s[k].idx].first, spans[s[k].idx].count);
     }
     batch_reset();
+    tpass = 0; p_glUniform1i(U.tpass, 0);
     free(s);
     p_glDisable(GL_BLEND);
     p_glDisable(GL_SCISSOR_TEST);
