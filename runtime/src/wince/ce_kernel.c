@@ -304,7 +304,8 @@ static void idle(void) {
     }
     uint64_t to = wake < dc_next_event ? wake : dc_next_event;
     if (to == ~0ull) to = ce_now() + CE_CYCLES_PER_MS;
-    if (to > ce_now()) ce_ctx->cycles = to;
+    if (to <= ce_now()) to = ce_now() + 2000;         /* the hardware has an event now: still let time pass */
+    ce_ctx->cycles = to;
     in_idle = 1;
     dc_events(ce_ctx);
     in_idle = 0;
@@ -436,6 +437,20 @@ void ce_irq_disable(uint32_t sysintr) {
 }
 static int need_resched;
 static uint32_t h_vector(sh4ctx *c) {
+    uint32_t evt = dc_rd32(0xFF000028u);          /* INTEVT */
+    if (evt >= 0x400 && evt <= 0x440) {           /* TMU0-2 underflow: no driver here uses them; acknowledge */
+        uint32_t tcr = 0xFFD80010u + (evt - 0x400) / 0x20 * 12;
+        dc_wr16(tcr, (uint16_t)(dc_rd16(tcr) & ~0x0120u));    /* UNF off, UNIE off */
+        TRACE("TMU interrupt %03X: disabled", evt);
+        sh4_set_sr(c, c->ssr);
+        return 0;
+    }
+    if (evt >= 0x640) {                           /* DMAC: the drivers poll the channels */
+        TRACE("DMAC interrupt %03X", evt);
+        for (int ch = 0; ch < 4; ch++) { uint32_t chcr = 0xFFA0000Cu + (uint32_t)ch * 0x10; dc_wr32(chcr, dc_rd32(chcr) & ~4u); }
+        sh4_set_sr(c, c->ssr);
+        return 0;
+    }
     uint32_t n = dc_rd32(0xA05F6900u), e = dc_rd32(0xA05F6904u), r = dc_rd32(0xA05F6908u);
     uint32_t pend[3] = { n, e, r };
     int any = 0;

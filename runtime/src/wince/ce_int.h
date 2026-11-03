@@ -17,7 +17,7 @@
 
 /* ---- the user address space ---- */
 #define CE_KDATA        0x00005800u    /* PUserKData on SH (kfuncs.h) */
-#define CE_HEAP_ALIGN   16u
+#define CE_HEAP_ALIGN   32u
 #define CE_MAGIC        0x9F800000u    /* runtime entry points: VBR, thread exit, reschedule */
 #define CE_VBR          (CE_MAGIC + 0x0000u)
 #define CE_THREAD_EXIT  (CE_MAGIC + 0x1000u)

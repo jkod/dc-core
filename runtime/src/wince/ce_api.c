@@ -16,7 +16,7 @@ static uint32_t wdm_proc(const char *name);
 /* ------------------------------------------------------------------ calling guest code */
 uint32_t ce_call(uint32_t fn, int n, ...) {
     sh4ctx *c = ce_ctx;
-    uint32_t a[12] = { 0 }, sp = c->r[15], pr = c->pr;
+    uint32_t a[12] = { 0 }, sp = c->r[15], pr = c->pr, args[4] = { c->r[4], c->r[5], c->r[6], c->r[7] };
     va_list ap; va_start(ap, n);
     for (int i = 0; i < n && i < 12; i++) a[i] = va_arg(ap, uint32_t);
     va_end(ap);
@@ -25,8 +25,11 @@ uint32_t ce_call(uint32_t fn, int n, ...) {
     for (int i = 4; i < n; i++) dc_wr32(c->r[15] + 16 + (uint32_t)(i - 4) * 4, a[i]);
     for (int i = 0; i < 4; i++) c->r[4 + i] = a[i];
     dc_call(c, fn);
+    uint32_t r = c->r[0];
+    /* the native caller keeps reading its own arguments (ARG) afterwards */
     c->r[15] = sp; c->pr = pr;
-    return c->r[0];
+    for (int i = 0; i < 4; i++) c->r[4 + i] = args[i];
+    return r;
 }
 
 /* ------------------------------------------------------------------ threads */
@@ -246,6 +249,9 @@ FN(memcpy) { uint32_t d = ARG(0), s = ARG(1), n = ARG(2); uint8_t *pd = ce_ptr(d
     if (n && pd && ps && ce_ptr(d + n - 1) && ce_ptr(s + n - 1)) memmove(pd, ps, n);
     else for (uint32_t i = 0; i < n; i++) dc_wr8(d + i, dc_rd8(s + i));
     RET(d); }
+FN(memcmp) { uint32_t a = ARG(0), b = ARG(1), n = ARG(2);
+    for (uint32_t i = 0; i < n; i++) { int d = (int)dc_rd8(a + i) - (int)dc_rd8(b + i); if (d) RET((uint32_t)d); }
+    RET(0); }
 FN(memset) { uint32_t d = ARG(0), v = ARG(1), n = ARG(2); uint8_t *pd = ce_ptr(d);
     if (n && pd && ce_ptr(d + n - 1)) memset(pd, (int)v, n); else for (uint32_t i = 0; i < n; i++) dc_wr8(d + i, (uint8_t)v);
     RET(d); }
@@ -284,7 +290,11 @@ FN(VirtualFree) {
     if (ARG(2) & 0x8000) ce_free(addr);     /* MEM_RELEASE */
     RET(1);
 }
-static uint32_t phys_to_va(uint32_t pa) { return 0xA0000000u | (pa & 0x1FFFFFFFu); }
+/* physical 0x1Fxxxxxx is the SH-4's own registers (P4 0xFFxxxxxx); the rest through P2 */
+static uint32_t phys_to_va(uint32_t pa) {
+    pa &= 0x1FFFFFFFu;
+    return (pa & 0x1F000000u) == 0x1F000000u ? 0xE0000000u | pa : 0xA0000000u | pa;
+}
 FN(VirtualCopy) {             /* (dst, src, size, prot): PAGE_PHYSICAL 0x400 -> src is a physical address >> 8 */
     uint32_t dst = ARG(0), src = ARG(1), size = ARG(2), prot = ARG(3);
     uint32_t to = (prot & 0x400) ? phys_to_va(src << 8) : src;
@@ -523,18 +533,24 @@ FN(AddEventAccess) { RET(1); }
 #define CE_WDMH_SET 0x20u
 #define CE_WDMH     (CE_MAGIC + 0x2000u)
 static uint32_t va_phys(uint32_t va) { return va < 0x01000000u ? 0x0C000000u + va : DC_IS_RAM(va) ? (va & 0x1FFFFFFFu) : 0; }
-static uint32_t wdmh_alloc(uint32_t len, uint32_t physp) {
-    uint32_t va = ce_alloc((len + 31) & ~31u, 32);
+/* the kernel side of HalAllocateCommonBuffer: physical memory, which WDMLIB then maps with VirtualCopy */
+static uint32_t wdmh_alloc(uint32_t len) {
+    uint32_t va = ce_alloc((len + 0xFFF) & ~0xFFFu, 0x1000);
     if (va >= 0x01000000u) { ce_free(va); TRACE("common buffer above physical RAM"); return 0; }
-    if (physp) { dc_wr32(physp, va_phys(va)); dc_wr32(physp + 4, 0); }
-    TRACE("HalAllocateCommonBuffer %X -> %08X (phys %08X)", len, va, va_phys(va));
-    return va;
+    TRACE("HalAllocateCommonBuffer %X -> phys %08X", len, va_phys(va));
+    return va_phys(va);
+}
+static void wdmh_free(sh4ctx *c) {          /* which argument is the physical address isn't known: any that is */
+    for (int i = 0; i < 4; i++) {
+        uint32_t a = ARG(i);
+        if (a >= 0x0C000000u && a < 0x0D000000u && ce_alloc_size(a - 0x0C000000u)) { ce_free(a - 0x0C000000u); return; }
+    }
 }
 static uint32_t h_wdmh(sh4ctx *c) {
     uint32_t m = (c->entry - (0x80000000u | (CE_WDMH & 0x1FFFFFFFu))) / 2;
     switch (m) {
-    case 2: RET(wdmh_alloc(ARG(1), ARG(2)));              /* HalAllocateCommonBuffer(adapter, len, &phys, cached) */
-    case 3: ce_free(ARG(2)); RET(0);                       /* HalFreeCommonBuffer(adapter, len, phys(2 words)?, va) */
+    case 2: RET(wdmh_alloc(ARG(1)));                       /* HalAllocateCommonBuffer(adapter, len, &phys, cached) -> phys */
+    case 3: wdmh_free(c); RET(0);                          /* HalFreeCommonBuffer */
     case 4: case 6: RET(0);                                /* Hal{Get,Set}BusDataByOffset */
     case 5:                                                /* HalMapInterrupt(irq, ?, &sysintr): the OAL's numbers are SYSINTRs */
         TRACE("HalMapInterrupt %u", ARG(0));
@@ -548,8 +564,14 @@ static uint32_t h_wdmh(sh4ctx *c) {
         RET(0);
     }
     case 9: RET(0);                                        /* MmUnlockPages */
-    case 10: ce_free(ARG(1)); RET(0);                      /* HalFreeCommonBufferWithId */
-    case 11: RET(wdmh_alloc(ARG(1), ARG(2)));              /* HalAllocateCommonBufferWithId(id, len, &phys, ...) */
+    case 10: case 11: {        /* buffers kept by id across driver loads: 10 (id, va, phys) records, 11 (id, &va, &phys) finds */
+        static struct { uint32_t id, va, phys; } ids[16]; static int nids;
+        int k = 0;
+        for (; k < nids && ids[k].id != ARG(0); k++) ;
+        if (m == 10) { if (k == nids && nids < 16) nids++; if (k < 16) { ids[k].id = ARG(0); ids[k].va = ARG(1); ids[k].phys = ARG(2); } RET(0); }
+        dc_wr32(ARG(1), k < nids ? ids[k].va : 0); dc_wr32(ARG(2), k < nids ? ids[k].phys : 0);
+        RET(0);
+    }
     }
     char what[48]; snprintf(what, sizeof what, "WDMH method %u", m);
     ce_unimpl(what);
@@ -610,7 +632,7 @@ const ce_override ce_kernel_overrides[] = {
     K(TlsCall), K(TlsGetValue), K(TlsSetValue), K(GetLastError), K(SetLastError),
     K(GetTickCount), K(QueryPerformanceCounter), K(QueryPerformanceFrequency), K(GetLocalTime), K(GetSystemTime), K(Random),
     K(LocalAlloc), K(LocalFree), K(LocalReAlloc), K(LocalSize), K(GetProcessHeap), K(HeapCreate), K(HeapDestroy),
-    K(HeapAlloc), K(HeapFree), K(HeapReAlloc), K(HeapSize), K(malloc), K(calloc), K(free), K(realloc), K(memcpy), K(memset),
+    K(HeapAlloc), K(HeapFree), K(HeapReAlloc), K(HeapSize), K(malloc), K(calloc), K(free), K(realloc), K(memcpy), K(memset), K(memcmp),
     { "COREDLL.DLL", "memmove", k_memcpy }, { "COREDLL.DLL", "??2@YAPAXI@Z", k_malloc }, { "COREDLL.DLL", "??3@YAXPAX@Z", k_free },
     K(VirtualAlloc), K(VirtualFree), K(VirtualCopy), K(LockPages), K(UnlockPages), K(MapPtrToProcess), K(MapPtrUnsecure),
     K(SetProcPermissions), K(GetCurrentPermissions), K(SetKMode), K(GetCallerProcess), K(GetCurrentProcessId), K(GetOwnerProcess),

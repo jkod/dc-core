@@ -183,6 +183,14 @@ uint32_t ce_get_proc(uint32_t h, const char *fname, uint32_t ord) {
     } else idx = ord - obase;
     if (idx >= nfun) return 0;
     uint32_t f = rd32le(img + afun + 4 * idx);
+    if (f >= erva && f < erva + elen) {          /* forwarder: "DLL.Name" */
+        char fw[128]; snprintf(fw, sizeof fw, "%s", (char *)img + f);
+        char *dot = strchr(fw, '.');
+        if (!dot) return 0;
+        *dot = 0;
+        uint32_t h2 = ce_load_library(fw);
+        return h2 ? ce_get_proc(h2, dot + 1, 0) : 0;
+    }
     return f ? m->base + f : 0;
 }
 

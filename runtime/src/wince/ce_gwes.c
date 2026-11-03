@@ -334,8 +334,23 @@ FN(RegEnumKeyExW) {            /* (h, index, name, &len, ...) */
     RET(259);                  /* ERROR_NO_MORE_ITEMS */
 }
 FN(RegEnumValueW) { RET(259); }
-FN(RegQueryInfoKeyW) {
-    for (int i = 4; i < 12; i++) if (ARG(i)) dc_wr32(ARG(i), 0);
+FN(RegQueryInfoKeyW) {        /* (h, class, &classlen, res, &subkeys, &maxsubkey, &maxclass, &values, &maxvalname, &maxvallen, &sec, &time) */
+    const char *kp = root_name(ARG(0));
+    if (!kp) RET(6);
+    uint32_t nsub = 0, maxsub = 0, nval = 0, maxname = 0, maxlen = 0;
+    size_t pl = strlen(kp);
+    for (rkey *k = keys; k; k = k->next)
+        if (!strncasecmp(k->path, kp, pl) && k->path[pl] == '\\' && !strchr(k->path + pl + 1, '\\')) {
+            nsub++; if (strlen(k->path + pl + 1) > maxsub) maxsub = (uint32_t)strlen(k->path + pl + 1);
+        }
+    rkey *me = key_find(kp, 0);
+    for (rval *v = me ? me->vals : NULL; v; v = v->next) {
+        nval++; if (strlen(v->name) > maxname) maxname = (uint32_t)strlen(v->name); if (v->len > maxlen) maxlen = v->len;
+    }
+    if (ARG(2)) dc_wr32(ARG(2), 0);
+    uint32_t vals[12] = { 0, 0, 0, 0, nsub, maxsub, 0, nval, maxname, maxlen, 0, 0 };
+    for (int i = 4; i < 12; i++) if (ARG(i)) dc_wr32(ARG(i), vals[i]);
+    TRACE("RegQueryInfoKey %s: %u subkeys, %u values", kp, nsub, nval);
     RET(0);
 }
 static void reg_set(const char *key, const char *name, uint32_t type, const void *data, uint32_t len) {
