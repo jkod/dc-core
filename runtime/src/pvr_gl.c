@@ -462,6 +462,35 @@ static int clip_edge(const pvr_vtx *in, int n, pvr_vtx *out, int axis, float lim
     }
     return m;
 }
+/* dc_pvr_gl_extend_backdrops: a 2D backdrop drawn exactly across the 4:3 picture (every vertex inside it,
+ * two or more on each side edge: a menu's gradient or streak band, a sky card behind a 3D scene) gets
+ * strips out to the widescreen edges that repeat its edge column (same UV and colours along each edge),
+ * so the picture continues instead of ending in black; its own 4:3 part is unchanged. */
+int dc_pvr_gl_extend_backdrops;
+static int cmp_vy(const void *a, const void *b) { float d = (*(const pvr_vtx *const *)a)->y - (*(const pvr_vtx *const *)b)->y; return d < 0 ? -1 : d > 0; }
+static void extend_backdrop(const pvr_poly *p, const pvr_vtx *v, float rw, float ext) {
+    if (p->n < 3 || p->n > 64) return;
+    const pvr_vtx *e[2][64]; int ne[2] = { 0, 0 };
+    for (int k = 0; k < p->n; k++) {
+        if (v[k].x < -1.f || v[k].x > rw + 1.f) return;       /* reaches past the picture: 3D, not a backdrop */
+        if (v[k].x <= 1.f) e[0][ne[0]++] = &v[k];
+        else if (v[k].x >= rw - 2.5f) e[1][ne[1]++] = &v[k];   /* 639 in a 641-wide picture (Soulcalibur's save screen) */
+    }
+    /* both sides: a picture made of tiles (each touching one side) would get stray streaks; its
+     * frame keeps the blurred edge-colour bars instead */
+    if (ne[0] < 2 || ne[1] < 2) return;
+    for (int sd = 0; sd < 2; sd++) {
+        qsort(e[sd], (size_t)ne[sd], sizeof e[sd][0], cmp_vy);
+        for (int k = 0; k + 1 < ne[sd]; k++) {
+            const pvr_vtx *a = e[sd][k], *b = e[sd][k + 1];
+            if (b->y - a->y < 0.5f) continue;
+            pvr_vtx a2 = *a, b2 = *b;
+            a2.x = sd ? rw + ext : -ext; b2.x = a2.x;
+            push(a); push(b); push(&a2); push(&a2); push(b); push(&b2);
+        }
+    }
+}
+
 /* triangle with the PVR's culling (sign of the screen area; odd strip triangles are flipped) */
 static void tri(const pvr_poly *p, const pvr_vtx *a, const pvr_vtx *b, const pvr_vtx *c, int flip, float cull_small) {
     float area = (b->x - a->x) * (c->y - a->y) - (b->y - a->y) * (c->x - a->x);
@@ -1249,6 +1278,8 @@ void dc_pvr_gl_render(int scale) {
         spans[i].first = nverts;
         if (p->sprite) { tri(p, &v[0], &v[1], &v[2], 0, cull_small); tri(p, &v[0], &v[2], &v[3], 0, cull_small); }
         else for (int k = 0; k + 2 < p->n; k++) tri(p, &v[k], &v[k + 1], &v[k + 2], k & 1, cull_small);
+        if (dc_pvr_gl_extend_backdrops && dc_pvr_gl_widescreen && WW > (float)RW + 1.f && push_dx == 0 && push_wide == 0 && cap_uv < 0)
+            extend_backdrop(p, v, (float)RW, (WW - (float)RW) * 0.5f + 2.f);
         spans[i].count = nverts - spans[i].first;
         push_wide = 0; cap_uv = -1;
         if ((p->isp >> 25) & 1) for (int k = 0; k < p->n; k++) { if (v[k].x < cx0) cx0 = v[k].x; if (v[k].x > cx1) cx1 = v[k].x; }

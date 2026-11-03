@@ -59,6 +59,9 @@ extern int dc_pvr_gl_hud_exact;
 /* widescreen: frames without a 3D scene reaching past the 4:3 picture (2D menus) are cut to the 4:3
  * picture, so the side bars replace what the game draws beyond its edges (default 0) */
 extern int dc_pvr_gl_clip_2d;
+/* widescreen: 2D backdrops drawn exactly across the 4:3 picture (menu gradients and bands, sky cards)
+ * continue to the screen edges by repeating their edge column (default 0) */
+extern int dc_pvr_gl_extend_backdrops;
 /* render to texture (FB_W_SOF1 bit 24) in widescreen: also draw the pass at full width, for
  * full-screen quads that show that texture later (call at STARTRENDER, with dc_pvr_sw_render) */
 void dc_pvr_gl_capture(int scale);
