@@ -757,7 +757,10 @@ int dc_pvr_sw_render(void) {
     float bg[4], bz;
     background(bg, &bz);
     if (dc_pvr_sw_debug) {
-        fprintf(stderr, "pvr: %dx%d bg %.2f %.2f %.2f z %g, %d polys\n", RW, RH, bg[0], bg[1], bg[2], bz, npl);
+        { int n3 = 0, sh[5] = {0}, tv[5] = {0}; for (int k = 0; k < nmt; k++) n3 += mt[k].list == 3;
+        for (int k = 0; k < npl; k++) { if (pl[k].shadow) sh[pl[k].list & 7 & 3]++; if (pl[k].twovol) tv[pl[k].list & 3]++; }
+        fprintf(stderr, "pvr: FPU_SHAD_SCALE %08X, shadow-flag polys by list %d/%d/%d/%d, two-volume %d/%d/%d/%d (0/1|4/2/3)\n", REG(0x074), sh[0], sh[1], sh[2], sh[3], tv[0], tv[1], tv[2], tv[3]);
+        fprintf(stderr, "pvr: %dx%d bg %.2f %.2f %.2f z %g, %d polys, %d volume triangles (%d translucent)\n", RW, RH, bg[0], bg[1], bg[2], bz, npl, nmt, n3); }
         for (int i = 0; i < npl; i++) { const vtx *v = vt + pl[i].first;
             uint32_t ta = (pl[i].tcw & 0x1FFFFF) << 3;
             float bx0 = 1e30f, bx1 = -1e30f, by0 = 1e30f, by1 = -1e30f, bz0 = 1e30f, bz1 = -1e30f;
