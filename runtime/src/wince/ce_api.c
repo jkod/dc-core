@@ -514,6 +514,7 @@ FN(ReadFile) {                /* (h, buf, n, &read, ovl) */
     }
     o->pos += done;
     if (ARG(3)) dc_wr32(ARG(3), done);
+    if (ce_trace > 1) TRACE("ReadFile %s at %X: %X of %X bytes to %08X%s", o->name, o->pos - done, done, ARG(2), buf, ARG(4) ? " (overlapped)" : "");
     RET(1);
 }
 FN(WriteFile) { if (ARG(3)) dc_wr32(ARG(3), 0); set_error(5); RET(0); }

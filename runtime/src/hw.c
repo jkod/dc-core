@@ -398,7 +398,10 @@ static void dmac_check(void) {
 }
 
 /* ---------------------------------------------------------------- DMA engines */
+/* DMA engines see physical addresses: through P2, so that one below 32 MB (G2's sound RAM at
+ * 0x00800000, say) is never taken for a Windows CE user address (dccore/wince.h) */
 static void copy_words(uint32_t dst, uint32_t src, uint32_t len) {
+    dst = (dst & 0x1FFFFFFFu) | 0xA0000000u; src = (src & 0x1FFFFFFFu) | 0xA0000000u;
     for (uint32_t i = 0; i < len; i += 4) dc_wr32(dst + i, dc_rd32(src + i));
 }
 
