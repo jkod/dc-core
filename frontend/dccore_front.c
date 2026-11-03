@@ -220,7 +220,8 @@ static void read_input(void) {
 #endif
     /* debugging: DC_PRESS="[P/]field:buttons[:fields],..." holds Dreamcast buttons (DC_BTN_* mask, hex)
      * from that presented field on, for `fields` fields (default 10), on port P (A-D, default A; a port
-     * named here counts as connected); extra bits 16 L trigger, 17 R trigger, 18 stick left, 19 stick right */
+     * named here counts as connected); extra bits 16 L trigger, 17 R trigger, 18 stick left, 19 stick right,
+     * 20 stick up, 21 stick down */
     {
         static const char *press = (const char *)1;
         if (press == (const char *)1) {
@@ -241,6 +242,8 @@ static void read_input(void) {
                     if (m & (1ul << 17)) rt = 255;
                     if (m & (1ul << 18)) jx = 0;
                     if (m & (1ul << 19)) jx = 255;
+                    if (m & (1ul << 20)) jy = 0;
+                    if (m & (1ul << 21)) jy = 255;
                 } else {
                     dc_pad_state *ps = &dc_pad[port];
                     ps->buttons |= (uint16_t)m;
@@ -248,6 +251,8 @@ static void read_input(void) {
                     if (m & (1ul << 17)) ps->rt = 255;
                     if (m & (1ul << 18)) ps->jx = 0;
                     if (m & (1ul << 19)) ps->jx = 255;
+                    if (m & (1ul << 20)) ps->jy = 0;
+                    if (m & (1ul << 21)) ps->jy = 255;
                 }
             }
             while (*q && *q != ',') q++;
