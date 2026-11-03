@@ -310,3 +310,32 @@ void dc_coro_reset(jmp_buf *jb) {
     hctx_switch(&from->uc, &main_coro.uc);
     abort();                             /* not reached */
 }
+
+/* ---- plain fibers (dc_fiber_*, coro.h): host stacks for an HLE operating system's threads */
+struct dc_fiber { hctx uc; void *stack; void (*fn)(void *); void *arg; };
+static dc_fiber fiber_main;
+static dc_fiber *fiber_cur;
+static void fiber_start(void) {
+    dc_fiber *f = fiber_cur;
+    f->fn(f->arg);
+    fprintf(stderr, "dc-core: a fiber's function returned\n");
+    abort();
+}
+dc_fiber *dc_fiber_current(void) {
+    if (!fiber_cur) { hctx_main_init(&fiber_main.uc); fiber_cur = &fiber_main; }
+    return fiber_cur;
+}
+dc_fiber *dc_fiber_new(void (*fn)(void *), void *arg, size_t stack_bytes) {
+    dc_fiber_current();
+    dc_fiber *f = (dc_fiber *)calloc(1, sizeof *f);
+    if (!f) { fprintf(stderr, "dc-core: out of memory for a fiber\n"); abort(); }
+    f->fn = fn; f->arg = arg;
+    hctx_make(&f->uc, &f->stack, stack_bytes ? stack_bytes : (size_t)2 << 20, fiber_start);
+    return f;
+}
+void dc_fiber_switch(dc_fiber *to) {
+    dc_fiber *from = dc_fiber_current();
+    if (from == to) return;
+    fiber_cur = to;
+    hctx_switch(&from->uc, &to->uc);
+}

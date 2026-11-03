@@ -35,6 +35,14 @@ void dc_coro_reset(jmp_buf *jb);
 extern int dc_coro_trace;           /* non-zero: log switches to stderr */
 int dc_coro_count(void);            /* coroutines created so far (tests/diagnostics) */
 
+/* Plain fibers: a host stack each, switched explicitly (an HLE operating system's threads, see
+ * dccore/wince.h). The first call to dc_fiber_current() makes the calling thread the main fiber.
+ * A fiber's function must never return. Not for use together with dc_coro_install. */
+typedef struct dc_fiber dc_fiber;
+dc_fiber *dc_fiber_current(void);
+dc_fiber *dc_fiber_new(void (*fn)(void *arg), void *arg, size_t stack_bytes);   /* 0: 2 MB */
+void dc_fiber_switch(dc_fiber *to);
+
 #ifdef __cplusplus
 }
 #endif

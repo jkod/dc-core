@@ -340,10 +340,11 @@ static void ta_area_write(uint32_t m, const uint8_t *p, uint32_t len) {
 }
 
 /* ---------------------------------------------------------------- store queues */
+uint32_t dc_sq_base;
 static void sq_flush(uint32_t a) {
     int n = (a >> 5) & 1;
     uint32_t qacr = n ? QACR1 : QACR0;
-    uint32_t dst = ((qacr & 0x1C) << 24) | (a & 0x03FFFFE0);
+    uint32_t dst = dc_sq_base ? dc_sq_base + (a & 0x03FFFFE0) : ((qacr & 0x1C) << 24) | (a & 0x03FFFFE0);
     if (dc_hw.on_sq && dc_hw.on_sq(dst, sq[n])) return;
     uint32_t m = dst & 0x1FFFFFFFu;
     if (m >= 0x10000000u && m < 0x14000000u) { ta_area_write(m, (const uint8_t *)sq[n], 32); return; }
@@ -554,12 +555,28 @@ static void wr(uint32_t a, uint32_t v, int size) {
     warn(size == 4 ? "write32" : size == 2 ? "write16" : "write8", a);
 }
 
-uint8_t  dc_hw_rd8 (uint32_t a) { return user_ops.rd8 ? user_ops.rd8(a) : (uint8_t)rd(a, 1); }
-uint16_t dc_hw_rd16(uint32_t a) { return user_ops.rd16 ? user_ops.rd16(a) : (uint16_t)rd(a, 2); }
-uint32_t dc_hw_rd32(uint32_t a) { return user_ops.rd32 ? user_ops.rd32(a) : rd(a, 4); }
-void dc_hw_wr8 (uint32_t a, uint8_t v)  { if (user_ops.wr8) user_ops.wr8(a, v); else wr(a, v, 1); }
-void dc_hw_wr16(uint32_t a, uint16_t v) { if (user_ops.wr16) user_ops.wr16(a, v); else wr(a, v, 2); }
-void dc_hw_wr32(uint32_t a, uint32_t v) { if (user_ops.wr32) user_ops.wr32(a, v); else wr(a, v, 4); }
+/* ---------------------------------------------------------------- address windows (dc_hw_map) */
+#define MAX_MAPS 128
+static struct { uint32_t va, len, to; } maps[MAX_MAPS];
+static int nmaps, map_last;
+void dc_hw_map(uint32_t va, uint32_t to, uint32_t len) {
+    for (int i = 0; i < nmaps; i++) if (maps[i].va == va) { if (len) { maps[i].len = len; maps[i].to = to; } else maps[i] = maps[--nmaps]; map_last = 0; return; }
+    if (len && nmaps < MAX_MAPS) { maps[nmaps].va = va; maps[nmaps].len = len; maps[nmaps].to = to; nmaps++; }
+    map_last = 0;
+}
+static int map_find(uint32_t a, uint32_t *to) {
+    if (map_last < nmaps && a - maps[map_last].va < maps[map_last].len) { *to = maps[map_last].to + (a - maps[map_last].va); return 1; }
+    for (int i = 0; i < nmaps; i++) if (a - maps[i].va < maps[i].len) { map_last = i; *to = maps[i].to + (a - maps[i].va); return 1; }
+    return 0;
+}
+#define MAPPED(a, expr) do { uint32_t to_; if (nmaps && map_find(a, &to_)) { expr; } } while (0)
+
+uint8_t  dc_hw_rd8 (uint32_t a) { MAPPED(a, return dc_rd8(to_)); return user_ops.rd8 ? user_ops.rd8(a) : (uint8_t)rd(a, 1); }
+uint16_t dc_hw_rd16(uint32_t a) { MAPPED(a, return dc_rd16(to_)); return user_ops.rd16 ? user_ops.rd16(a) : (uint16_t)rd(a, 2); }
+uint32_t dc_hw_rd32(uint32_t a) { MAPPED(a, return dc_rd32(to_)); return user_ops.rd32 ? user_ops.rd32(a) : rd(a, 4); }
+void dc_hw_wr8 (uint32_t a, uint8_t v)  { MAPPED(a, dc_wr8(to_, v); return); if (user_ops.wr8) user_ops.wr8(a, v); else wr(a, v, 1); }
+void dc_hw_wr16(uint32_t a, uint16_t v) { MAPPED(a, dc_wr16(to_, v); return); if (user_ops.wr16) user_ops.wr16(a, v); else wr(a, v, 2); }
+void dc_hw_wr32(uint32_t a, uint32_t v) { MAPPED(a, dc_wr32(to_, v); return); if (user_ops.wr32) user_ops.wr32(a, v); else wr(a, v, 4); }
 
 uint64_t dc_frame_count(void) { return frame_count; }
 uint32_t dc_pvr_reg(uint32_t ofs) { return PVR(ofs & 0x1FFC); }

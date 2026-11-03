@@ -27,6 +27,8 @@ int   dc_load_memory(const uint8_t *data, uint32_t len, uint32_t addr);   /* cal
 void  dc_use_code(const void *table, size_t count);
 sh4fn dc_lookup(uint32_t addr);
 void  dc_hle_register(uint32_t addr, sh4fn fn);   /* replace a guest function with native code */
+/* every address in [lo, hi) runs fn, which tells them apart by c->entry (P1 fold of the address) */
+void  dc_hle_register_range(uint32_t lo, uint32_t hi, sh4fn fn);
 /* RAM range [dst, dst+len) holds a copy of executable code at src (found automatically for code
  * a game copies at runtime, e.g. exception vectors; call this to declare one up front). */
 void  dc_alias_code(uint32_t dst, uint32_t src, uint32_t len);

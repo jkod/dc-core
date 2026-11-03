@@ -47,6 +47,16 @@ void     dc_hw_pref(uint32_t a);          /* store-queue flush etc. */
 #define DC_IS_RAM(a) (((a) & 0x1C000000u) == 0x0C000000u)
 #define DC_RAM_OFS(a) ((a) & 0x00FFFFFFu)
 
+/* User address space (Windows CE games, see dccore/wince.h): when dc_uram is set, the 32 MB of
+ * virtual addresses 0x00000000..0x01FFFFFF -- and their P1 fold 0x80000000..0x81FFFFFF, which is
+ * how recompiled code addresses its own instructions -- are a flat 32 MB block of host memory.
+ * Off (NULL) for ordinary Dreamcast games; the test sits after the RAM test, so it costs them
+ * nothing on RAM accesses. */
+extern uint8_t *dc_uram;
+#define DC_URAM_SIZE 0x02000000u
+#define DC_IS_URAM(a) (((a) & 0x7E000000u) == 0 && dc_uram)
+#define DC_URAM_OFS(a) ((a) & 0x01FFFFFFu)
+
 #ifdef DC_WATCH
 extern uint32_t dc_rwatch_lo, dc_rwatch_hi;
 void dc_rwatch_hit(uint32_t a, int size);
@@ -54,9 +64,9 @@ void dc_rwatch_hit(uint32_t a, int size);
 #else
 #define DC_RWATCHED(a, n) ((void)0)
 #endif
-static inline uint8_t  dc_rd8 (uint32_t a) { if (DC_IS_RAM(a)) { DC_RWATCHED(a, 1); return dc_ram[DC_RAM_OFS(a)]; } return dc_hw_rd8(a); }
-static inline uint16_t dc_rd16(uint32_t a) { if (DC_IS_RAM(a)) { uint16_t v; DC_RWATCHED(a, 2); memcpy(&v, dc_ram + DC_RAM_OFS(a), 2); return v; } return dc_hw_rd16(a); }
-static inline uint32_t dc_rd32(uint32_t a) { if (DC_IS_RAM(a)) { uint32_t v; DC_RWATCHED(a, 4); memcpy(&v, dc_ram + DC_RAM_OFS(a), 4); return v; } return dc_hw_rd32(a); }
+static inline uint8_t  dc_rd8 (uint32_t a) { if (DC_IS_RAM(a)) { DC_RWATCHED(a, 1); return dc_ram[DC_RAM_OFS(a)]; } if (DC_IS_URAM(a)) return dc_uram[DC_URAM_OFS(a)]; return dc_hw_rd8(a); }
+static inline uint16_t dc_rd16(uint32_t a) { if (DC_IS_RAM(a)) { uint16_t v; DC_RWATCHED(a, 2); memcpy(&v, dc_ram + DC_RAM_OFS(a), 2); return v; } if (DC_IS_URAM(a)) { uint16_t v; memcpy(&v, dc_uram + DC_URAM_OFS(a), 2); return v; } return dc_hw_rd16(a); }
+static inline uint32_t dc_rd32(uint32_t a) { if (DC_IS_RAM(a)) { uint32_t v; DC_RWATCHED(a, 4); memcpy(&v, dc_ram + DC_RAM_OFS(a), 4); return v; } if (DC_IS_URAM(a)) { uint32_t v; memcpy(&v, dc_uram + DC_URAM_OFS(a), 4); return v; } return dc_hw_rd32(a); }
 #ifdef DC_WATCH
 /* debug builds (-DDC_WATCH): every RAM write inside [dc_watch_lo, dc_watch_hi) is reported */
 extern uint32_t dc_watch_lo, dc_watch_hi;
@@ -65,9 +75,9 @@ void dc_watch_hit(uint32_t a, uint32_t v, int size);
 #else
 #define DC_WATCHED(a, v, n) ((void)0)
 #endif
-static inline void dc_wr8 (uint32_t a, uint8_t v)  { if (DC_IS_RAM(a)) { DC_WATCHED(a, v, 1); dc_ram[DC_RAM_OFS(a)] = v; return; } dc_hw_wr8(a, v); }
-static inline void dc_wr16(uint32_t a, uint16_t v) { if (DC_IS_RAM(a)) { DC_WATCHED(a, v, 2); memcpy(dc_ram + DC_RAM_OFS(a), &v, 2); return; } dc_hw_wr16(a, v); }
-static inline void dc_wr32(uint32_t a, uint32_t v) { if (DC_IS_RAM(a)) { DC_WATCHED(a, v, 4); memcpy(dc_ram + DC_RAM_OFS(a), &v, 4); return; } dc_hw_wr32(a, v); }
+static inline void dc_wr8 (uint32_t a, uint8_t v)  { if (DC_IS_RAM(a)) { DC_WATCHED(a, v, 1); dc_ram[DC_RAM_OFS(a)] = v; return; } if (DC_IS_URAM(a)) { dc_uram[DC_URAM_OFS(a)] = v; return; } dc_hw_wr8(a, v); }
+static inline void dc_wr16(uint32_t a, uint16_t v) { if (DC_IS_RAM(a)) { DC_WATCHED(a, v, 2); memcpy(dc_ram + DC_RAM_OFS(a), &v, 2); return; } if (DC_IS_URAM(a)) { memcpy(dc_uram + DC_URAM_OFS(a), &v, 2); return; } dc_hw_wr16(a, v); }
+static inline void dc_wr32(uint32_t a, uint32_t v) { if (DC_IS_RAM(a)) { DC_WATCHED(a, v, 4); memcpy(dc_ram + DC_RAM_OFS(a), &v, 4); return; } if (DC_IS_URAM(a)) { memcpy(dc_uram + DC_URAM_OFS(a), &v, 4); return; } dc_hw_wr32(a, v); }
 
 static inline float dc_rdf(uint32_t a) { uint32_t u = dc_rd32(a); float f; memcpy(&f, &u, 4); return f; }
 static inline void  dc_wrf(uint32_t a, float f) { uint32_t u; memcpy(&u, &f, 4); dc_wr32(a, u); }

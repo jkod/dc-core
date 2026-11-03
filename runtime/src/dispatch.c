@@ -9,12 +9,13 @@ extern const dc_fn_entry dc_fn_table[];
 extern const size_t dc_fn_count;
 
 uint8_t *dc_ram;
+uint8_t *dc_uram;             /* user address space (Windows CE games), NULL otherwise */
 uint32_t dc_call_cost = 40;   /* SH-4 cycles charged per call/jump through the dispatcher */
 uint32_t dc_loop_cost = 16;   /* ... and per backward branch (a loop iteration) */
 sh4ctx *dc_current_ctx;
 const float *dc_fsca_table;
 
-#define MAX_HLE 256
+#define MAX_HLE 1024
 static struct { uint32_t addr; sh4fn fn; } hle[MAX_HLE];
 static int hle_n;
 static dc_miss_fn miss_handler;
@@ -34,6 +35,20 @@ void dc_hle_register(uint32_t addr, sh4fn fn) {
         return;
     }
     if (fn && hle_n < MAX_HLE) { hle[hle_n].addr = addr; hle[hle_n].fn = fn; hle_n++; }
+}
+/* a whole range of addresses handled by one native function (it reads c->entry); e.g. the
+ * Windows CE system DLLs, whose exports get one address each in a range of their own */
+#define MAX_HLE_RANGE 16
+static struct { uint32_t lo, hi; sh4fn fn; } hle_range[MAX_HLE_RANGE];
+static int hle_range_n;
+void dc_hle_register_range(uint32_t lo, uint32_t hi, sh4fn fn) {
+    lcache_clear();
+    lo = (lo & 0x1FFFFFFFu) | 0x80000000u; hi = ((hi - 1) & 0x1FFFFFFFu) | 0x80000000u;
+    if (hle_range_n < MAX_HLE_RANGE) { hle_range[hle_range_n].lo = lo; hle_range[hle_range_n].hi = hi; hle_range[hle_range_n].fn = fn; hle_range_n++; }
+}
+static sh4fn lookup_range(uint32_t addr) {
+    for (int i = 0; i < hle_range_n; i++) if (addr - hle_range[i].lo <= hle_range[i].hi - hle_range[i].lo) return hle_range[i].fn;
+    return NULL;
 }
 void dc_set_miss_handler(dc_miss_fn f) { miss_handler = f; }
 void dc_set_trap_handler(dc_trap_fn f) { trap_handler = f; }
@@ -75,6 +90,7 @@ static uint32_t auto_alias(uint32_t addr) {
 
 static sh4fn lookup_slow(uint32_t addr) {
     for (int i = 0; i < hle_n; i++) if (hle[i].addr == addr) return hle[i].fn;
+    if (hle_range_n) { sh4fn f = lookup_range(addr); if (f) return f; }
     for (int i = 0; i < alias_n; i++)
         if (addr - alias[i].dst < alias[i].len) return lookup_table(alias[i].src + (addr - alias[i].dst));
     return lookup_table(addr);
@@ -133,7 +149,7 @@ void dc_interp_illegal(sh4ctx *c, uint32_t pc) {
 static sh4fn lookup_hle(uint32_t addr) {
     addr = (addr & 0x1FFFFFFFu) | 0x80000000u;
     for (int i = 0; i < hle_n; i++) if (hle[i].addr == addr) return hle[i].fn;
-    return NULL;
+    return lookup_range(addr);
 }
 
 void dc_call(sh4ctx *c, uint32_t addr) {

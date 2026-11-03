@@ -41,6 +41,29 @@ generated code as a static library.
 
 - Next: PowerVR2 renderer (Vulkan/Metal/GL), AICA audio, Maple input, VMU saves, Switch build.
 
+## Windows CE games
+
+Some Dreamcast games run on Windows CE: the disc boots `0WINCEOS.BIN` and the game is an EXE plus
+DLLs instead of a `1ST_READ.BIN` (Sega Rally 2, for example). dc-core runs them without the CE kernel
+(`dccore/wince.h`, library `dccore_wince`):
+
+```sh
+python3 tools/wince/ce_layout.py moddir --exe GAME.EXE --dlls COREDLL.DLL OLE32.DLL ... --out layout/
+python3 tools/recomp/sh4recomp.py layout/image.bin --base $(cat layout/base.txt) --funcs layout/funcs.txt --no-discover --out gen/
+```
+
+`ce_layout.py` gives every module a fixed address (the EXE at its own base, the DLLs packed after it,
+relocated) and lists the functions from each module's `.pdata` (start and length: exact on SH-4).
+At run time `ce_init` maps the same files from the disc to the same addresses in a 32 MB user address
+space (`dc_uram`, virtual 0x00000000.., also reached through its P1 fold 0x80000000.. where recompiled
+code addresses its own instructions) and `ce_run` starts the EXE. The disc's own COREDLL runs
+recompiled (C runtime, `wsprintf`, helpers); its kernel and window-manager calls are native: threads on
+fibers (`dc_fiber_*`) with CE's priority scheduling and preemption at interrupts, events, mutexes,
+semaphores, critical sections, TLS, heaps and `VirtualAlloc`, `VirtualCopy` as address windows onto the
+hardware (`dc_hw_map`), interrupts as events (`InterruptInitialize`), files on the disc (`\CD-ROM\...`),
+WDM devices (`\Device\...` through WDMLIB), a registry, window messages, and `CoCreateInstance` through
+each DLL's `DllGetClassObject`. `DC_CE_TRACE=1` logs the calls.
+
 ## Tests
 
 ```sh

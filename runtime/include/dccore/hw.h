@@ -39,6 +39,13 @@ extern int dc_cable;             /* AV cable the game sees: 0 VGA (default), 2 R
 extern void (*dc_hw_read_hook)(uint32_t addr, int size);              /* every hardware read */
 extern void (*dc_unhandled_hook)(const char *kind, uint32_t addr);   /* every unhandled access */
 
+/* An address window: [va, va+len) reads and writes [to, to+len) (RAM, hardware or user memory). For
+ * an operating system's virtual mappings of hardware (Windows CE VirtualCopy). va must be outside RAM
+ * and the user address space. len 0 removes the window at va. */
+void     dc_hw_map(uint32_t va, uint32_t to, uint32_t len);
+/* Store queues mapped through the MMU (Windows CE's SetStoreQueueBase): non-zero = the address a flush
+ * of 0xE0000000 + offset writes is dc_sq_base + offset, instead of the QACR registers' area */
+extern uint32_t dc_sq_base;
 void     dc_raise(uint32_t istnrm_bits);      /* raise Holly normal interrupts (e.g. render done) */
 uint64_t dc_frame_count(void);
 uint32_t dc_pvr_reg(uint32_t ofs);

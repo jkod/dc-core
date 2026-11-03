@@ -16,7 +16,7 @@ become tail calls through dc_call(). Generated code never contains game data exc
 literal-pool constants folded into instructions, and it is meant to be produced on the
 player's machine from their own disc, not distributed.
 """
-import argparse, os, re, struct, sys
+import argparse, bisect, os, re, struct, sys
 
 def s8(v): return v - 0x100 if v & 0x80 else v
 def s12(v): return v - 0x1000 if v & 0x800 else v
@@ -511,14 +511,19 @@ def extend_setjmp_callers(tr, ranges):
     return out
 
 
+FUNC_ENDS = {}   # start -> end, from funcs files that give one ("start end", e.g. from PE .pdata)
+
+
 def read_funcs(path, base, end):
     out = set()
     for line in open(path):
-        mm = re.search(r"(?:fn_|0x)?([0-9a-fA-F]{8})", line)
+        mm = re.search(r"(?:fn_|0x)?([0-9a-fA-F]{8})(?:\s+(?:0x)?([0-9a-fA-F]{8}))?", line)
         if mm:
             v = int(mm.group(1), 16)
             if base <= v < end and v % 2 == 0:
                 out.add(v)
+                if mm.group(2):
+                    FUNC_ENDS[v] = int(mm.group(2), 16)
     return sorted(out)
 
 
@@ -653,6 +658,12 @@ def main():
     if not args.funcs:
         print("scan: %d function starts" % len(funcs))
     tabs = set(bra_tables(tr)) - set(funcs)
+    if FUNC_ENDS:          # exact function list: switch tables can only be inside its functions
+        kn = sorted(FUNC_ENDS.items()); ks = [a for a, _ in kn]
+        def inside(x):
+            j = bisect.bisect_right(ks, x) - 1
+            return j >= 0 and kn[j][0] < x < kn[j][1]
+        tabs = {x for x in tabs if inside(x)}
     if tabs:
         funcs = sorted(set(funcs) | tabs)
         print("switch tables: %d bra entries" % len(tabs))
@@ -664,9 +675,18 @@ def main():
         open(args.write_funcs, "w").write("".join("%08x\n" % f for f in funcs))
     ranges = []
     MSVC_NOOPT_BYTES = 0x1000
+    # entries inside a function of known length (switch-table targets) end with it
+    known = sorted(FUNC_ENDS.items())
+    kstarts = [a for a, _ in known]
     for k, s in enumerate(funcs):
         e = funcs[k + 1] if k + 1 < len(funcs) else base + len(data)
         e = min(e, s + args.max_func_bytes)
+        if s in FUNC_ENDS and s < FUNC_ENDS[s] < e:
+            e = FUNC_ENDS[s]               # known length: data after the function is not code
+        elif known:
+            j = bisect.bisect_right(kstarts, s) - 1
+            if j >= 0 and known[j][0] < s < known[j][1] < e:
+                e = known[j][1]
         ranges.append((s, e))
     ranges = extend_setjmp_callers(tr, ranges)
     # one file per 16 KB of address space: adding a function only changes its own file,
