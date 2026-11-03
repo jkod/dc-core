@@ -282,6 +282,7 @@ static const char *fs_src =
 "  if (u_tpass == 2 && px.a >= 0.996) discard;\n"
 "  o_col = px;\n"
 "  gl_FragDepth = clamp((log2(iw) + 64.0) / 128.0, 0.0, 1.0);\n"
+"  if (u_tpass == 1) gl_FragDepth = max(gl_FragDepth - 1.0 / 4194304.0, 0.0);\n"
 "}\n";
 
 static float depth_of(float invw) { float d = (log2f(fmaxf(invw, 1e-30f)) + 64.f) / 128.f; return d < 0 ? 0 : d > 1 ? 1 : d; }
@@ -521,7 +522,9 @@ static void tri(const pvr_poly *p, const pvr_vtx *a, const pvr_vtx *b, const pvr
  * the GL path per polygon (by its farthest point), which put a large polygon wrongly in front of a
  * smaller one next to it (Tennis 2K2's fence over the advertising boards in front of it). Fragments a
  * normal alpha blend draws fully opaque come out the same in any order, so pass 1 draws just those,
- * writing depth; pass 2 draws the rest sorted as before, behind what pass 1 drew hidden. */
+ * writing depth; pass 2 draws the rest sorted as before, behind what pass 1 drew hidden. Pass 1 writes
+ * its depth a hair farther, so a polygon at exactly the same depth drawn later (text on a menu's
+ * selection bar: Daytona USA 2001's pause menu) still shows over it, as on the PVR. */
 int dc_pvr_gl_tsort2 = 1;
 static int tpass;                         /* 0 off, 1 the opaque fragments, 2 the rest */
 static int two_pass_poly(const pvr_poly *p) {
@@ -568,7 +571,8 @@ static void set_poly_state(const pvr_poly *p, int set) {
     p_glDepthMask(p->list != 2 && !((p->isp >> 26) & 1));
     int tp = tpass && two_pass_poly(p) ? tpass : 0;
     p_glUniform1i(U.tpass, tp);
-    if (tp == 1) p_glDepthMask(1);
+    /* pass 1: a later polygon at the same depth draws over an earlier one (text on its selection bar) */
+    if (tp == 1) { p_glDepthMask(1); if (zmode == 4) p_glDepthFunc(GL_GEQUAL); }
 }
 static GLenum blend_src(int i) { static const GLenum t[8] = { GL_ZERO, GL_ONE, GL_DST_COLOR, GL_ONE_MINUS_DST_COLOR, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_DST_ALPHA, GL_ONE_MINUS_DST_ALPHA }; return t[i & 7]; }
 static GLenum blend_dst(int i) { static const GLenum t[8] = { GL_ZERO, GL_ONE, GL_SRC_COLOR, GL_ONE_MINUS_SRC_COLOR, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_DST_ALPHA, GL_ONE_MINUS_DST_ALPHA }; return t[i & 7]; }
@@ -927,8 +931,13 @@ static void hud_group(const pvr_frame *f, int RW, signed char *side) {
  * stop at the 4:3 edges (Looney Tunes Space Race's intro). */
 /* could be a screen shade: untextured, or a texture modulated by black vertex colours (Re-Volt's pause
  * shade is a textured quad drawn black at half alpha) */
+int dc_pvr_gl_shade_translucent;
 static int shade_poly(const pvr_poly *p, const pvr_vtx *v) {
     if (!((p->isp >> 25) & 1)) return 1;
+    if (dc_pvr_gl_shade_translucent && p->list == 2) {      /* any colour, see pvr.h */
+        int t = 1; for (int k = 0; k < p->n; k++) if (v[k].c[3] > .95f) t = 0;
+        if (t) return 1;
+    }
     if (!(((p->tsp >> 6) & 3) & 1)) return 0;                /* modulate (or modulate alpha) */
     for (int k = 0; k < p->n; k++) if (v[k].c[0] > .05f || v[k].c[1] > .05f || v[k].c[2] > .05f) return 0;
     return 1;
@@ -1301,7 +1310,10 @@ void dc_pvr_gl_render(int scale) {
             push_dx = hud_side[i] * hud_dx;
             if (ovl_z < 1e29f && v[0].z >= ovl_z && i >= ovl_i) {   /* pause shade and menu */
                 int flat = 1; for (int k = 1; k < p->n; k++) if (v[k].z != v[0].z) flat = 0;
-                if (flat) { push_dx = 0; if (v[0].z == ovl_z) { push_wide = WW; push_rw = (float)RW; } }
+                /* at the shade's depth only what reaches the picture's edges widens (the shade, or its tiles):
+                 * a menu box drawn at that depth stays as it is (Daytona USA 2001's pause menu) */
+                float mnx = v[0].x, mxx = v[0].x; for (int k = 1; k < p->n; k++) { if (v[k].x < mnx) mnx = v[k].x; if (v[k].x > mxx) mxx = v[k].x; }
+                if (flat) { push_dx = 0; if (v[0].z == ovl_z && (mnx <= 1.f || mxx >= RW - 1.f)) { push_wide = WW; push_rw = (float)RW; } }
             }
         }
         if (split_wide) {

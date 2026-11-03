@@ -33,6 +33,9 @@ extern int dc_pvr_gl_letterbox_4_3;  /* widescreen: frames with cut-scene letter
 extern int dc_pvr_gl_tile_clamp;     /* big screen-parallel textured pieces with UVs in 0..1 sample clamped to their UV range: no seams between 2D background tiles when scaled up (default 1) */
 extern int dc_pvr_gl_keep_outside;    /* a render of under 3/4 of the lines into a buffer rendered whole before keeps that picture outside its clip, as on the console (default 1) */
 extern int dc_pvr_gl_letterbox_zoom;  /* widescreen: with dc_pvr_gl_letterbox_4_3, the picture between the bars is cropped to the window's shape and fills it (default 0) */
+extern int dc_pvr_gl_shade_translucent; /* widescreen: a full-screen pause shade can be any colour of translucent quad, textured or
+                                         * not (Daytona USA 2001's is a white-modulated texture at 60% alpha); default 0: untextured
+                                         * or black only */
 extern int dc_pvr_gl_hud_before_shade;  /* widescreen: polygons drawn before a full-screen pause shade are HUD even when
                                          * they lie above it (they keep moving); only those after it are the menu (default 0) */
 extern int dc_pvr_gl_show_4_3;       /* widescreen: set by a port for screens framed for 4:3 (e.g. a 2D title picture over a 3D
