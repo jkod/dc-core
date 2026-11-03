@@ -16,7 +16,13 @@ Backends:
 Console textures tile, so each one is padded with a wrapped copy of its opposite edges before
 upscaling and cropped afterwards: no seams where the game repeats a texture. Alpha is upscaled
 separately (Lanczos); textures whose alpha is only on/off (punch-through cut-outs) stay on/off.
+
+  --keep-colour   keep the original's colours: the upscaler's fine detail on top of the original's
+                  broad colour (upscalers trained on photos tend to shift and flatten tints)
+  --blend X       mix X (0..1) of the plain (bicubic) enlargement back in, for the original's
+                  grain where the upscaler smooths it away (grass, gravel)
 """
+from PIL import ImageFilter
 import argparse, os, shutil, subprocess, sys, tempfile
 import numpy as np
 from PIL import Image
@@ -70,6 +76,8 @@ def main():
     ap.add_argument("--min-size", type=int, default=8, help="skip textures smaller than this on either side")
     ap.add_argument("--max-size", type=int, default=1024, help="skip textures larger than this on either side")
     ap.add_argument("--skip-existing", action="store_true")
+    ap.add_argument("--keep-colour", action="store_true")
+    ap.add_argument("--blend", type=float, default=0.0)
     args = ap.parse_args()
     os.makedirs(args.pack, exist_ok=True)
 
@@ -111,6 +119,19 @@ def main():
         u = ups[n]
         f = u.shape[0] // (h + 2 * PAD)
         rgb = u[PAD * f:PAD * f + h * f, PAD * f:PAD * f + w * f]
+        if args.keep_colour or args.blend > 0:
+            plain = np.asarray(Image.fromarray(wrap_pad(a[:, :, :3], PAD)).resize(
+                ((w + 2 * PAD) * f, (h + 2 * PAD) * f), Image.BICUBIC)).astype(np.float32)
+            up = u.astype(np.float32)
+            if args.keep_colour:     # swap the upscale's broad colour for the original's
+                r = 1.5 * f
+                blur = lambda x: np.asarray(Image.fromarray(np.clip(x, 0, 255).astype(np.uint8)).filter(
+                    ImageFilter.GaussianBlur(r))).astype(np.float32)
+                up = up - blur(up) + blur(plain)
+            if args.blend > 0:
+                up = up * (1 - args.blend) + plain * args.blend
+            up = np.clip(up + 0.5, 0, 255).astype(np.uint8)
+            rgb = up[PAD * f:PAD * f + h * f, PAD * f:PAD * f + w * f]
         alpha = a[:, :, 3]
         out = np.dstack([rgb, alpha_up(alpha, w * f, h * f)]) if alpha.min() < 255 else rgb
         Image.fromarray(out).save(os.path.join(args.pack, n))
