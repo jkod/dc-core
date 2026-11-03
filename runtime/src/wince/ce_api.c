@@ -142,7 +142,9 @@ FN(CloseHandle) {
     uint32_t h = ARG(0);
     ce_obj *o = ce_handle(h);
     if (!o) RET(0);
-    if (o->type == OB_FILE && o->max == 1 && o->refs == 1) { uint32_t f = wdm_proc("CloseWDMDevice"); if (f) ce_call(f, 1, o->lba); }
+    if (o->type == OB_FILE && o->max == 1 && o->refs == 1) { uint32_t f = wdm_proc("CloseWDMDevice"), fo = o->lba; if (f) ce_call(f, 1, fo);
+      if (dc_rd32(fo + 24) & 2) { ce_handle_close(dc_rd32(fo + 48)); ce_handle_close(dc_rd32(fo + 52)); }
+      ce_free(fo); }
     ce_handle_close(h);
     RET(1);
 }
@@ -434,13 +436,23 @@ static uint32_t wdm_proc(const char *name) {
     uint32_t h = ce_load_library("WDMLIB.DLL");
     return h ? ce_get_proc(h, name, 0) : 0;
 }
-static uint32_t open_device(uint32_t wname, const char *name) {
+#define CE_WDM_FILE 128u
+static uint32_t new_event(int manual, int set) { uint32_t h = ce_handle_new(OB_EVENT); ce_obj *o = ce_handle(h); o->manual = manual; o->signaled = set; return h; }
+static uint32_t open_device(uint32_t wname, const char *name, uint32_t flags) {
     uint32_t open = wdm_proc("OpenWDMDevice");
     if (!open) return INVALID_HANDLE;
-    uint32_t tmp = ce_alloc(4, 4);
-    uint32_t r = ce_call(open, 2, tmp, wname + 8 * 2), dev = dc_rd32(tmp);   /* the name in the "Device" directory */
-    ce_free(tmp);
-    TRACE("OpenWDMDevice %s -> %u, %08X", name, r, dev);
+    /* OpenWDMDevice(&file, name) -> BOOL fills in a file object (the device first) that the other calls
+     * take: it stays allocated, zeroed, as the handle's data */
+    uint32_t file = ce_alloc(CE_WDM_FILE, 4);
+    for (uint32_t i = 0; i < CE_WDM_FILE; i += 4) dc_wr32(file + i, 0);
+    uint32_t r = ce_call(open, 2, file, wname + 8 * 2), dev = dc_rd32(file);   /* the name in the "Device" directory */
+    TRACE("OpenWDMDevice %s -> %u, device %08X", name, r, dev);
+    if (!r || !dev) ce_free(file);
+    else if (!(flags & 0x40000000u)) {                     /* no FILE_FLAG_OVERLAPPED: synchronous file object, */
+        dc_wr32(file + 24, 2);                             /* whose calls wait for the request's completion event */
+        dc_wr32(file + 48, new_event(0, 0));               /* (+48) under a lock (+52) */
+        dc_wr32(file + 52, new_event(0, 1));
+    }
     if ((!r || !dev) && !strcasecmp(name, "\\Device\\CDROM0")) {
         /* the GD-ROM: the disc is read through the files API here, so its driver isn't loaded; its
          * controls (drive settings) have nothing to do */
@@ -452,13 +464,13 @@ static uint32_t open_device(uint32_t wname, const char *name) {
     if (!r || !dev) { set_error(2); return INVALID_HANDLE; }
     uint32_t h = ce_handle_new(OB_FILE);
     ce_obj *o = ce_handle(h);
-    o->max = 1; o->lba = dev;
+    o->max = 1; o->lba = file;
     snprintf(o->name, sizeof o->name, "%s", name);
     return h;
 }
 FN(CreateFileW) {             /* (name, access, share, sec, disposition, flags, template) */
     { char full[64]; ce_wstr(ARG(0), full, sizeof full);
-      if (!strncasecmp(full, "\\Device\\", 8)) RET(open_device(ARG(0), full)); }
+      if (!strncasecmp(full, "\\Device\\", 8)) RET(open_device(ARG(0), full, ARG(5))); }
     char p[64]; disc_path(ARG(0), p, sizeof p);
     uint32_t lba, size;
     if (!p[0] || dc_disc_find(p, &lba, &size)) {
@@ -572,8 +584,10 @@ FN(DeviceIoControl) {         /* (h, code, in, insize, out, outsize, &ret, ovl) 
     if (o && o->type == OB_FILE && o->max == 1) {
         uint32_t ctl = wdm_proc("ControlWDMDevice");
         uint32_t r = ce_call(ctl, 8, o->lba, ARG(1), ARG(2), ARG(3), ARG(4), ARG(5), ARG(6), ARG(7));
-        if (ce_trace > 1) TRACE("DeviceIoControl %s code %08X -> %u", o->name, ARG(1), r);
-        RET(r);
+        if (ce_trace > 1) TRACE("DeviceIoControl %s code %08X -> status %08X", o->name, ARG(1), r);
+        if (r == 0) RET(1);                                /* ControlWDMDevice returns an NTSTATUS */
+        set_error(r == 0x103u ? 997u : 31u);               /* ERROR_IO_PENDING, ERROR_GEN_FAILURE */
+        RET(0);
     }
     if (o && o->type == OB_FILE && o->max == 2) RET(cdrom_ioctl(c));
     TRACE("DeviceIoControl %08X (%s) code %08X", ARG(0), o ? o->name : "?", ARG(1));
@@ -623,24 +637,28 @@ FN(AddEventAccess) { RET(1); }
  * below 16 MB is the console's RAM (dc_ram aliases it), so its physical address is 0x0C000000 + va. */
 #define CE_WDMH_SET 0x20u
 #define CE_WDMH     (CE_MAGIC + 0x2000u)
-static uint32_t va_phys(uint32_t va) { return va < 0x01000000u ? 0x0C000000u + va : DC_IS_RAM(va) ? (va & 0x1FFFFFFFu) : 0; }
+static uint32_t va_phys(uint32_t va) { return va < DC_RAM_SIZE ? 0x0C000000u + va : DC_IS_RAM(va) ? (va & 0x1FFFFFFFu) : 0; }
 /* the kernel side of HalAllocateCommonBuffer: physical memory, which WDMLIB then maps with VirtualCopy */
 static uint32_t wdmh_alloc(uint32_t len) {
     uint32_t va = ce_alloc((len + 0xFFF) & ~0xFFFu, 0x1000);
-    if (va >= 0x01000000u) { ce_free(va); TRACE("common buffer above physical RAM"); return 0; }
+    if (va >= DC_RAM_SIZE) { ce_free(va); TRACE("common buffer above physical RAM"); return 0; }
     TRACE("HalAllocateCommonBuffer %X -> phys %08X", len, va_phys(va));
     return va_phys(va);
 }
 static void wdmh_free(sh4ctx *c) {          /* which argument is the physical address isn't known: any that is */
     for (int i = 0; i < 4; i++) {
         uint32_t a = ARG(i);
-        if (a >= 0x0C000000u && a < 0x0D000000u && ce_alloc_size(a - 0x0C000000u)) { ce_free(a - 0x0C000000u); return; }
+        if (a >= 0x0C000000u && a < 0x0C000000u + DC_RAM_SIZE && ce_alloc_size(a - 0x0C000000u)) { ce_free(a - 0x0C000000u); return; }
     }
 }
 static uint32_t h_wdmh(sh4ctx *c) {
     uint32_t m = (c->entry - (0x80000000u | (CE_WDMH & 0x1FFFFFFFu))) / 2;
     switch (m) {
-    case 2: RET(wdmh_alloc(ARG(1)));                       /* HalAllocateCommonBuffer(adapter, len, &phys, cached) -> phys */
+    case 2: {                                              /* HalAllocateCommonBuffer(adapter, len, &phys, cached) -> phys, */
+        uint32_t phys = wdmh_alloc(ARG(1));                /* also stored in the caller's PHYSICAL_ADDRESS (WDMLIB doesn't) */
+        if (ARG(2)) { dc_wr32(ARG(2), phys); dc_wr32(ARG(2) + 4, 0); }
+        RET(phys);
+    }
     case 3: wdmh_free(c); RET(0);                          /* HalFreeCommonBuffer */
     case 4: case 6: RET(0);                                /* Hal{Get,Set}BusDataByOffset */
     case 5:                                                /* HalMapInterrupt(irq, ?, &sysintr): the OAL's numbers are SYSINTRs */

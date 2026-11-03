@@ -170,8 +170,14 @@ uint32_t ce_realloc(uint32_t va, uint32_t size) {
 static ce_obj objs[MAXH];
 #define H_OF(i) (0x00001000u + (uint32_t)(i) * 4u)
 uint32_t ce_handle_new(int type) {
-    for (int i = 1; i < MAXH; i++) if (objs[i].type == OB_FREE) {
+    /* round robin, as handle values on CE don't come back soon: code that waits on a handle it (or
+     * another thread) already closed must not find a new object there */
+    static int next = 1;
+    for (int k = 0; k < MAXH - 1; k++) {
+        int i = 1 + (next - 1 + k) % (MAXH - 1);
+        if (objs[i].type != OB_FREE) continue;
         memset(&objs[i], 0, sizeof objs[i]); objs[i].type = type; objs[i].refs = 1;
+        next = i + 1;
         return H_OF(i);
     }
     fprintf(stderr, "[ce] out of handles\n");
