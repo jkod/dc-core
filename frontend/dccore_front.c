@@ -339,7 +339,18 @@ static void on_vblank(uint64_t f) {
     vblanks = f;
     if (vblanks - last_render_frame > 3 && !shows_render()) {   /* nothing drawn by the PVR: show the framebuffer */
         static uint8_t rgb[1280 * 1024 * 3]; int w, h;
-        if (dc_pvr_display(rgb, 1280, 1024, &w, &h) == 0) { dc_pvr_gl_load_rgb(rgb, w, h); need_present = 1; }
+        if (dc_pvr_display(rgb, 1280, 1024, &w, &h) == 0) {
+            /* uninitialised VRAM: a framebuffer that is black but for a streak of noise a few lines high
+             * across the width (Looney Tunes Space Race between its logo movie and the game) shows black */
+            int lit_rows = 0, x0 = w, x1 = -1;
+            for (int y = 0; y < h && lit_rows <= 8; y++) {
+                int lit = 0;
+                for (int x = 0; x < w; x++) { const uint8_t *p = rgb + ((size_t)y * w + x) * 3; if (p[0] + p[1] + p[2] > 48) { lit = 1; if (x < x0) x0 = x; if (x > x1) x1 = x; } }
+                lit_rows += lit;
+            }
+            if (lit_rows > 0 && lit_rows <= 8 && (x1 - x0) * 4 >= w * 3) memset(rgb, 0, (size_t)w * h * 3);
+            dc_pvr_gl_load_rgb(rgb, w, h); need_present = 1;
+        }
     }
     if (need_present && (!dc_front_fast || presented % 8 == 0)) {   /* only when the picture changed (or the window) */
         int dw, dh; SDL_GL_GetDrawableSize(win, &dw, &dh);

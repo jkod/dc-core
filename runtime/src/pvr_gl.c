@@ -354,6 +354,12 @@ int dc_pvr_gl_clip_2d;
 static float disp_aspect = 4.f / 3.f;
 static float last_ww, last_rw, last_rh;   /* the last render's target width and picture size, console units */
 
+/* the last picture rendered into each framebuffer address (double buffering: two), so a later render
+ * that only draws a band of lines into one of them keeps what is there outside it, as the console
+ * does (Looney Tunes Space Race's loading bar over the picture before a race) */
+#define NKEEP 4
+static struct { uint32_t tgt; int w, h, fbw, fbh; float ww; GLuint fbo, tex; unsigned frame; } keep[NKEEP];
+int dc_pvr_gl_keep_outside = 1;
 static void ensure_fbo(int w, int h) {
     if (fbo && w == fb_w && h == fb_h) return;
     if (fbo) { p_glDeleteFramebuffers(1, &fbo); p_glDeleteTextures(1, &color_tex); p_glDeleteRenderbuffers(1, &depth_rb); }
@@ -828,13 +834,19 @@ void dc_pvr_gl_render(int scale) {
      * render whose band does not overlap the previous one's, same target, same displayed buffer, keeps
      * what is already drawn outside its band, and the picture's size (the display size can come out a
      * line or two different from one band to the next). */
-    int band;
+    int band, restore = -1;
+    uint32_t cur_tgt = dc_pvr_reg(0x060) & 0x7FFFFFu;
     {
         static uint32_t prev_tgt = 0xFFFFFFFFu, prev_disp; static int prev_x0, prev_x1, prev_y0, prev_y1, prev_w, prev_h;
         uint32_t tgt = dc_pvr_reg(0x060) & 0x7FFFFFu, disp = dc_pvr_reg(0x050) & 0x7FFFFFu;
         /* bands of lines, or quarters (Re-Volt's 4-player race: four 320x240 renders): rectangles apart */
         band = !capturing && tgt == prev_tgt && disp == prev_disp && (f.clip_y0 > prev_y1 || f.clip_y1 < prev_y0 || f.clip_x0 > prev_x1 || f.clip_x1 < prev_x0);
         if (band) { f.width = prev_w; f.height = prev_h; }
+        /* a partial render (under 3/4 of the lines) into a buffer drawn whole before: that picture stays
+         * outside its clip */
+        if (!capturing && !band && dc_pvr_gl_keep_outside && f.clip_y1 >= f.clip_y0 && (f.clip_y1 - f.clip_y0 + 1) * 4 < f.height * 3)
+            for (int k = 0; k < NKEEP; k++)
+                if (keep[k].tex && keep[k].tgt == tgt) { restore = k; band = 1; f.width = keep[k].w; f.height = keep[k].h; break; }
         if (!capturing) { prev_tgt = tgt; prev_disp = disp; prev_x0 = f.clip_x0; prev_x1 = f.clip_x1; prev_y0 = f.clip_y0; prev_y1 = f.clip_y1; prev_w = f.width; prev_h = f.height; }
     }
     if (capturing) {                    /* a texture target: no wider than its lines (a 1024 clip into 640) */
@@ -1156,7 +1168,12 @@ void dc_pvr_gl_render(int scale) {
     /* outside the clip rectangle: black (not for a band, see above); inside: background plane, and all
      * drawing scissored to it */
     {
-        if (!band) {
+        if (restore >= 0 && keep[restore].fbw == fb_w && keep[restore].fbh == fb_h) {   /* see keep */
+            p_glDisable(GL_SCISSOR_TEST);
+            p_glBindFramebuffer(GL_READ_FRAMEBUFFER, keep[restore].fbo); p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo);
+            p_glBlitFramebuffer(0, 0, fb_w, fb_h, 0, 0, fb_w, fb_h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+            p_glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        } else if (!band || restore >= 0) {
             p_glDisable(GL_SCISSOR_TEST);
             p_glClearColor(0, 0, 0, 1);
             p_glClear(GL_COLOR_BUFFER_BIT);
@@ -1320,6 +1337,57 @@ void dc_pvr_gl_render(int scale) {
     /* odd clip or one band (a split-screen view, a loading screen's progress bar): the whole picture
      * where it is, not centred on the band (Looney Tunes Space Race's loading bar near the bottom) */
     if (pic_y0 < 0 || pic_y1 > fb_h || (pic_y1 - pic_y0) * 4 < fb_h * 3) { pic_y0 = pic_y1 = 0; pic_offy = 0; }
+    /* dc_pvr_gl_letterbox_zoom for a movie: one textured quad over the whole picture whose video has
+     * black bars of its own (Looney Tunes Space Race's intro movie) is zoomed like a letterboxed scene.
+     * Found from the rendered rows; while the picture is all black the last bars stay. */
+    {
+        static int mv_y0, mv_y1;                            /* FBO rows of the video between its bars */
+        int movie = 0;
+        if (!capturing && dc_pvr_gl_widescreen && dc_pvr_gl_letterbox_zoom && !lbox && !band) {
+            for (int i = 0; i < f.npolys; i++) {
+                const pvr_poly *p = &f.polys[i]; const pvr_vtx *v = f.verts + p->first;
+                if (p->n < 3 || !((p->isp >> 25) & 1)) continue;
+                float x0 = v[0].x, x1 = v[0].x, y0 = v[0].y, y1 = v[0].y;
+                for (int k = 1; k < p->n; k++) { if (v[k].x < x0) x0 = v[k].x; if (v[k].x > x1) x1 = v[k].x; if (v[k].y < y0) y0 = v[k].y; if (v[k].y > y1) y1 = v[k].y; }
+                if (x0 <= 1.f && x1 >= RW - 1.f && y0 <= 1.f && y1 >= f.height - 1.f && movie == 0) movie = 1;
+                else { movie = -1; break; }               /* anything else textured: not a movie */
+            }
+        }
+        if (movie == 1) {
+            float o = (WW - (float)RW) * 0.5f, k = (float)fb_w / WW;
+            int px0 = (int)ceilf(o * k), px1 = (int)floorf((o + (float)RW) * k);
+            static uint8_t *col; static int cap_col;
+            if (fb_h * 4 > cap_col) { cap_col = fb_h * 4; col = realloc(col, (size_t)cap_col); }
+            p_glBindFramebuffer(GL_FRAMEBUFFER, fbo); p_glPixelStorei(GL_PACK_ALIGNMENT, 1);
+            int top = fb_h, bot = -1;                       /* GL rows: lit rows' range over three columns */
+            for (int c = 1; c <= 3; c++) {
+                p_glReadPixels(px0 + (px1 - px0) * c / 4, 0, 1, fb_h, GL_RGBA, GL_UNSIGNED_BYTE, col);
+                for (int y = 0; y < fb_h; y++) if (col[y * 4] + col[y * 4 + 1] + col[y * 4 + 2] > 30) { if (y < top) top = y; if (y > bot) bot = y; }
+            }
+            if (bot >= top) {
+                if (top >= fb_h / 16 && fb_h - 1 - bot >= fb_h / 16 && (bot - top) * 3 >= fb_h) { mv_y0 = top; mv_y1 = bot + 1; }
+                else mv_y0 = mv_y1 = 0;                     /* fills the picture: no bars */
+            }
+            if (mv_y1 > mv_y0) { zoom_x0 = px0; zoom_x1 = px1; zoom_y0 = mv_y0; zoom_y1 = mv_y1; }
+        } else if (!capturing) mv_y0 = mv_y1 = 0;
+    }
+    if (!capturing && dc_pvr_gl_keep_outside) {            /* see keep: this buffer's picture now */
+        int k = 0, old = 0;
+        while (k < NKEEP && !(keep[k].tex && keep[k].tgt == cur_tgt)) { if (keep[k].frame < keep[old].frame) old = k; k++; }
+        if (k == NKEEP) k = old;
+        if (keep[k].fbw != fb_w || keep[k].fbh != fb_h || !keep[k].tex) {
+            if (keep[k].tex) { p_glDeleteFramebuffers(1, &keep[k].fbo); p_glDeleteTextures(1, &keep[k].tex); }
+            p_glGenTextures(1, &keep[k].tex); p_glBindTexture(GL_TEXTURE_2D, keep[k].tex);
+            p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, fb_w, fb_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+            p_glGenFramebuffers(1, &keep[k].fbo); p_glBindFramebuffer(GL_FRAMEBUFFER, keep[k].fbo);
+            p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, keep[k].tex, 0);
+            keep[k].fbw = fb_w; keep[k].fbh = fb_h;
+        }
+        p_glDisable(GL_SCISSOR_TEST);
+        p_glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo); p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, keep[k].fbo);
+        p_glBlitFramebuffer(0, 0, fb_w, fb_h, 0, 0, fb_w, fb_h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        keep[k].tgt = cur_tgt; keep[k].w = f.width; keep[k].h = f.height; keep[k].frame = frame_no;
+    }
     p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
