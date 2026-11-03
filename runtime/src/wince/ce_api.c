@@ -2,6 +2,7 @@
  * memory, modules, files, time, the OEM layer). Everything else in COREDLL -- the C runtime, wsprintf,
  * string and 64-bit helpers -- is the disc's own code, recompiled. */
 #include "ce_int.h"
+#include "dccore/aica.h"
 #include "dccore/hw.h"
 #include "dccore/disc.h"
 #include "dccore/bios.h"
@@ -540,24 +541,31 @@ FN(GetFileAttributesW) {
 /* the GD-ROM drive's audio controls (NT CD-ROM IOCTLs) on dc-core's CD audio player */
 static uint32_t msf_lba(uint32_t m, uint32_t s, uint32_t f) { return (m * 60 + s) * 75 + f - 150; }
 static void lba_msf(uint32_t lba, uint32_t p) { uint32_t a = lba + 150; dc_wr8(p, 0); dc_wr8(p + 1, (uint8_t)(a / 4500)); dc_wr8(p + 2, (uint8_t)(a / 75 % 60)); dc_wr8(p + 3, (uint8_t)(a % 75)); }
+static uint8_t cd_volume[2] = { 0xFF, 0xFF };
 static uint32_t cdrom_ioctl(sh4ctx *c) {
     uint32_t code = ARG(1), in = ARG(2), out = ARG(4), outsz = ARG(5), retp = ARG(6), ret = 0;
-    TRACE("CD-ROM ioctl %08X in %08X/%u out %08X/%u ovl %08X", code, in, ARG(3), out, outsz, ARG(7));
+    TRACE("CD-ROM ioctl %08X in %08X/%u (%02X) out %08X/%u ovl %08X", code, in, ARG(3), in && ARG(3) ? dc_rd8(in) : 0, out, outsz, ARG(7));
     switch (code) {
-    case 0x00024000u: {           /* READ_TOC: CDROM_TOC { Length[2] BE, First, Last, TRACK_DATA[100] (8 bytes) } */
-        int n = dc_disc_track_count();
-        if (outsz < 4u + 8u * (uint32_t)(n + 1)) break;
-        uint32_t len = 2 + 8u * (uint32_t)(n + 1);
-        dc_wr8(out, (uint8_t)(len >> 8)); dc_wr8(out + 1, (uint8_t)len); dc_wr8(out + 2, 1); dc_wr8(out + 3, (uint8_t)n);
+    case 0x00024000u: {           /* READ_TOC: CDROM_TOC { Length[2] BE, First, Last, TRACK_DATA[100] (8 bytes) };
+                                   * the GD-ROM driver's input byte picks the area: 1 the high-density one
+                                   * (tracks 3..), else the single-density one (tracks 1-2) */
+        int n = dc_disc_track_count(), hd = in && ARG(3) && dc_rd8(in) == 1;
+        int first = hd ? 2 : 0, last = hd ? n - 1 : (n < 2 ? n - 1 : 1);   /* 0-based */
+        if (n <= first) break;
+        int cnt = last - first + 1;
+        if (outsz < 4u + 8u * (uint32_t)(cnt + 1)) break;
+        uint32_t len = 2 + 8u * (uint32_t)(cnt + 1);
+        dc_wr8(out, (uint8_t)(len >> 8)); dc_wr8(out + 1, (uint8_t)len); dc_wr8(out + 2, (uint8_t)(first + 1)); dc_wr8(out + 3, (uint8_t)(last + 1));
         uint32_t end = 0;
-        for (int i = 0; i <= n; i++) {
+        for (int i = 0; i <= cnt; i++) {
             uint32_t lba = 0, sec = 0, e = out + 4 + 8u * (uint32_t)i; int data = 0;
-            if (i < n) dc_disc_track_info(i, &lba, &data, &sec); else lba = end;
+            if (i < cnt) dc_disc_track_info(first + i, &lba, &data, &sec); else lba = end;
             if (lba + sec > end) end = lba + sec;
-            dc_wr8(e, 0); dc_wr8(e + 1, (uint8_t)((data ? 4 : 0) << 4 | 1)); dc_wr8(e + 2, (uint8_t)(i < n ? i + 1 : 0xAA)); dc_wr8(e + 3, 0);
+            dc_wr8(e, 0); dc_wr8(e + 1, (uint8_t)(1 << 4 | (data ? 4 : 0)));   /* Control : 4 (low), Adr : 4 */
+            dc_wr8(e + 2, (uint8_t)(i < cnt ? first + i + 1 : 0xAA)); dc_wr8(e + 3, 0);
             lba_msf(lba, e + 4);
         }
-        ret = 4 + 8u * (uint32_t)(n + 1);
+        ret = 4 + 8u * (uint32_t)(cnt + 1);
         break;
     }
     case 0x00024018u:             /* PLAY_AUDIO_MSF { M S F (start), M S F (end) } */
@@ -580,7 +588,16 @@ static uint32_t cdrom_ioctl(sh4ctx *c) {
         ret = 16;
         break;
     }
-    case 0x00024014u: case 0x00024028u: ret = 0; break;   /* GET/SET_VOLUME */
+    case 0x00024014u:             /* GET_VOLUME: VOLUME_CONTROL { PortVolume[4] } */
+        if (outsz >= 4) { for (uint32_t i = 0; i < 4; i++) dc_wr8(out + i, cd_volume[i & 1]); ret = 4; }
+        break;
+    case 0x00024028u:             /* SET_VOLUME: the CD's left / right level, the sound chip's CD inputs (EFSDL 16 / 17) */
+        if (ARG(3) >= 2) {
+            cd_volume[0] = dc_rd8(in); cd_volume[1] = dc_rd8(in + 1);
+            dc_aica_write(0x2040, (uint32_t)(cd_volume[0] >> 4) << 8 | 0x1F, 4);   /* left: panned fully left */
+            dc_aica_write(0x2044, (uint32_t)(cd_volume[1] >> 4) << 8 | 0x0F, 4);   /* right */
+        }
+        break;
     default:
         TRACE("DeviceIoControl CD-ROM code %08X", code);
     }
