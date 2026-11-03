@@ -378,7 +378,10 @@ static void on_vblank(uint64_t f) {
         Uint64 freq = SDL_GetPerformanceFrequency(), now = SDL_GetPerformanceCounter();
         if (!paced) { t0_count = now; t0_cycles = dc_current_ctx->cycles; paced = 1; return; }
         double emu = (double)(dc_current_ctx->cycles - t0_cycles) / 200e6, real = (double)(now - t0_count) / (double)freq;
-        if (emu > real) SDL_Delay((Uint32)((emu - real) * 1000.0));
+        /* with vsync the swap already waits for the display; sleep only when more than a field ahead
+         * (a display faster than 60 Hz), so a 60 Hz display isn't made to skip a refresh now and then */
+        double ahead = cfg.vsync ? 0.017 : 0.0;
+        if (emu > real + ahead) SDL_Delay((Uint32)((emu - real - ahead) * 1000.0));
         else if (real - emu > 0.25) { t0_count = now; t0_cycles = dc_current_ctx->cycles; }   /* too slow: don't try to catch up */
     }
 }
@@ -423,7 +426,11 @@ int dc_front_open(const dc_front_config *c) {
     if (!win) { fprintf(stderr, "SDL window: %s\n", SDL_GetError()); return -1; }
     glc = SDL_GL_CreateContext(win);
     if (!glc) { fprintf(stderr, "OpenGL 3.3: %s\n", SDL_GetError()); return -1; }
-    SDL_GL_SetSwapInterval(0);
+    if (cfg.vsync) {                                       /* adaptive (late frames don't wait) where offered */
+        if (SDL_GL_SetSwapInterval(-1) != 0 && SDL_GL_SetSwapInterval(1) != 0)
+            fprintf(stderr, "vsync not available: %s\n", SDL_GetError());
+        else fprintf(stderr, "vsync on (%s)\n", SDL_GL_GetSwapInterval() < 0 ? "adaptive" : "every refresh");
+    } else SDL_GL_SetSwapInterval(0);
     if (dc_pvr_gl_init(getproc)) return -1;
     dc_pvr_sw_install();                                   /* TA collection (shared by the backends) */
     dc_maple_install();

@@ -29,6 +29,8 @@ typedef struct {
     const char *vmu_path;       /* or an explicit VMU image file (.bin, 128 KB) */
     int no_vmu;
     int stats;                  /* print fields / renders / emulated vs wall time on exit and every 5 s */
+    int vsync;                  /* wait for the display's refresh when showing a frame (no tearing; the
+                                   game then runs at the display's rate if that is below the console's) */
 } dc_front_config;
 int  dc_front_open(const dc_front_config *cfg);   /* 0 = ok */
 void dc_front_close(void);
