@@ -25,6 +25,8 @@
 #define CE_PROC_START   (CE_MAGIC + 0x1004u)
 #define CE_TRAPS_LO     0xFFFF0000u    /* COREDLL's kernel calls: FIRST_METHOD 0xFFFFC801 - (set << 8 | method) * 2 */
 #define CE_TRAPS_HI     0xFFFFC802u
+#define CE_DRVMEM_PHYS  0x1FD80000u    /* drivers' reserved RAM (DDHAL), = RAM offset 0xD80000 */
+#define CE_DRVMEM_LEN   0x00100000u
 #define CE_MAPS_LO      0x7C000000u    /* VirtualAlloc reservations that VirtualCopy maps (dc_hw_map windows) */
 #define CE_MAPS_HI      0x7F000000u
 
@@ -41,6 +43,7 @@ void     ce_put_wstr(uint32_t va, const char *s, int max);
 
 /* ---- heap (user memory) ---- */
 void     ce_heap_init(uint32_t lo, uint32_t hi);
+void     ce_heap_reserve(uint32_t lo, uint32_t hi);     /* take a range out of the heap (before any allocation) */
 uint32_t ce_alloc(uint32_t size, uint32_t align);
 void     ce_free(uint32_t va);
 uint32_t ce_alloc_size(uint32_t va);

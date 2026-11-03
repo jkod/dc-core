@@ -104,6 +104,17 @@ void ce_heap_init(uint32_t lo, uint32_t hi) {
     heap_lo = lo; heap_hi = hi;
     capfr = 256; fr = malloc(sizeof *fr * (size_t)capfr); nfr = 1; fr[0].at = lo; fr[0].len = hi - lo;
 }
+void ce_heap_reserve(uint32_t lo, uint32_t hi) {
+    for (int i = 0; i < nfr; i++) {
+        uint32_t a = fr[i].at, e = fr[i].at + fr[i].len;
+        if (hi <= a || lo >= e) continue;
+        if (nfr + 1 >= capfr) { capfr *= 2; fr = realloc(fr, sizeof *fr * (size_t)capfr); }
+        memmove(&fr[i + 1], &fr[i], sizeof *fr * (size_t)(nfr - i)); nfr++;
+        fr[i].at = a; fr[i].len = lo > a ? lo - a : 0;
+        fr[i + 1].at = hi < e ? hi : e; fr[i + 1].len = hi < e ? e - hi : 0;
+        return;
+    }
+}
 uint32_t ce_alloc(uint32_t size, uint32_t align) {
     if (!size) size = 1;
     size = (size + CE_HEAP_ALIGN - 1) & ~(CE_HEAP_ALIGN - 1);

@@ -102,6 +102,7 @@ int ce_init(sh4ctx *c, const ce_module_desc *d, int n, const char **bad) {
     uint32_t end = 0;
     for (int i = 0; i < nmods; i++) if (mods[i].base + mods[i].size > end) end = mods[i].base + mods[i].size;
     ce_heap_init((end + 0xFFFF) & ~0xFFFFu, DC_URAM_SIZE - 0x10000);
+    ce_heap_reserve(CE_DRVMEM_PHYS & 0x00FFFFFFu, (CE_DRVMEM_PHYS & 0x00FFFFFFu) + CE_DRVMEM_LEN);
     ce_reg_init();
     ce_irq_init();
     ce_overrides_init();

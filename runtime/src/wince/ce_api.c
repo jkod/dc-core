@@ -252,6 +252,24 @@ FN(memcpy) { uint32_t d = ARG(0), s = ARG(1), n = ARG(2); uint8_t *pd = ce_ptr(d
 FN(memcmp) { uint32_t a = ARG(0), b = ARG(1), n = ARG(2);
     for (uint32_t i = 0; i < n; i++) { int d = (int)dc_rd8(a + i) - (int)dc_rd8(b + i); if (d) RET((uint32_t)d); }
     RET(0); }
+/* case-insensitive compares: COREDLL's own need the locale tables its start-up would set */
+static uint32_t lw(uint32_t ch) { return ch >= 'A' && ch <= 'Z' ? ch + 32 : (ch >= 0xC0 && ch <= 0xDE && ch != 0xD7 ? ch + 32 : ch); }
+static uint32_t icmp(uint32_t a, uint32_t b, uint32_t n, int wide) {
+    for (uint32_t i = 0; i < n; i++) {
+        uint32_t x = wide ? dc_rd16(a + i * 2) : dc_rd8(a + i), y = wide ? dc_rd16(b + i * 2) : dc_rd8(b + i);
+        int d = (int)lw(x) - (int)lw(y);
+        if (d) return (uint32_t)d;
+        if (!x) return 0;
+    }
+    return 0;
+}
+FN(_wcsicmp) { RET(icmp(ARG(0), ARG(1), 0xFFFFFFFFu, 1)); }
+FN(_wcsnicmp) { RET(icmp(ARG(0), ARG(1), ARG(2), 1)); }
+FN(_stricmp) { RET(icmp(ARG(0), ARG(1), 0xFFFFFFFFu, 0)); }
+FN(_strnicmp) { RET(icmp(ARG(0), ARG(1), ARG(2), 0)); }
+FN(lstrcmpiW) { RET(icmp(ARG(0), ARG(1), 0xFFFFFFFFu, 1)); }
+FN(towlower) { RET(lw(ARG(0) & 0xFFFF)); }
+FN(towupper) { uint32_t ch = ARG(0) & 0xFFFF; RET(lw(ch) == ch && ((ch >= 'a' && ch <= 'z') || (ch >= 0xE0 && ch <= 0xFE && ch != 0xF7)) ? ch - 32 : ch); }
 FN(memset) { uint32_t d = ARG(0), v = ARG(1), n = ARG(2); uint8_t *pd = ce_ptr(d);
     if (n && pd && ce_ptr(d + n - 1)) memset(pd, (int)v, n); else for (uint32_t i = 0; i < n; i++) dc_wr8(d + i, (uint8_t)v);
     RET(d); }
@@ -290,9 +308,18 @@ FN(VirtualFree) {
     if (ARG(2) & 0x8000) ce_free(addr);     /* MEM_RELEASE */
     RET(1);
 }
+/* Drivers' memory the CE ROM reserves at a fixed address (config.bib's DRIVGLOB and DMA areas):
+ * DDHAL maps "physical" 0x1FD80000, fills it through the store queues (which land at RAM offset
+ * 0xD80000) and DMAs from it. It is RAM offset 0xD80000.., kept out of the heap (ce_init). */
+static uint32_t drvmem_phys(uint32_t pa) {
+    pa &= 0x1FFFFFFFu;
+    if (pa - CE_DRVMEM_PHYS < CE_DRVMEM_LEN) return 0x0C000000u + (pa & 0x00FFFFFFu);
+    return pa;
+}
+static uint32_t dma_src(uint32_t src) { return drvmem_phys(src); }
 /* physical 0x1Fxxxxxx is the SH-4's own registers (P4 0xFFxxxxxx); the rest through P2 */
 static uint32_t phys_to_va(uint32_t pa) {
-    pa &= 0x1FFFFFFFu;
+    pa = drvmem_phys(pa);
     return (pa & 0x1F000000u) == 0x1F000000u ? 0xE0000000u | pa : 0xA0000000u | pa;
 }
 FN(VirtualCopy) {             /* (dst, src, size, prot): PAGE_PHYSICAL 0x400 -> src is a physical address >> 8 */
@@ -409,7 +436,7 @@ static uint32_t open_device(uint32_t wname, const char *name) {
     uint32_t open = wdm_proc("OpenWDMDevice");
     if (!open) return INVALID_HANDLE;
     uint32_t tmp = ce_alloc(4, 4);
-    uint32_t r = ce_call(open, 2, tmp, wname), dev = dc_rd32(tmp);
+    uint32_t r = ce_call(open, 2, tmp, wname + 8 * 2), dev = dc_rd32(tmp);   /* the name in the "Device" directory */
     ce_free(tmp);
     TRACE("OpenWDMDevice %s -> %u, %08X", name, r, dev);
     if ((!r || !dev) && !strcasecmp(name, "\\Device\\CDROM0")) {
@@ -633,7 +660,8 @@ const ce_override ce_kernel_overrides[] = {
     K(TlsCall), K(TlsGetValue), K(TlsSetValue), K(GetLastError), K(SetLastError),
     K(GetTickCount), K(QueryPerformanceCounter), K(QueryPerformanceFrequency), K(GetLocalTime), K(GetSystemTime), K(Random),
     K(LocalAlloc), K(LocalFree), K(LocalReAlloc), K(LocalSize), K(GetProcessHeap), K(HeapCreate), K(HeapDestroy),
-    K(HeapAlloc), K(HeapFree), K(HeapReAlloc), K(HeapSize), K(malloc), K(calloc), K(free), K(realloc), K(memcpy), K(memset), K(memcmp),
+    K(HeapAlloc), K(HeapFree), K(HeapReAlloc), K(HeapSize), K(malloc), K(calloc), K(free), K(realloc), K(memcpy), K(memset), K(memcmp), K(_wcsicmp), K(_wcsnicmp), K(_stricmp), K(_strnicmp), K(lstrcmpiW),
+    K(towlower), K(towupper),
     { "COREDLL.DLL", "memmove", k_memcpy }, { "COREDLL.DLL", "??2@YAPAXI@Z", k_malloc }, { "COREDLL.DLL", "??3@YAXPAX@Z", k_free },
     K(VirtualAlloc), K(VirtualFree), K(VirtualCopy), K(LockPages), K(UnlockPages), K(MapPtrToProcess), K(MapPtrUnsecure),
     K(SetProcPermissions), K(GetCurrentPermissions), K(SetKMode), K(GetCallerProcess), K(GetCurrentProcessId), K(GetOwnerProcess),
@@ -660,4 +688,5 @@ void ce_overrides_init(void) {
         }
     dc_hle_register_range(CE_TRAPS_LO, CE_TRAPS_HI, h_trap);
     dc_hle_register_range(CE_WDMH, CE_WDMH + 0x40, h_wdmh);
+    dc_dma_src_hook = dma_src;
 }

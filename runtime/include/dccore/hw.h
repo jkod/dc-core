@@ -46,6 +46,8 @@ void     dc_hw_map(uint32_t va, uint32_t to, uint32_t len);
 /* Store queues mapped through the MMU (Windows CE's SetStoreQueueBase): non-zero = the address a flush
  * of 0xE0000000 + offset writes is dc_sq_base + offset, instead of the QACR registers' area */
 extern uint32_t dc_sq_base;
+/* CH2 DMA source address translation (an OS's physical memory that the port keeps elsewhere in RAM) */
+extern uint32_t (*dc_dma_src_hook)(uint32_t src);
 void     dc_raise(uint32_t istnrm_bits);      /* raise Holly normal interrupts (e.g. render done) */
 uint64_t dc_frame_count(void);
 uint32_t dc_pvr_reg(uint32_t ofs);

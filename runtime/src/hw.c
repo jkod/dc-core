@@ -416,9 +416,11 @@ static void maple_dma(void) {
     schedule_irq(1u << 12, 20000);                                       /* maple DMA end */
 }
 
+uint32_t (*dc_dma_src_hook)(uint32_t src);
 static void sb_dma(uint32_t o, uint32_t v) {
     if (o == 0x6808 && (v & 1)) {                                        /* CH2 DMA -> TA / texture memory */
         uint32_t src = *p4reg(0xFFA00020u), len = SBR(0x6804), dst = SBR(0x6800);
+        if (dc_dma_src_hook) src = dc_dma_src_hook(src);
         uint32_t so = DC_RAM_OFS(src);
         if (DC_IS_RAM(src) && so + len <= 0x1000000u) {
             uint32_t m = dst & 0x1FFFFFFFu;
