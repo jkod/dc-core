@@ -540,7 +540,11 @@ FN(KernelIoControl) {         /* (code, in, insize, out, outsize, &ret) */
     (void)phys_next;
     switch (code) {
     case 0x00010000u:          /* the Holly status bits behind a SYSINTR's last interrupt (graphics thread) */
-        if (out && outsz >= 4 && in) dc_wr32(out, ce_irq_take(dc_rd32(in)));
+        if (out && outsz >= 4 && in) {
+            uint32_t bits = ce_irq_take(dc_rd32(in));
+            dc_wr32(out, bits);
+            if (ce_trace > 2) TRACE("interrupt bits SYSINTR %u: %08X", dc_rd32(in), bits);
+        }
         if (retp) dc_wr32(retp, 4);
         RET(1);
     case 0x00030000u:          /* (sysintr, on): interrupt option, nothing to do */
@@ -553,6 +557,9 @@ FN(KernelIoControl) {         /* (code, in, insize, out, outsize, &ret) */
 FN(SetStoreQueueBase) {      /* the store queue area 0xE0000000.. writes to this physical address on */
     TRACE("SetStoreQueueBase %08X", ARG(0));
     dc_sq_base = 0xA0000000u | (ARG(0) & 0x1FFFFFFFu);
+    /* DDHAL addresses its buffers in the drivers' reserved RAM as this value + (physical - 0x0C000000):
+     * that VA range is the reserved RAM */
+    dc_hw_map(0xE0000000u + (CE_DRVMEM_PHYS - 0x0C000000u), 0xAC000000u | (CE_DRVMEM_PHYS & 0x00FFFFFFu), CE_DRVMEM_LEN);
     RET(0xE0000000u);           /* the store queue area's address, which now writes there */
 }
 FN(AddEventAccess) { RET(1); }
