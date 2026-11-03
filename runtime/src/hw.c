@@ -33,8 +33,19 @@ static uint32_t pvr[0x800] = {        /* 0x005F8000..0x005F9FFF */
     [0x11C >> 2] = 0xFF,               /* PT_ALPHA_REF power-on value: games that never write it rely on it */
 };
 #define aram dc_aram                 /* 0x00800000..0x009FFFFF sound RAM (aica.c) */
-uint8_t dc_vram[0x800000];           /* 8 MB, 64-bit layout */
-uint32_t dc_vram_gen[0x800];         /* per 4 KB page of dc_vram: bumped on every write (texture caches) */
+uint8_t dc_vram[DC_VRAM_SIZE + DC_VRAM_EXT_SIZE];   /* 8 MB, 64-bit layout, + the extra texture memory */
+uint32_t dc_vram_gen[(DC_VRAM_SIZE + DC_VRAM_EXT_SIZE) >> 12];   /* per 4 KB page of dc_vram: bumped on every write (texture caches) */
+uint32_t dc_vram_tex_mask = DC_VRAM_SIZE - 1;
+void dc_vram_ext_enable(void) {
+    dc_vram_tex_mask = DC_VRAM_SIZE + DC_VRAM_EXT_SIZE - 1;
+    for (uint32_t p = 0; p < (DC_VRAM_SIZE + DC_VRAM_EXT_SIZE) >> 12; p++) dc_vram_gen[p]++;   /* cached textures decode again */
+}
+int dc_vram_ext_write(uint32_t ofs, const void *data, uint32_t len) {
+    if (ofs < DC_VRAM_SIZE || ofs > DC_VRAM_SIZE + DC_VRAM_EXT_SIZE || len > DC_VRAM_SIZE + DC_VRAM_EXT_SIZE - ofs) return -1;
+    memcpy(dc_vram + ofs, data, len);
+    for (uint32_t p = ofs >> 12; len && p <= (ofs + len - 1) >> 12; p++) dc_vram_gen[p]++;
+    return 0;
+}
 uint32_t dc_pal_gen;                 /* bumped on palette RAM writes */
 #define VRAM_TOUCH(o) (dc_vram_gen[((o) & 0x7FFFFF) >> 12]++)
 uint32_t dc_vram32_gen[0x800];       /* per 4 KB of the 32-bit area: bumped on writes through it (framebuffers) */

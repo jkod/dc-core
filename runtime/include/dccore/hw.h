@@ -19,8 +19,19 @@ typedef struct dc_hw_hooks {
     int  (*on_maple)(int port, uint32_t frame, uint32_t send, int words, uint32_t recv);
 } dc_hw_hooks;
 extern dc_hw_hooks dc_hw;
-extern uint8_t dc_vram[0x800000];
-extern uint32_t dc_vram_gen[0x800];   /* per 4 KB VRAM page, bumped on writes */
+/* Video RAM in the PVR's 64-bit (texture) layout: the console's 8 MB, then 8 MB of extra texture memory
+ * that only a port can fill (dc_vram_ext_write) and only texture fetches see, after dc_vram_ext_enable(). */
+#define DC_VRAM_SIZE     0x800000u
+#define DC_VRAM_EXT_SIZE 0x800000u
+extern uint8_t dc_vram[DC_VRAM_SIZE + DC_VRAM_EXT_SIZE];
+extern uint32_t dc_vram_gen[(DC_VRAM_SIZE + DC_VRAM_EXT_SIZE) >> 12];   /* per 4 KB VRAM page, bumped on writes */
+/* Extra texture memory (a port's own textures beyond the console's 8 MB, e.g. assets a game never fitted):
+ * texture addresses (TCW bits 0..20, 16 MB) are no longer folded into 8 MB, so 0x800000.. reaches the
+ * extra area. Off by default: on the console the top bit is ignored and some games may leave it set.
+ * dc_vram_ext_write: ofs is a texture address (>= DC_VRAM_SIZE), data in the 64-bit (texture) layout. */
+extern uint32_t dc_vram_tex_mask;     /* DC_VRAM_SIZE - 1, or the 16 MB mask with the extension */
+void dc_vram_ext_enable(void);
+int  dc_vram_ext_write(uint32_t ofs, const void *data, uint32_t len);
 extern uint32_t dc_vram32_gen[0x800]; /* per 4 KB of the 32-bit area (framebuffer addresses), bumped on writes through it */
 extern uint32_t dc_pal_gen;           /* bumped on palette writes */
 extern int dc_hw_verbose;

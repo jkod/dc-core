@@ -49,8 +49,8 @@ static void wr8_area32(uint32_t o, uint8_t v) {
     if ((o & 0xFFF) == 0 || (o & 3) == 0) { dc_vram_gen[so >> 12]++; dc_vram32_gen[(o & 0x7FFFFF) >> 12]++; }   /* framebuffer writes invalidate textures there */
     dc_vram[so] = v;
 }
-static uint16_t tex16(uint32_t o) { o &= 0x7FFFFE; return (uint16_t)(dc_vram[o] | dc_vram[o + 1] << 8); }
-static uint8_t tex8(uint32_t o) { return dc_vram[o & 0x7FFFFF]; }
+static uint16_t tex16(uint32_t o) { o &= dc_vram_tex_mask & ~1u; return (uint16_t)(dc_vram[o] | dc_vram[o + 1] << 8); }
+static uint8_t tex8(uint32_t o) { return dc_vram[o & dc_vram_tex_mask]; }
 
 /* ------------------------------------------------------------------ display list */
 typedef pvr_vtx vtx;
@@ -258,7 +258,7 @@ static const uint32_t mipvq[11] = {0x0, 0x1, 0x2, 0x6, 0x16, 0x56, 0x156, 0x556,
 /* sum of the write generations of the VRAM pages a texture occupies */
 static uint32_t page_gen(uint32_t start, uint32_t end) {
     uint32_t g = 0;
-    for (uint32_t p = start >> 12; p <= ((end - 1) >> 12) && p < 0x800; p++) g += dc_vram_gen[p] * (p + 1);
+    for (uint32_t p = start >> 12; p <= ((end - 1) >> 12) && p <= (dc_vram_tex_mask >> 12); p++) g += dc_vram_gen[p] * (p + 1);
     return g;
 }
 static uint64_t tex_ids;
@@ -297,9 +297,9 @@ static tex_t *get_tex(uint32_t tcw, uint32_t tsp) {
     {   /* the bytes this texture reads, for change detection */
         uint32_t bytes = vq ? 2048 + (uint32_t)(w / 2) * (h / 2) : fmt == 5 ? (uint32_t)w * h / 2 : fmt == 6 ? (uint32_t)w * h
                        : (uint32_t)pitch * h * 2;
-        t->start = cb & 0x7FFFFF; t->end = ((addr & 0x7FFFFF) + bytes + (vq ? 0 : 0)) ;
-        if (vq) t->end = (addr & 0x7FFFFF) + 2048 + (uint32_t)(w / 2) * (h / 2);
-        if (t->end > 0x800000) t->end = 0x800000;
+        t->start = cb & dc_vram_tex_mask; t->end = ((addr & dc_vram_tex_mask) + bytes + (vq ? 0 : 0)) ;
+        if (vq) t->end = (addr & dc_vram_tex_mask) + 2048 + (uint32_t)(w / 2) * (h / 2);
+        if (t->end > dc_vram_tex_mask + 1) t->end = dc_vram_tex_mask + 1;
         if (t->end <= t->start) t->end = t->start + 1;
         t->gen = page_gen(t->start, t->end);
     }

@@ -5,6 +5,7 @@
 #include "dccore/runtime.h"
 #include "dccore/hw.h"
 #include "dccore/pvr.h"
+#include "../runtime/src/pvr_int.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -204,6 +205,24 @@ int main(void) {
     { uint32_t fp = fb_px(5, 5);      /* the PVR's blend tops out at 254/255 */
       CHECK(((fp >> 16) & 255) <= 2 && ((fp >> 8) & 255) >= 0xFD && (fp & 255) == 0, "fogged pixel %06X", fp); }
     CHECK(fb_px(40, 40) == 0xFF0000, "unfogged pixel %06X", fb_px(40, 40));
+
+    {   /* extra texture memory: a texture at 0x800000 + 0x1000 (TCW address bits 0..20) reads the extra area
+         * only with dc_vram_ext_enable(); without it the address folds into the console's 8 MB */
+        uint16_t lo[64], hi[64];
+        for (int i = 0; i < 64; i++) { lo[i] = 0x001F; hi[i] = 0xF800; }   /* RGB565: blue below, red above */
+        memcpy(dc_vram + 0x1000, lo, sizeof lo);
+        dc_vram_gen[1]++;
+        CHECK(dc_vram_ext_write(0x801000, hi, sizeof hi) == 0, "ext write");
+        CHECK(dc_vram_ext_write(0x1000, hi, sizeof hi) != 0, "ext write below the extra area accepted");
+        uint32_t tcw = (1u << 27) | (1u << 26) | ((0x801000u >> 3) & 0x1FFFFF);   /* RGB565, non-twiddled */
+        pvr_texinfo ti;
+        pvr_get_texture(tcw, 0, &ti);                                            /* 8x8 */
+        CHECK(ti.w == 8 && (ti.px[0] & 0xFFFFFF) == 0x0000FF, "folded texel %06X", ti.px[0] & 0xFFFFFF);
+        dc_vram_ext_enable();
+        pvr_get_texture(tcw, 0, &ti);
+        CHECK((ti.px[0] & 0xFFFFFF) == 0xFF0000, "extra-memory texel %06X", ti.px[0] & 0xFFFFFF);
+        dc_vram_tex_mask = DC_VRAM_SIZE - 1;
+    }
 
 #ifdef WITH_GL
     printf("compared %d frames with the OpenGL backend\n", gl_frames);
