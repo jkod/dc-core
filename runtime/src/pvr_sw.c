@@ -85,7 +85,7 @@ static void list_init(void) {
 static struct {
     uint32_t pcw, isp, tsp, tcw, tsp1, tcw1;
     float face[4], face_ofs[4], face1[4];
-    int mod_inst;                                  /* modifier volume instruction of the last header */
+    int mod_inst, mod_cull;                        /* modifier volume instruction and culling mode of the last header */
     int open;                                      /* index of the strip being filled, -1 none */
     int sprite;                                    /* the last header was a sprite header */
     int ux0, uy0, ux1, uy1;                        /* last user tile clip rectangle (scene pixels) */
@@ -136,7 +136,7 @@ static void sink(int kind, int list, const uint32_t *w, int words) {
     case 4:                                           /* polygon header (or modifier volume) */
         cur.open = -1;
         cur.sprite = 0;
-        if (list == 1 || list == 3) { cur.pcw = 0; cur.mod_inst = (int)(w[1] >> 29); return; }
+        if (list == 1 || list == 3) { cur.pcw = 0; cur.mod_inst = (int)(w[1] >> 29); cur.mod_cull = (int)(w[1] >> 27) & 3; return; }
         cur.pcw = w[0]; cur.isp = isp_from_pcw(w[1], w[0]); cur.tsp = w[2]; cur.tcw = w[3];
         {
             int col = (w[0] >> 4) & 3, vol = (w[0] >> 6) & 1, ofs = (w[0] >> 2) & 1;
@@ -161,7 +161,7 @@ static void sink(int kind, int list, const uint32_t *w, int words) {
             if (nmt == cap_mt) { cap_mt = cap_mt ? cap_mt * 2 : 512; mt = realloc(mt, cap_mt * sizeof *mt); }
             modtri *m = &mt[nmt++];
             for (int k = 0; k < 3; k++) { m->x[k] = f32(w[1 + 3 * k]); m->y[k] = f32(w[2 + 3 * k]); m->z[k] = f32(w[3 + 3 * k]); }
-            m->inst = cur.mod_inst; m->list = list;
+            m->inst = cur.mod_inst; m->list = list; m->cull = cur.mod_cull;
             return;
         }
         if (!cur.pcw) return;
@@ -549,6 +549,11 @@ static void mod_tri(const modtri *m) {
     float ax = m->x[0], ay = m->y[0], bx = m->x[1], by = m->y[1], cx = m->x[2], cy = m->y[2];
     float area = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
     if (area == 0) return;
+    /* culling as for polygons: a volume can be a flat, double-sided shape of which only one side counts
+     * (Daytona USA 2001's car and scenery shadows) */
+    if (m->cull == 1 && fabsf(area) < f32(REG(0x078))) return;
+    if (m->cull == 2 && area < 0) return;
+    if (m->cull == 3 && area > 0) return;
     int x0 = (int)floorf(fminf(ax, fminf(bx, cx))), x1 = (int)ceilf(fmaxf(ax, fmaxf(bx, cx)));
     int y0 = (int)floorf(fminf(ay, fminf(by, cy))), y1 = (int)ceilf(fmaxf(ay, fmaxf(by, cy)));
     if (x0 < 0) x0 = 0; if (y0 < 0) y0 = 0; if (x1 > RW) x1 = RW; if (y1 > RH) y1 = RH;

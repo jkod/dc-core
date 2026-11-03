@@ -1353,7 +1353,11 @@ void dc_pvr_gl_render(int scale) {
     int mod_first = nverts;
     for (int i = 0; i < f.nmods; i++) {
         pvr_vtx t[3]; memset(t, 0, sizeof t);
-        for (int k = 0; k < 3; k++) { t[k].x = f.mods[i].x[k]; t[k].y = f.mods[i].y[k]; t[k].z = f.mods[i].z[k]; }
+        const pvr_modtri *m = &f.mods[i];
+        for (int k = 0; k < 3; k++) { t[k].x = m->x[k]; t[k].y = m->y[k]; t[k].z = m->z[k]; }
+        /* the header's culling mode, as in the software renderer: a culled triangle is drawn degenerate */
+        float area = (m->x[1] - m->x[0]) * (m->y[2] - m->y[0]) - (m->y[1] - m->y[0]) * (m->x[2] - m->x[0]);
+        if ((m->cull == 1 && fabsf(area) < cull_small) || (m->cull == 2 && area < 0) || (m->cull == 3 && area > 0)) t[1] = t[2] = t[0];
         push(&t[0]); push(&t[1]); push(&t[2]);
     }
     quad_first = nverts;

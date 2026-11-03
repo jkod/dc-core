@@ -15,7 +15,7 @@ typedef struct {
     int uclip;                          /* user tile clip: 0 off, 2 draw inside, 3 draw outside the rectangle */
     int ux0, uy0, ux1, uy1;             /* that rectangle in scene pixels, exclusive end */
 } pvr_poly;
-typedef struct { float x[3], y[3], z[3]; int inst, list; } pvr_modtri;
+typedef struct { float x[3], y[3], z[3]; int inst, list, cull; } pvr_modtri;   /* cull: the volume header's ISP culling mode */
 
 typedef struct {
     const pvr_vtx *verts; int nverts;
