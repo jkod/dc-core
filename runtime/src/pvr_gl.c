@@ -1146,6 +1146,9 @@ static int backdrop_card(const pvr_frame *f, int RW) {
             if (v[k].z < z0) z0 = v[k].z; if (v[k].z > z1) z1 = v[k].z;
         }
         if (x0 > 1.f || x1 < RW - 1.f || y0 > 1.f || y1 < f->height - 1.f || z1 - z0 > 0.1f * z1) continue;
+        /* a card is about the picture's size; a 3D polygon right in front of the camera that happens to cover
+         * it reaches far past (Propeller Arena's cockpit close-ups: the fuselage, flat at that distance) */
+        if (x0 < -0.1f * RW || x1 > 1.1f * RW || y0 < -0.1f * f->height || y1 > 1.1f * f->height) continue;
         int behind = 0;
         for (int j = 0; j < f->npolys && behind < 20; j++) {
             const pvr_poly *q = &f->polys[j]; const pvr_vtx *w = f->verts + q->first;
