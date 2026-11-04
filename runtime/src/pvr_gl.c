@@ -527,18 +527,78 @@ static int clip_edge(const pvr_vtx *in, int n, pvr_vtx *out, int axis, float lim
  * strips out to the widescreen edges that repeat its edge column (same UV and colours along each edge),
  * so the picture continues instead of ending in black; its own 4:3 part is unchanged. */
 int dc_pvr_gl_extend_backdrops;
+/* dc_pvr_gl_extend_tiles: also a flat tile of such a backdrop that touches one side (Soulcalibur's
+ * opening: a 640-wide picture of four 320x320 tiles), continued mirrored at that edge */
+int dc_pvr_gl_extend_tiles;
 static int cmp_vy(const void *a, const void *b) { float d = (*(const pvr_vtx *const *)a)->y - (*(const pvr_vtx *const *)b)->y; return d < 0 ? -1 : d > 0; }
+/* a flat card a little wider than the picture (Soulcalibur's opening: a sky quad from x -15 to 648 at
+ * one depth): strips from its side edges out to the widescreen edges showing the card's texture
+ * mirrored at that edge (its own screen-to-texture mapping, reflected), rather than its edge column
+ * repeated */
+static int overhang_backdrop(const pvr_poly *p, const pvr_vtx *v, float rw, float ext, int tile) {
+    if (p->n < 3 || p->n > 8) return 0;
+    float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f;
+    for (int k = 0; k < p->n; k++) {
+        if (v[k].x < -0.15f * rw || v[k].x > 1.15f * rw) return 0;   /* far past the picture: 3D */
+        if (fabsf(v[k].z - v[0].z) > 1e-6f * fabsf(v[0].z) + 1e-9f) return 0;   /* not flat: perspective */
+        if (v[k].x < x0) x0 = v[k].x; if (v[k].x > x1) x1 = v[k].x;
+        if (v[k].y < y0) y0 = v[k].y; if (v[k].y > y1) y1 = v[k].y;
+    }
+    if (tile) {   /* one tile of a backdrop made of tiles: the side(s) it touches */
+        if (x0 < -1.f || x1 > rw + 1.f || y1 - y0 < 0.25f * rw || (x0 > 1.f && x1 < rw - 2.5f)) return 0;
+    } else if (x0 > 1.f || x1 < rw - 2.5f || y1 - y0 < 0.6f * rw) return 0;   /* must cover the picture */
+    /* screen -> (u, v): the plane through the three vertices spanning the largest area */
+    int ba = 0, bb = 1, bc = 2; float best = 0;
+    for (int a = 0; a < p->n; a++) for (int b = a + 1; b < p->n; b++) for (int c = b + 1; c < p->n; c++) {
+        float ar = fabsf((v[b].x - v[a].x) * (v[c].y - v[a].y) - (v[b].y - v[a].y) * (v[c].x - v[a].x));
+        if (ar > best) { best = ar; ba = a; bb = b; bc = c; }
+    }
+    if (best < 1.f) return 0;
+    const pvr_vtx *A = &v[ba], *B = &v[bb], *C = &v[bc];
+    float d = (B->x - A->x) * (C->y - A->y) - (B->y - A->y) * (C->x - A->x);
+    float ux = ((B->u - A->u) * (C->y - A->y) - (C->u - A->u) * (B->y - A->y)) / d;
+    float uy = ((C->u - A->u) * (B->x - A->x) - (B->u - A->u) * (C->x - A->x)) / d;
+    float vx = ((B->v - A->v) * (C->y - A->y) - (C->v - A->v) * (B->y - A->y)) / d;
+    float vy = ((C->v - A->v) * (B->x - A->x) - (B->v - A->v) * (C->x - A->x)) / d;
+    for (int k = 0; k < p->n; k++)   /* the UVs must follow that plane (a plain textured card) */
+        if (fabsf(A->u + ux * (v[k].x - A->x) + uy * (v[k].y - A->y) - v[k].u) > 1e-3f ||
+            fabsf(A->v + vx * (v[k].x - A->x) + vy * (v[k].y - A->y) - v[k].v) > 1e-3f) return 0;
+    for (int sd = 0; sd < 2; sd++) {
+        if (tile && (sd ? x1 < rw - 2.5f : x0 > 1.f)) continue;
+        const pvr_vtx *e[8]; int ne = 0;
+        for (int k = 0; k < p->n; k++)
+            if (sd ? v[k].x >= x1 - 1.f : v[k].x <= x0 + 1.f) e[ne++] = &v[k];
+        if (ne < 2) continue;
+        qsort(e, (size_t)ne, sizeof e[0], cmp_vy);
+        for (int k = 0; k + 1 < ne; k++) {
+            const pvr_vtx *a = e[k], *b = e[k + 1];
+            if (b->y - a->y < 0.5f) continue;
+            pvr_vtx a2 = *a, b2 = *b;
+            a2.x = b2.x = sd ? rw + ext : -ext;
+            a2.u = A->u + ux * (a2.x - A->x) + uy * (a2.y - A->y); a2.v = A->v + vx * (a2.x - A->x) + vy * (a2.y - A->y);
+            b2.u = A->u + ux * (b2.x - A->x) + uy * (b2.y - A->y); b2.v = A->v + vx * (b2.x - A->x) + vy * (b2.y - A->y);
+            /* mirrored at the card's edge: seamless whatever the texture holds past it (a clamped
+             * texture would smear its edge column into streaks) */
+            a2.u = 2.f * a->u - a2.u; a2.v = 2.f * a->v - a2.v; b2.u = 2.f * b->u - b2.u; b2.v = 2.f * b->v - b2.v;
+            push(a); push(b); push(&a2); push(&a2); push(b); push(&b2);
+        }
+    }
+    return 1;
+}
 static void extend_backdrop(const pvr_poly *p, const pvr_vtx *v, float rw, float ext) {
     if (p->n < 3 || p->n > 64) return;
     const pvr_vtx *e[2][64]; int ne[2] = { 0, 0 };
     for (int k = 0; k < p->n; k++) {
-        if (v[k].x < -1.f || v[k].x > rw + 1.f) return;       /* reaches past the picture: 3D, not a backdrop */
+        if (v[k].x < -1.f || v[k].x > rw + 1.f) { overhang_backdrop(p, v, rw, ext, 0); return; }   /* else 3D, not a backdrop */
         if (v[k].x <= 1.f) e[0][ne[0]++] = &v[k];
         else if (v[k].x >= rw - 2.5f) e[1][ne[1]++] = &v[k];   /* 639 in a 641-wide picture (Soulcalibur's save screen) */
     }
     /* both sides: a picture made of tiles (each touching one side) would get stray streaks; its
      * frame keeps the blurred edge-colour bars instead */
-    if (ne[0] < 2 || ne[1] < 2) return;
+    if (ne[0] < 2 || ne[1] < 2) {
+        if (dc_pvr_gl_extend_tiles && ne[0] + ne[1] >= 2) overhang_backdrop(p, v, rw, ext, 1);
+        return;
+    }
     for (int sd = 0; sd < 2; sd++) {
         qsort(e[sd], (size_t)ne[sd], sizeof e[sd][0], cmp_vy);
         for (int k = 0; k + 1 < ne[sd]; k++) {
