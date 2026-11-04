@@ -300,8 +300,16 @@ static void screenshot(void) { screenshot_to(NULL); }
 
 static void events(void) {
     SDL_Event e;
+#ifndef __SWITCH__
+    /* the mouse pointer hides after 3 s without moving over the window and comes back when it moves */
+    static Uint32 moved; static int shown = 1;
+    if (!moved) moved = SDL_GetTicks() | 1;
+#endif
     while (SDL_PollEvent(&e)) {
         if (e.type == SDL_QUIT) { dc_front_close(); exit(0); }
+#ifndef __SWITCH__
+        if (e.type == SDL_MOUSEMOTION) { moved = SDL_GetTicks() | 1; if (!shown) { SDL_ShowCursor(SDL_ENABLE); shown = 1; } }
+#endif
         if (e.type == SDL_WINDOWEVENT) need_present = 1;
         if (e.type == SDL_KEYDOWN && !e.key.repeat) {
             if (e.key.keysym.sym == SDLK_ESCAPE) { dc_front_close(); exit(0); }
@@ -330,6 +338,9 @@ static void events(void) {
         if (e.type == SDL_CONTROLLERDEVICEADDED) pad_open(e.cdevice.which);                 /* device index */
         if (e.type == SDL_CONTROLLERDEVICEREMOVED) pad_close((SDL_JoystickID)e.cdevice.which); /* instance id */
     }
+#ifndef __SWITCH__
+    if (shown && SDL_GetTicks() - moved > 3000) { SDL_ShowCursor(SDL_DISABLE); shown = 0; }
+#endif
     read_input();
 }
 
