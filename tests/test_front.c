@@ -46,6 +46,7 @@ int main(void) {
 
     /* widescreen: 16:9 target, a triangle left of the 4:3 picture lands in the left band */
     dc_pvr_gl_widescreen = 1;
+    dc_pvr_gl_aspect = 16.f / 9.f;                         /* the frontend keeps the window's shape here (4:3 in this test) */
     { uint32_t w0[8] = { 7u << 29, fu(-20), fu(4), fu(1), 0, 0, 0xFF00FF00u, 0 }, w1[8] = { 7u << 29, fu(-2), fu(4), fu(1), 0, 0, 0xFF00FF00u, 0 };
       uint32_t w2[8] = { (7u << 29) | (1u << 28), fu(-20), fu(40), fu(1), 0, 0, 0xFF00FF00u, 0 };
       pvr(0x128, 0); pvr(0x144, 0x80000000u);              /* new list */

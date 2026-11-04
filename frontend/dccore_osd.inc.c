@@ -271,7 +271,6 @@ static void osd_run(void) {
             }
             if (sel == 3) {
                 cfg.widescreen = !cfg.widescreen; dc_pvr_gl_widescreen = cfg.widescreen;
-                if (!cfg.widescreen) dc_pvr_gl_aspect = 4.f / 3.f;   /* else the window's shape, set when presenting */
             }
             if (sel == 4) { osd_scan = (osd_scan + 4 + step) % 4; dc_pvr_gl_scanlines = osd_scan; osd_save(); }
             if (sel == 5) { osd_fps = !osd_fps; osd_save(); }

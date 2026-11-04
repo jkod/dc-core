@@ -376,7 +376,10 @@ int dc_front_fast;
 static void osd_overlays(int ww, int wh);
 static void present_window(void) {
     int dw, dh; SDL_GL_GetDrawableSize(win, &dw, &dh);
-    if (cfg.widescreen && dh > 0) dc_pvr_gl_aspect = (float)dw / (float)dh;   /* the next frame fills the window */
+    /* the window's shape, also in 4:3: the widescreen target uses it (the next frame fills the window),
+     * and a port can keep its culling widened to it in 4:3 too, so switching to widescreen in the menu
+     * has the scenery at the sides at once */
+    if (dh > 0) dc_pvr_gl_aspect = (float)dw / (float)dh;
     dc_pvr_gl_present(dw, dh, 0);
     osd_overlays(dw, dh);
     if (shot_window() && dw * dh <= 1920 * 1080 * 4) { dc_pvr_gl_read_window(win_rgb, dw, dh); win_rgb_w = dw; win_rgb_h = dh; }

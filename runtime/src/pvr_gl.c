@@ -350,7 +350,7 @@ int dc_pvr_gl_init(void *(*getproc)(const char *)) {
 }
 
 int dc_pvr_gl_widescreen;
-float dc_pvr_gl_aspect;                /* window width / height for the widescreen target (0 = 16:9) */
+float dc_pvr_gl_aspect;                /* window width / height (the frontend sets it, 4:3 or not); the widescreen target's shape (0 = 16:9) */
 float dc_pvr_gl_hud_z;
 float dc_pvr_gl_hud_zmax;
 int dc_pvr_gl_hud_exact;
