@@ -357,6 +357,44 @@ static FILE *wav_file(void) {
 
 int dc_front_fast;
 
+static void present_window(void) {
+    int dw, dh; SDL_GL_GetDrawableSize(win, &dw, &dh);
+    if (cfg.widescreen && dh > 0) dc_pvr_gl_aspect = (float)dw / (float)dh;   /* the next frame fills the window */
+    dc_pvr_gl_present(dw, dh, 0);
+    if (shot_window() && dw * dh <= 1920 * 1080 * 4) { dc_pvr_gl_read_window(win_rgb, dw, dh); win_rgb_w = dw; win_rgb_h = dh; }
+    SDL_GL_SwapWindow(win);
+    need_present = 0;
+}
+
+/* the game pauses and goes quiet while its window is not focused (another window clicked, minimised,
+ * alt-tabbed out of fullscreen), and goes on where it was when the window gets focus back. Only after
+ * the window has had focus once, so a console window that keeps focus at start doesn't hold the game.
+ * Off with run_in_background / background_input / DC_RUN_IN_BACKGROUND=1, and for scripted and
+ * unpaced runs (--frames, --no-pacing, DC_PRESS, DC_SHOTS), which have no one to focus the window. */
+static void pause_while_unfocused(void) {
+#ifndef __SWITCH__
+    static int off = -1, had_focus;
+    if (off < 0) {
+        const char *e = getenv("DC_RUN_IN_BACKGROUND"), *b = getenv("DC_BACKGROUND_INPUT");
+        off = cfg.run_in_background || cfg.background_input || (e && *e && *e != '0') || (b && *b && *b != '0') ||
+              cfg.exit_after || cfg.no_pacing || getenv("DC_PRESS") || getenv("DC_SHOTS");
+    }
+    if (off || !win || dc_front_fast) return;
+    if (SDL_GetWindowFlags(win) & SDL_WINDOW_INPUT_FOCUS) { had_focus = 1; return; }
+    if (!had_focus) return;
+    fprintf(stderr, "dc-core: paused (window not focused)\n");
+    if (audio) { SDL_PauseAudioDevice(audio, 1); SDL_ClearQueuedAudio(audio); }
+    while (!(SDL_GetWindowFlags(win) & SDL_WINDOW_INPUT_FOCUS)) {
+        SDL_WaitEventTimeout(NULL, 100);
+        events();                                           /* quit, F11, window moved / uncovered */
+        if (need_present) present_window();
+    }
+    if (audio) SDL_PauseAudioDevice(audio, 0);
+    paced = 0;                                              /* pacing starts over: no catching up on the pause */
+    fprintf(stderr, "dc-core: resumed\n");
+#endif
+}
+
 /* ------------------------------------------------------------------ per field */
 static void on_vblank(uint64_t f) {
     vblanks = f;
@@ -375,14 +413,7 @@ static void on_vblank(uint64_t f) {
             dc_pvr_gl_load_rgb(rgb, w, h); need_present = 1;
         }
     }
-    if (need_present && (!dc_front_fast || presented % 8 == 0)) {   /* only when the picture changed (or the window) */
-        int dw, dh; SDL_GL_GetDrawableSize(win, &dw, &dh);
-        if (cfg.widescreen && dh > 0) dc_pvr_gl_aspect = (float)dw / (float)dh;   /* the next frame fills the window */
-        dc_pvr_gl_present(dw, dh, 0);
-        if (shot_window() && dw * dh <= 1920 * 1080 * 4) { dc_pvr_gl_read_window(win_rgb, dw, dh); win_rgb_w = dw; win_rgb_h = dh; }
-        SDL_GL_SwapWindow(win);
-        need_present = 0;
-    }
+    if (need_present && (!dc_front_fast || presented % 8 == 0)) present_window();   /* only when the picture changed (or the window) */
     presented++;
     { static long dbg = -2; if (dbg == -2) { const char *e = getenv("DC_PVRDBG"); dbg = e ? atol(e) : -1; }
       if (dbg >= 0 && presented == (unsigned long)dbg) dc_pvr_sw_debug = 1; }   /* debugging: describe that frame's polygons (with DC_SW_RENDER=1) */
@@ -411,6 +442,7 @@ static void on_vblank(uint64_t f) {
         }
     }
     events();
+    pause_while_unfocused();
     /* pacing: emulated SH-4 time (200 MHz) against the wall clock */
     if (dc_front_fast) { paced = 0; return; }              /* fast-forward: no pacing, resynchronised after */
     if (!cfg.no_pacing && dc_current_ctx) {

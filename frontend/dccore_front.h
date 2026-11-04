@@ -34,6 +34,9 @@ typedef struct {
     int background_input;       /* read controllers and keys while the window is not focused (default:
                                    only the focused window gets input, so two ports running side by side
                                    don't both follow one pad); DC_BACKGROUND_INPUT=1 does the same */
+    int run_in_background;      /* keep running and playing sound while the window is not focused (default:
+                                   the game pauses and mutes until it gets focus back; background_input
+                                   implies this); DC_RUN_IN_BACKGROUND=1 does the same */
 } dc_front_config;
 int  dc_front_open(const dc_front_config *cfg);   /* 0 = ok */
 void dc_front_close(void);
