@@ -84,6 +84,13 @@ int  dc_pvr_gl_capture_to_vram(int scale);
  * behind them whatever the polygon order (default 1; 0 = sorted per polygon only) */
 extern int dc_pvr_gl_tsort2;
 extern int dc_pvr_gl_split_panel_x;   /* widescreen: split-screen views clipped to [0, x) beside a side panel become full width (0 = off) */
+/* widescreen: a game's fixed HUD places, in the console's pixels (640 x 480), with the side each moves to
+ * (-1 left edge, 1 right edge, 0 stays). A HUD piece wholly inside a zone moves with it and joins no
+ * group, so a message that appears next to it cannot pull it back (Daytona USA 2001's lap counter and
+ * "TIME EXTENSION!!"). Pieces outside every zone are grouped as before. */
+typedef struct { float x0, y0, x1, y1; int side; } dc_hud_zone;
+extern const dc_hud_zone *dc_pvr_gl_hud_zones;
+extern int dc_pvr_gl_hud_nzones;
 extern int dc_pvr_gl_hud_move;        /* widescreen: HUD pieces move out to the screen edges (default 1) */
 /* widescreen HUD: a group of touching pieces that spans most of the width moves piece by piece instead of
  * staying centred: a fighting game's health bars joined by the timer between them (Dead or Alive 2) (default 0) */
