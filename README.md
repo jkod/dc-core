@@ -48,6 +48,15 @@ of their decoded pixels: `<hash>_<w>x<h>.png`.
 - `dc_pvr_gl_tex_pack = "dir"` uploads `dir/<name>.png` in place of the texture of that name
   (ports: a `textures` folder next to the program). Missing files fall back to the original.
 
+Or extract them from the disc, without playing (`dccore/texpack.h`; ports: `--extract-textures`):
+`dc_tex_extract_disc("dir", unpacker, user)` walks every file on the disc, decodes every PVRT
+texture it finds (Sega's standard format, on its own or inside archives) with the renderer's own
+decoder, so the names match the dumped ones, and hands each file to the port's unpacker for the
+game's own containers. An unpacker passes raw PVR data to `dc_tex_extract_pvr` (format as a texture
+control word) or decoded pixels to `dc_tex_extract_argb`. Paletted textures get their colours from
+the game while it runs, so they are skipped: dumping by playing still catches those, and anything
+the game draws or recolours at run time. Both write the same names, so both can fill one folder.
+
 To make a pack, upscale the dump:
 
 ```sh

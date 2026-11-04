@@ -195,6 +195,42 @@ int dc_disc_find(const char *path, uint32_t *lba, uint32_t *size) {
     }
 }
 
+/* every file under directory (lba, size), depth first; path holds the directory's path */
+static int walk_dir(uint32_t lba, uint32_t size, char *path, size_t plen, int depth,
+                    int (*cb)(const char *, uint32_t, uint32_t, void *), void *user) {
+    if (depth > 16) return 0;
+    uint8_t *d = (uint8_t *)malloc(size + 2048);
+    if (!d || dc_disc_read(lba, (size + 2047) / 2048, d)) { free(d); return -1; }
+    int r = 0;
+    for (uint32_t p = 0; p < size && !r; ) {
+        uint8_t ln = d[p];
+        if (!ln) { p = (p / 2048 + 1) * 2048; continue; }
+        const uint8_t *e = d + p;
+        p += ln;
+        size_t fl = e[32];
+        const char *fn = (const char *)e + 33;
+        if (fl == 1 && (fn[0] == 0 || fn[0] == 1)) continue;       /* . and .. */
+        size_t n = 0; while (n < fl && fn[n] != ';') n++;
+        if (plen + n + 2 > 1024) continue;
+        memcpy(path + plen, fn, n); path[plen + n] = 0;
+        uint32_t el = e[2] | e[3] << 8 | e[4] << 16 | (uint32_t)e[5] << 24, es = e[10] | e[11] << 8 | e[12] << 16 | (uint32_t)e[13] << 24;
+        if (e[25] & 2) { path[plen + n] = '/'; path[plen + n + 1] = 0; r = walk_dir(el, es, path, plen + n + 1, depth + 1, cb, user); }
+        else r = cb(path, el, es, user);
+        path[plen] = 0;
+    }
+    free(d);
+    return r < 0 ? 0 : r;
+}
+
+int dc_disc_walk(int (*cb)(const char *path, uint32_t lba, uint32_t size, void *user), void *user) {
+    uint8_t pvd[2048];
+    if (dc_disc_read(45000 + 16, 1, pvd) || memcmp(pvd + 1, "CD001", 5)) return -1;
+    const uint8_t *r = pvd + 156;
+    uint32_t dl = r[2] | r[3] << 8 | r[4] << 16 | (uint32_t)r[5] << 24, ds = r[10] | r[11] << 8 | r[12] << 16 | (uint32_t)r[13] << 24;
+    char path[1024] = "";
+    return walk_dir(dl, ds, path, 0, 0, cb, user);
+}
+
 int dc_disc_load_file(const char *path, uint8_t *dst, uint32_t max) {
     uint32_t lba, size;
     if (dc_disc_find(path, &lba, &size) || size > max) return -1;
