@@ -464,6 +464,8 @@ static struct { GLuint fbo, tex, depth; int w, h; uint32_t addr; float ww, rw, r
 static int capturing;                   /* drawing a render-to-texture pass */
 static int cap_cur = -1;                /* while capturing: the slot being drawn */
 static int cap_uv = -1;                 /* >= 0: the polygon being pushed shows capture cap_uv */
+/* where the quad's screen position lands in the capture (console pixels = texels): xc = cap_cx0 + (x - cap_qx0) * cap_sx */
+static float cap_qx0, cap_qy0, cap_cx0, cap_cy0, cap_sx, cap_sy;
 static unsigned char *poly_cap;         /* per polygon: capture + 1, or 0 */
 /* how many translucent polygons this frame came before at exactly this depth (tdepth_reset per frame) */
 static struct { uint32_t key; int n; } tdepth[4096];
@@ -485,8 +487,12 @@ static void push(const pvr_vtx *v) {
     if (push_wide > 0) { if (v->x <= 1.f) g->x -= push_wide; else if (v->x >= push_rw - 1.f) g->x += push_wide; } g->y = v->y; g->z = v->z * push_zk; g->u = v->u; g->v = v->v; g->u1 = v->u1; g->v1 = v->v1;
     memcpy(g->c, v->c, 16); memcpy(g->o, v->o, 16); memcpy(g->c1, v->c1, 16); memcpy(g->o1, v->o1, 16);
     if (cap_uv >= 0) {                  /* the capture spans [-(ww - rw) / 2, rw + (ww - rw) / 2] x [0, rh], rows up */
-        g->u = (g->x + (cap[cap_uv].ww - cap[cap_uv].rw) * 0.5f) / cap[cap_uv].ww;
-        g->v = 1.f - g->y / cap[cap_uv].rh;
+        /* by the quad's own texture coordinates: a capture drawn smaller than the screen and stretched over
+         * it (Dead or Alive 2's transitions: 512 x 256 texels), or a quad zoomed past the screen */
+        float xc = cap_cx0 + (g->x - cap_qx0) * cap_sx;
+        float yc = cap_cy0 + (g->y - cap_qy0) * cap_sy;
+        g->u = (xc + (cap[cap_uv].ww - cap[cap_uv].rw) * 0.5f) / cap[cap_uv].ww;
+        g->v = 1.f - yc / cap[cap_uv].rh;
     }
 }
 /* Triangles reaching outside the render target are clipped to it here, not by the GPU. Games send
@@ -1255,9 +1261,10 @@ void dc_pvr_gl_render(int scale) {
         for (int k = 1; k < p->n; k++) {
             if (v[k].x < x0) x0 = v[k].x; if (v[k].x > x1) x1 = v[k].x;
             if (v[k].y < y0) y0 = v[k].y; if (v[k].y > y1) y1 = v[k].y;
-            if (v[k].z != v[0].z) flat = 0;
+            if (fabsf(v[k].z - v[0].z) > fabsf(v[0].z) * 1e-4f) flat = 0;   /* flat, to rounding (a quad placed in 3D) */
         }
-        if (flat && x0 <= 1.f && x1 >= RW - 1.f && y0 <= 1.f && y1 >= RH - 1.f && cap[c].rw == (float)RW && cap[c].rh >= (float)RH)
+        if (flat && x0 <= 1.f && x1 >= RW - 1.f && y0 <= 1.f && y1 >= RH - 1.f && x1 > x0 && y1 > y0 &&
+            cap[c].rw >= RW * 0.5f && cap[c].rh >= RH * 0.5f)
             { poly_cap[i] = (unsigned char)(c + 1); poly_hud[i] = 0; }   /* plain bilinear over the whole capture */
     }
     float aspect = 4.f / 3.f, WW = (float)RW;
@@ -1521,7 +1528,20 @@ void dc_pvr_gl_render(int scale) {
             int flat = 1; for (int k = 1; k < p->n; k++) if (v[k].z != v[0].z) flat = 0;
             for (int j = 0; j < nscr && flat; j++) if (scr_z[j] == v[0].z) { push_dx = 0; push_wide = WW; push_rw = (float)RW; break; }
         }
-        if (poly_cap[i]) { push_dx = 0; push_wide = WW; push_rw = (float)RW; cap_uv = poly_cap[i] - 1; }
+        if (poly_cap[i]) {
+            push_dx = 0; push_wide = WW; push_rw = (float)RW; cap_uv = poly_cap[i] - 1;
+            const pvr_vtx *q = f.verts + f.polys[i].first;
+            float tw = (float)(8 << ((f.polys[i].tsp >> 3) & 7)), th = (float)(8 << (f.polys[i].tsp & 7));
+            float qx0 = q[0].x, qx1 = q[0].x, qy0 = q[0].y, qy1 = q[0].y, u0 = q[0].u, u1 = q[0].u, w0 = q[0].v, w1 = q[0].v;
+            for (int k = 1; k < f.polys[i].n; k++) {
+                if (q[k].x < qx0) qx0 = q[k].x; if (q[k].x > qx1) qx1 = q[k].x;
+                if (q[k].y < qy0) qy0 = q[k].y; if (q[k].y > qy1) qy1 = q[k].y;
+                if (q[k].u < u0) u0 = q[k].u; if (q[k].u > u1) u1 = q[k].u;
+                if (q[k].v < w0) w0 = q[k].v; if (q[k].v > w1) w1 = q[k].v;
+            }
+            cap_qx0 = qx0; cap_qy0 = qy0; cap_cx0 = u0 * tw; cap_cy0 = w0 * th;
+            cap_sx = (u1 - u0) * tw / (qx1 - qx0); cap_sy = (w1 - w0) * th / (qy1 - qy0);
+        }
         /* letterboxed scenes shown wide (dc_pvr_gl_letterbox_4_3 off): the game's bars stop at the 4:3
          * edges, so they are stretched across the full width (Jet Set Radio's tutorial and cut-scenes) */
         else if (dc_pvr_gl_widescreen && !dc_pvr_gl_letterbox_4_3 && WW > (float)RW + 1.f && letterbox_band(p, v, RW, f.height))
