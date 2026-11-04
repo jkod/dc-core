@@ -92,6 +92,16 @@ alpha (cut-outs) stays on/off. Any PNG editor works for hand fixes: keep the fil
 A pack is tied to the game's texture data, never to a dc-core version, as long as the
 texture decoder keeps decoding the same pixels.
 
+## Rumble (Jump Pack)
+
+Each controller has a Jump Pack (Puru Puru Pack) in its second slot, so games that support it
+find it and send their effects. `dc_rumble_level(port, &low, &high)`, called once per field, turns
+the current effect into levels for the host's two motors: power 1-7 sets the strength, rising and
+falling effects ramp over their pulses, and slow pulses (4 Hz) use only the big motor while fast
+ones (30 Hz) add the small one. The frontend sends this to the gamepad on that port through SDL;
+`no_rumble` in its config, or `DC_NO_RUMBLE=1`, leaves the packs out. Continuous vibration stops
+after 5 s if the game never sends its stop.
+
 ## Add to Steam
 
 ```sh

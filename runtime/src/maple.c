@@ -1,5 +1,7 @@
-/* dc-core: Maple bus devices -- the standard Dreamcast controller and the VMU (memory card in
- * the controller's first slot, saved to a 128 KB file in the usual .bin dump layout).
+/* dc-core: Maple bus devices -- the standard Dreamcast controller, the VMU (memory card in the
+ * controller's first slot, saved to a 128 KB file in the usual .bin dump layout) and the Jump Pack
+ * (Puru Puru Pack: rumble, in the second slot; dc_rumble_level turns its effects into a level a
+ * frontend hands to the host's gamepad).
  *
  * Maple DMA (hw.c) hands every command frame to on_maple(). Frame word: command (bits 0-7),
  * recipient (8-15: port << 6 | 0x20 main unit, low bits = sub-units), sender (16-23), length in
@@ -16,6 +18,7 @@
 dc_pad_state dc_pad[4] = { { .connected = 1, .jx = 128, .jy = 128 },
                            { .jx = 128, .jy = 128 }, { .jx = 128, .jy = 128 }, { .jx = 128, .jy = 128 } };
 
+#define FUNC_VIBRATION  0x00010000u
 #define FUNC_CONTROLLER 0x01000000u
 #define FUNC_STORAGE    0x02000000u
 #define FUNC_LCD        0x04000000u
@@ -155,6 +158,111 @@ static int vmu_cmd(int port, int cmd, uint32_t send, int words, uint32_t recv, u
     }
 }
 
+/* ------------------------------------------------------------------ Jump Pack (vibration)
+ * A condition word (SET_CONDITION, function 0x100 of the bus's function bits), byte by byte from
+ * the low end: mode (bits 4-7 the vibration source, 1 = the motor; bit 0 continuous), power
+ * (bits 4-6 the "+" power, bits 0-2 the "-" power, 1..7; bit 3 set with a + power: rising to the
+ * maximum; bit 7 with a - power: falling to nothing; no power at all stops), pulse frequency
+ * (7..59: (value + 1) / 2 Hz, 4-30 Hz), and cycles (with a rise or fall, it lasts value + 1
+ * pulses). Continuous vibration runs until the game stops it (here at most 5 s, so a lost stop
+ * can't leave a pad shaking). Sources: the DreamcastWiki jump pack page, KallistiOS purupuru.h. */
+static struct {
+    int attached, active;
+    float start, end, hz;      /* level 0..1 from start to end over `ramp` fields, kept until `total` */
+    uint32_t ramp, total, done, cond, ast;
+} rb[4];
+
+int dc_rumble_attach(int port, int on) {
+    if (port < 0 || port > 3) return -1;
+    memset(&rb[port], 0, sizeof rb[port]);
+    rb[port].attached = on != 0;
+    return 0;
+}
+
+static uint32_t fields(float secs) { return secs * 60.0f < 1.0f ? 1u : (uint32_t)(secs * 60.0f + 0.5f); }
+
+static void rumble_set(int port, uint32_t w) {
+    int src = (int)(w >> 4 & 15), cont = (int)(w & 1);
+    int up = (int)(w >> 12 & 7), down = (int)(w >> 8 & 7), rise = (int)(w >> 11 & 1), fall = (int)(w >> 15 & 1);
+    uint32_t freq = w >> 16 & 255, cycles = w >> 24;
+    rb[port].cond = w;
+    if (!src || (!up && !down)) { rb[port].active = 0; return; }      /* stop (or no motor named) */
+    float hz = (freq >= 7 && freq <= 59) ? (float)(freq + 1) / 2.0f : 15.0f;
+    float p = (float)(up ? up : down) / 7.0f;
+    rb[port].hz = hz; rb[port].start = p; rb[port].done = 0;
+    rb[port].end = (rise && up) ? 1.0f : (fall && down) ? 0.0f : p;
+    rb[port].ramp = fields((float)(cycles + 1) / hz);                  /* one pulse when steady */
+    rb[port].total = rb[port].ramp;
+    if (cont && rb[port].end > 0 && rb[port].total < 300) rb[port].total = 300;   /* continuous: until stopped, 5 s at most */
+    rb[port].active = 1;
+}
+
+int dc_rumble_level(int port, float *low, float *high) {
+    float l = 0, k = 0;
+    if (port >= 0 && port < 4 && rb[port].active) {
+        float t = (float)rb[port].done / (float)rb[port].ramp;
+        if (t > 1) t = 1;
+        l = rb[port].start + (rb[port].end - rb[port].start) * t;
+        if (++rb[port].done >= rb[port].total) rb[port].active = 0;
+        /* a slow pulse is the big (low-frequency) motor's job; the faster it pulses, the more of the small one */
+        k = (rb[port].hz - 4.0f) / 26.0f;
+        if (k < 0) k = 0;
+        if (k > 1) k = 1;
+    }
+    if (low) *low = l;
+    if (high) *high = l * k;
+    return l > 0;
+}
+
+static int rumble_cmd(int port, int cmd, uint32_t send, int words, uint32_t recv, uint32_t src) {
+    uint32_t me = (uint32_t)port << 6 | 0x02;
+    uint32_t func = words > 0 ? dc_rd32(send) : 0;
+    switch (cmd) {
+    case CMD_DEVINFO: case CMD_ALLINFO: {
+        uint8_t b[192];
+        memset(b, 0, sizeof b);
+        uint32_t f[4] = { FUNC_VIBRATION, 0x00000101u, 0, 0 };   /* 1 vibration source, 1 at a time */
+        memcpy(b, f, 16);
+        b[16] = 0xFF; b[17] = 0;
+        put_str(b + 18, "Puru Puru Pack", 30);
+        put_str(b + 48, "Produced By or Under License From SEGA ENTERPRISES,LTD.", 60);
+        b[108] = 0xC8; b[110] = 0x40; b[111] = 0x06;               /* 20.0 / 160.0 mA */
+        int n = cmd == CMD_DEVINFO ? 28 : 48;
+        if (cmd == CMD_ALLINFO) put_str(b + 112, "Version 1.000,1998/11/10,315-6211-AH   ,Vibration Motor:1 , Fm:4 - 30Hz ,Pow:7", 80);
+        uint32_t w[48]; memcpy(w, b, (size_t)n * 4);
+        reply(recv, cmd == CMD_DEVINFO ? RE_DEVINFO : RE_ALLINFO, src, me, w, n);
+        return 1;
+    }
+    case CMD_SETCOND:
+        if (func != FUNC_VIBRATION) { reply(recv, RE_BADFUNC, src, me, NULL, 0); return 1; }
+        if (words > 1) rumble_set(port, dc_rd32(send + 4));
+        reply(recv, RE_ACK, src, me, NULL, 0);
+        return 1;
+    case CMD_GETCOND: case CMD_GETMINFO: {
+        if (func != FUNC_VIBRATION) { reply(recv, RE_BADFUNC, src, me, NULL, 0); return 1; }
+        uint32_t w[2] = { FUNC_VIBRATION, cmd == CMD_GETCOND ? rb[port].cond : 0x00000101u };
+        reply(recv, RE_DATA, src, me, w, 2);
+        return 1;
+    }
+    case CMD_BREAD: {          /* the auto-stop setting: kept and read back */
+        uint32_t w[3] = { FUNC_VIBRATION, words > 1 ? dc_rd32(send + 4) : 0, rb[port].ast };
+        reply(recv, func == FUNC_VIBRATION ? RE_DATA : RE_BADFUNC, src, me, w, func == FUNC_VIBRATION ? 3 : 0);
+        return 1;
+    }
+    case CMD_BWRITE:
+        if (func == FUNC_VIBRATION && words > 2) rb[port].ast = dc_rd32(send + 8);
+        reply(recv, func == FUNC_VIBRATION ? RE_ACK : RE_BADFUNC, src, me, NULL, 0);
+        return 1;
+    case CMD_RESET: case CMD_SHUTDOWN:
+        rb[port].active = 0;
+        reply(recv, RE_ACK, src, me, NULL, 0);
+        return 1;
+    default:
+        reply(recv, RE_UNKNOWN, src, me, NULL, 0);
+        return 1;
+    }
+}
+
 static void put_str(uint8_t *d, const char *s, int n) {
     int l = (int)strlen(s);
     for (int i = 0; i < n; i++) d[i] = i < l ? (uint8_t)s[i] : ' ';
@@ -176,8 +284,9 @@ static int on_maple(int port, uint32_t frame, uint32_t send, int words, uint32_t
                 words ? dc_rd32(send) : 0, words > 1 ? dc_rd32(send + 4) : 0);
     if (port < 0 || port > 3 || !dc_pad[port].connected) return 0;
     if ((dest & 0x3F) == 0x01) return vmu[port].data ? vmu_cmd(port, cmd, send, words, recv, src) : 0;
-    if ((dest & 0x3F) != 0x20) return 0;                       /* other sub-units (slot 2, rumble): none */
-    uint32_t me = (uint32_t)port << 6 | 0x20 | (vmu[port].data ? 0x01 : 0);   /* + attached sub-units */
+    if ((dest & 0x3F) == 0x02) return rb[port].attached ? rumble_cmd(port, cmd, send, words, recv, src) : 0;
+    if ((dest & 0x3F) != 0x20) return 0;                       /* other sub-units: none */
+    uint32_t me = (uint32_t)port << 6 | 0x20 | (vmu[port].data ? 0x01 : 0) | (rb[port].attached ? 0x02 : 0);   /* + attached sub-units */
     switch (cmd) {
     case CMD_DEVINFO: case CMD_ALLINFO: {
         uint8_t b[112 + 80];

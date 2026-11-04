@@ -37,6 +37,8 @@ typedef struct {
     int run_in_background;      /* keep running and playing sound while the window is not focused (default:
                                    the game pauses and mutes until it gets focus back; background_input
                                    implies this); DC_RUN_IN_BACKGROUND=1 does the same */
+    int no_rumble;              /* no Jump Pack in the controllers (by default each has one, and its
+                                   effects rumble the host's gamepad); DC_NO_RUMBLE=1 does the same */
 } dc_front_config;
 int  dc_front_open(const dc_front_config *cfg);   /* 0 = ok */
 int  dc_front_open_icon(const dc_front_config *cfg, const unsigned char *icon_rgba32x32);
