@@ -892,6 +892,7 @@ static float hud_group_zmax = 1e30f;    /* polygons at or above this depth are l
 static int hud_group_imin;              /* ... when drawn at or after this polygon (dc_pvr_gl_hud_before_shade) */
 int dc_pvr_gl_hud_before_shade;
 const dc_hud_zone *dc_pvr_gl_hud_zones;
+int dc_pvr_gl_hud_sprites;
 int dc_pvr_gl_hud_nzones;
 static void hud_group(const pvr_frame *f, int RW, signed char *side) {
     static hud_box *b; static int cap;
@@ -909,6 +910,7 @@ static void hud_group(const pvr_frame *f, int RW, signed char *side) {
             if (v[k].y < y0) y0 = v[k].y; if (v[k].y > y1) y1 = v[k].y;
         }
         if (!near) continue;
+        if (dc_pvr_gl_hud_sprites && !p->sprite) continue;
         /* the game's fixed HUD places: a piece wholly inside one moves with it, and joins no group */
         int z_ = 0;
         for (; z_ < dc_pvr_gl_hud_nzones; z_++) {

@@ -429,13 +429,15 @@ static void on_vblank(uint64_t f) {
     { static long dbg = -2; if (dbg == -2) { const char *e = getenv("DC_PVRDBG"); dbg = e ? atol(e) : -1; }
       if (dbg >= 0 && presented == (unsigned long)dbg) dc_pvr_sw_debug = 1; }   /* debugging: describe that frame's polygons (with DC_SW_RENDER=1) */
     if (cfg.stats && presented % 300 == 0) print_stats();
-    {   /* debugging: DC_SHOTS="every[:dir]" saves the picture every `every` fields as dir/fNNNNN.bmp */
-        static long every = -1; static char dir[512];
+    {   /* debugging: DC_SHOTS="every[:dir]" saves the picture every `every` fields as dir/fNNNNN.bmp;
+         * DC_SHOTS_FROM=N starts at field N (with DC_RENDER_FROM, a long run pictures only the part that matters) */
+        static long every = -1, from; static char dir[512];
         if (every < 0) {
-            const char *e = getenv("DC_SHOTS"); char *end; every = 0;
+            const char *e = getenv("DC_SHOTS"), *f = getenv("DC_SHOTS_FROM"); char *end; every = 0;
             if (e) { every = strtol(e, &end, 0); snprintf(dir, sizeof dir, "%s", *end == ':' ? end + 1 : "."); }
+            from = f ? atol(f) : 0;
         }
-        if (every > 0 && presented % (unsigned long)every == 0) {
+        if (every > 0 && (long)presented >= from && presented % (unsigned long)every == 0) {
             char path[640]; snprintf(path, sizeof path, "%s/f%05lu.bmp", dir, presented); screenshot_to(path);
         }
     }

@@ -84,6 +84,8 @@ int  dc_pvr_gl_capture_to_vram(int scale);
  * behind them whatever the polygon order (default 1; 0 = sorted per polygon only) */
 extern int dc_pvr_gl_tsort2;
 extern int dc_pvr_gl_split_panel_x;   /* widescreen: split-screen views clipped to [0, x) beside a side panel become full width (0 = off) */
+extern int dc_pvr_gl_hud_sprites;       /* widescreen: only sprite polygons are HUD (Daytona USA 2001: its HUD is all sprites, while
+                                         * the "ROLLING START!!" banner's strips at the HUD's depth, now and then exactly flat, are not) */
 /* widescreen: a game's fixed HUD places, in the console's pixels (640 x 480), with the side each moves to
  * (-1 left edge, 1 right edge, 0 stays). A HUD piece wholly inside a zone moves with it and joins no
  * group, so a message that appears next to it cannot pull it back (Daytona USA 2001's lap counter and
