@@ -87,6 +87,14 @@ function(dccore_add_player target)
   if(icon_dir)
     target_compile_definitions(${target} PRIVATE DCCORE_ICON=1)
   endif()
+  # Windows: SDL2.dll next to the executable (vcpkg does this by itself; SDL2_DIR from SDL's own
+  # development package doesn't). The executable itself is in the list (copied onto itself: a no-op)
+  # so the command stays valid when there are no DLLs.
+  if(WIN32 AND NOT CMAKE_VERSION VERSION_LESS 3.21)
+    add_custom_command(TARGET ${target} POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:${target}> $<TARGET_RUNTIME_DLLS:${target}> $<TARGET_FILE_DIR:${target}>
+      COMMAND_EXPAND_LISTS)
+  endif()
   if(NINTENDO_SWITCH)
     if(NOT A_TITLE)
       set(A_TITLE ${target})
