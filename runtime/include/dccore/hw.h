@@ -35,6 +35,7 @@ int  dc_vram_ext_write(uint32_t ofs, const void *data, uint32_t len);
 extern uint32_t dc_vram32_gen[0x800]; /* per 4 KB of the 32-bit area (framebuffer addresses), bumped on writes through it */
 extern uint32_t dc_pal_gen;           /* bumped on palette writes */
 extern int dc_hw_verbose;
+extern int dc_dmac_log;               /* log SH-4 DMAC auto-request transfers to stderr (default 1) */
 extern int dc_cable;             /* AV cable the game sees: 0 VGA (default), 2 RGB, 3 composite */
 extern void (*dc_hw_read_hook)(uint32_t addr, int size);              /* every hardware read */
 extern void (*dc_unhandled_hook)(const char *kind, uint32_t addr);   /* every unhandled access */
