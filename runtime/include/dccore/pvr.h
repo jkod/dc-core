@@ -36,6 +36,9 @@ extern int dc_pvr_gl_letterbox_zoom;  /* widescreen: with dc_pvr_gl_letterbox_4_
 extern int dc_pvr_gl_shade_translucent; /* widescreen: a full-screen pause shade can be any colour of translucent quad, textured or
                                          * not (Daytona USA 2001's is a white-modulated texture at 60% alpha); default 0: untextured
                                          * or black only */
+extern int dc_pvr_gl_hud_panel_rows;   /* widescreen: HUD within the rows of a wide centred HUD panel (40%+ of the width)
+                                          * stays beside it instead of moving to the edge (Tennis 2K2's match results:
+                                          * names and 1P / COM by the score box). Default 0 */
 extern int dc_pvr_gl_shade_any_z;      /* widescreen: a dark full-screen shade made of tiles counts at any depth, not
                                           * only at HUD depth: what is drawn over it stays centred with it (Tennis
                                           * 2K2's match results: names and 1P / COM beside the box). Default 0 */
@@ -87,8 +90,9 @@ void dc_pvr_gl_capture(int scale);
 /* the same, and the picture also goes to the texture in VRAM (read back from GL, instead of a software
  * render): 0 when GL cannot (not widescreen / not ready), then use dc_pvr_sw_render + dc_pvr_gl_capture */
 int  dc_pvr_gl_capture_to_vram(int scale);
-/* translucent polygons: their fully opaque fragments drawn first with depth, so they hide what is
- * behind them whatever the polygon order (default 1; 0 = sorted per polygon only) */
+/* translucent polygons (auto-sorted): deep, uniformly see-through ones (a fence along a court side)
+ * are sorted per triangle, not as a whole, so they no longer cover smaller ones in front of parts of
+ * them (default 1; 0 = sorted per polygon only) */
 extern int dc_pvr_gl_tsort2;
 extern int dc_pvr_gl_split_panel_x;   /* widescreen: split-screen views clipped to [0, x) beside a side panel become full width (0 = off) */
 extern int dc_pvr_gl_hud_sprites;       /* widescreen: only sprite polygons are HUD (Daytona USA 2001: its HUD is all sprites, while

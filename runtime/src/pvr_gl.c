@@ -221,7 +221,7 @@ static const char *fs_src =
 "flat in vec4 f_c; flat in vec4 f_o;\n"
 "uniform sampler2D u_tex;\n"
 "uniform int u_quad; uniform vec4 u_quad_col;\n"
-"uniform int u_textured, u_shade, u_use_alpha, u_ign_ta, u_offset, u_gouraud, u_fog, u_pt, u_tpass;\n"
+"uniform int u_textured, u_shade, u_use_alpha, u_ign_ta, u_offset, u_gouraud, u_fog, u_pt;\n"
 "uniform float u_pt_ref; uniform vec3 u_fog_ram, u_fog_vert; uniform float u_fog_den; uniform vec2 u_fog_tab[128];\n"
 "uniform int u_hud; uniform vec4 u_uvbox;\n"
 "out vec4 o_col;\n"
@@ -280,8 +280,6 @@ static const char *fs_src =
 "    if (u_fog == 3) px = vec4(fc, f); else px.rgb = mix(px.rgb, fc, f);\n"
 "  }\n"
 "  if (u_pt != 0 && px.a * 255.0 + 0.5 < u_pt_ref * 255.0) discard;\n"   /* in 8-bit steps like the PVR: colours divided by the interpolated 1/w can land a hair below 1.0 (NVIDIA), which dropped whole letters of Rush's text */
-"  if (u_tpass == 1 && px.a < 0.996) discard;\n"
-"  if (u_tpass == 2 && px.a >= 0.996) discard;\n"
 "  o_col = px;\n"
 "  gl_FragDepth = clamp((log2(iw) + 64.0) / 128.0, 0.0, 1.0);\n"
 
@@ -293,7 +291,7 @@ static float depth_of(float invw) { float d = (log2f(fmaxf(invw, 1e-30f)) + 64.f
 typedef struct { float x, y, z, u, v, u1, v1, c[4], o[4], c1[4], o1[4]; } gv;
 static GLuint prog, vao, vbo, fbo, color_tex, depth_rb;
 static int fb_w, fb_h, ready;
-static struct { GLint scale, offx, set, quad, quad_col, tex, textured, tpass, shade, use_alpha, ign_ta, offset, gouraud, fog, pt, pt_ref,
+static struct { GLint scale, offx, set, quad, quad_col, tex, textured, shade, use_alpha, ign_ta, offset, gouraud, fog, pt, pt_ref,
                 fog_ram, fog_vert, fog_den, fog_tab, hud, uvbox; } U;
 static gv *verts; static int nverts, cap_verts;
 typedef struct { int first, count; } span;
@@ -333,7 +331,7 @@ int dc_pvr_gl_init(void *(*getproc)(const char *)) {
     bars_init();
 #define UL(f, n) U.f = p_glGetUniformLocation(prog, n)
     UL(scale, "u_scale"); UL(offx, "u_offx"); UL(set, "u_set"); UL(quad, "u_quad"); UL(quad_col, "u_quad_col"); UL(tex, "u_tex");
-    UL(textured, "u_textured"); UL(tpass, "u_tpass"); UL(shade, "u_shade"); UL(use_alpha, "u_use_alpha"); UL(ign_ta, "u_ign_ta"); UL(offset, "u_offset");
+    UL(textured, "u_textured"); UL(shade, "u_shade"); UL(use_alpha, "u_use_alpha"); UL(ign_ta, "u_ign_ta"); UL(offset, "u_offset");
     UL(gouraud, "u_gouraud"); UL(fog, "u_fog"); UL(pt, "u_pt"); UL(pt_ref, "u_pt_ref"); UL(hud, "u_hud"); UL(uvbox, "u_uvbox"); UL(fog_ram, "u_fog_ram");
     UL(fog_vert, "u_fog_vert"); UL(fog_den, "u_fog_den"); UL(fog_tab, "u_fog_tab");
 #undef UL
@@ -460,7 +458,8 @@ static float push_rw;
  * full width; a full-screen quad that later shows that texture draws the wide capture instead, its
  * texture coordinates taken from where each corner lands on the screen */
 #define NCAP 4
-static struct { GLuint fbo, tex, depth; int w, h; uint32_t addr; float ww, rw, rh; unsigned long frame; } cap[NCAP + 1];   /* [NCAP]: the previous contents of the one being drawn */
+static struct { GLuint fbo, tex, depth; int w, h; uint32_t addr; float ww, rw, rh; unsigned long frame; int flat2d; } cap[NCAP + 1];
+static int pass_2d;                     /* the capture pass just drawn was a 2D screen */   /* [NCAP]: the previous contents of the one being drawn */
 static int capturing;                   /* drawing a render-to-texture pass */
 static int cap_cur = -1;                /* while capturing: the slot being drawn */
 static int cap_uv = -1;                 /* >= 0: the polygon being pushed shows capture cap_uv */
@@ -643,19 +642,6 @@ static void tri(const pvr_poly *p, const pvr_vtx *a, const pvr_vtx *b, const pvr
     for (int k = 1; k + 1 < n; k++) { push(&p0[0]); push(&p0[k]); push(&p0[k + 1]); }   /* same winding */
 }
 
-/* translucent polygons in two passes (auto-sort only): the PVR sorts translucent fragments per pixel,
- * the GL path per polygon (by its farthest point), which put a large polygon wrongly in front of a
- * smaller one next to it (Tennis 2K2's fence over the advertising boards in front of it). Fragments a
- * normal alpha blend draws fully opaque come out the same in any order, so pass 1 draws just those,
- * writing depth; pass 2 draws the rest sorted as before, behind what pass 1 drew hidden. Pass 1 writes
- * its depth a hair farther, so a polygon at exactly the same depth drawn later (text on a menu's
- * selection bar: Daytona USA 2001's pause menu) still shows over it, as on the PVR. */
-int dc_pvr_gl_tsort2 = 1;
-static int tpass;                         /* 0 off, 1 the opaque fragments, 2 the rest */
-static int two_pass_poly(const pvr_poly *p) {
-    int zmode = (p->isp >> 29) & 7;
-    return p->list == 2 && ((p->tsp >> 29) & 7) == 4 && ((p->tsp >> 26) & 7) == 5 && (zmode == 4 || zmode == 6);
-}
 static unsigned char *poly_hud; static const pvr_poly *poly_base;
 /* per polygon: bit 0 (bit 1 for the second parameter set) when its UVs stay within one copy of the
  * texture (0..1): it samples clamped to the texture's edge, so bilinear filtering at a border doesn't
@@ -694,9 +680,6 @@ static void set_poly_state(const pvr_poly *p, int set) {
     if (p->list == 4 && zmode == 0) zmode = 6;
     p_glDepthFunc(depth_fn[zmode]);
     p_glDepthMask(p->list != 2 && !((p->isp >> 26) & 1));
-    int tp = tpass && two_pass_poly(p) ? tpass : 0;
-    p_glUniform1i(U.tpass, tp);
-    if (tp == 1) p_glDepthMask(1);
 }
 static GLenum blend_src(int i) { static const GLenum t[8] = { GL_ZERO, GL_ONE, GL_DST_COLOR, GL_ONE_MINUS_DST_COLOR, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_DST_ALPHA, GL_ONE_MINUS_DST_ALPHA }; return t[i & 7]; }
 static GLenum blend_dst(int i) { static const GLenum t[8] = { GL_ZERO, GL_ONE, GL_SRC_COLOR, GL_ONE_MINUS_SRC_COLOR, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_DST_ALPHA, GL_ONE_MINUS_DST_ALPHA }; return t[i & 7]; }
@@ -709,6 +692,13 @@ static void draw_quad(float r, float g, float b, float a) {
 }
 
 typedef struct { int idx; float key; } sort_e;
+int dc_pvr_gl_tsort2 = 1;
+typedef struct { int first, count, poly; float key; } tri_e;
+static int cmp_tri(const void *a, const void *b) {     /* by key, then submission (vertex) order */
+    const tri_e *p = a, *q = b;
+    if (p->key != q->key) return p->key < q->key ? -1 : 1;
+    return p->first < q->first ? -1 : p->first > q->first;
+}
 static int cmp_sort(const void *a, const void *b) {
     /* equal depth keeps submission order: qsort is not stable everywhere (MSVC's is not), and
      * text drawn at one depth then lost letters at random */
@@ -973,6 +963,7 @@ const dc_hud_zone *dc_pvr_gl_hud_zones;
 int dc_pvr_gl_hud_sprites;
 int dc_pvr_gl_hud_nzones;
 int dc_pvr_gl_shade_any_z;
+int dc_pvr_gl_hud_panel_rows;
 static void hud_group(const pvr_frame *f, int RW, signed char *side) {
     static hud_box *b; static int cap;
     int n = 0;
@@ -1394,6 +1385,36 @@ void dc_pvr_gl_render(int scale) {
         memset(hud_side, 0, (size_t)f.npolys);
         hud_group_zmax = ovl_z; hud_group_imin = ovl_i;
         hud_group(&f, RW, hud_side);
+        if (dc_pvr_gl_hud_panel_rows) {
+            /* HUD beside a wide centred HUD panel, within its rows, belongs to it (Tennis 2K2's match
+             * results: the names and 1P / COM left and right of the score box) */
+            /* panels: centred HUD (side 0, flat, inside the 4:3 picture), pieces overlapping in rows
+             * merged; one spanning 40%+ of the width marks its rows */
+            enum { NPAN = 32 };
+            float px0[NPAN], px1[NPAN], py0[NPAN], py1[NPAN]; int nq = 0;
+            for (int i = 0; i < f.npolys; i++) {
+                const pvr_poly *p = &f.polys[i]; const pvr_vtx *v = f.verts + p->first;
+                if (p->n < 3 || hud_side[i]) continue;      /* any depth: the panel may lie below the HUD depth */
+                float a0 = v[0].x, a1 = v[0].x, b0 = v[0].y, b1 = v[0].y; int flat = 1;
+                for (int k = 1; k < p->n; k++) { if (v[k].x < a0) a0 = v[k].x; if (v[k].x > a1) a1 = v[k].x; if (v[k].y < b0) b0 = v[k].y; if (v[k].y > b1) b1 = v[k].y; if (v[k].z != v[0].z) flat = 0; }
+                if (!flat || a1 - a0 > RW * 0.9f || a0 < -1.f || a1 > RW + 1.f || b1 - b0 < 4.f) continue;
+                int j = 0;
+                while (j < nq && !(b0 < py1[j] && py0[j] < b1 && a0 <= px1[j] + 8.f && px0[j] <= a1 + 8.f)) j++;
+                if (j == nq) { if (nq == NPAN) continue; nq++; px0[j] = a0; px1[j] = a1; py0[j] = b0; py1[j] = b1; continue; }
+                if (a0 < px0[j]) px0[j] = a0; if (a1 > px1[j]) px1[j] = a1; if (b0 < py0[j]) py0[j] = b0; if (b1 > py1[j]) py1[j] = b1;
+            }
+            float pr0[NPAN], pr1[NPAN]; int np = 0;
+            for (int j = 0; j < nq; j++)
+                if (px1[j] - px0[j] >= RW * 0.4f && px1[j] - px0[j] <= RW * 0.9f && fabsf((px0[j] + px1[j]) * 0.5f - RW * 0.5f) < RW * 0.1f && py1[j] - py0[j] >= 16.f)
+                    { pr0[np] = py0[j]; pr1[np] = py1[j]; np++; }
+            for (int i = 0; i < f.npolys && np; i++) {
+                if (!hud_side[i]) continue;
+                const pvr_vtx *v = f.verts + f.polys[i].first;
+                float b0 = v[0].y, b1 = v[0].y;
+                for (int k = 1; k < f.polys[i].n; k++) { if (v[k].y < b0) b0 = v[k].y; if (v[k].y > b1) b1 = v[k].y; }
+                for (int j = 0; j < np; j++) if (b0 >= pr0[j] - 1.f && b1 <= pr1[j] + 1.f) { hud_side[i] = 0; break; }
+            }
+        }
         hud_group_zmax = 1e30f; hud_group_imin = 0;
     }
     int lbox = dc_pvr_gl_widescreen && dc_pvr_gl_show_4_3;
@@ -1547,9 +1568,8 @@ void dc_pvr_gl_render(int scale) {
         else if (dc_pvr_gl_widescreen && !dc_pvr_gl_letterbox_4_3 && WW > (float)RW + 1.f && letterbox_band(p, v, RW, f.height))
             { push_dx = 0; push_wide = WW; push_rw = (float)RW; }
         /* translucent polygons at exactly the same depth: on the PVR the later one is on top (text on its menu's
-         * selection bar, a pause title drawn after the shade at its depth: Daytona USA 2001). The GL draws
-         * the opaque parts of translucent polygons in a first pass with depth (dc_pvr_gl_tsort2), out of the
-         * game's order, so each such polygon is set a hair nearer than the ones before it at its depth */
+         * selection bar, a pause title drawn after the shade at its depth: Daytona USA 2001). Each such
+         * polygon is set a hair nearer than the ones before it at its depth, so the sort keeps them in order */
         push_zk = 1.f;
         if (p->list == 2) {
             float zmin = v[0].z; for (int k = 1; k < p->n; k++) if (v[k].z < zmin) zmin = v[k].z;
@@ -1726,20 +1746,44 @@ void dc_pvr_gl_render(int scale) {
     if (!presort) qsort(s, nt, sizeof *s, cmp_sort);
     p_glEnable(GL_BLEND);
     if (!presort && dc_pvr_gl_tsort2) {
-        tpass = 1;
+        /* the PVR sorts translucent fragments per pixel; sorting whole polygons (a strip can be a
+         * fence along a whole side of the court) put a large one in front of smaller ones before it
+         * (Tennis 2K2's fence over the boards in Casablanca). Polygons spanning a deep range are sorted
+         * per triangle instead, each by its own farthest point; the rest stay whole (a strip at one depth
+         * layering over itself, Tennis 2K2's ship's wake, keeps its order); equal keys keep submission order. */
+        int ntri = 0;
+        for (int k = 0; k < nt; k++) ntri += spans[s[k].idx].count / 3;
+        tri_e *t = malloc(sizeof *t * (ntri ? ntri : 1)); int m = 0;
         for (int k = 0; k < nt; k++) {
-            const pvr_poly *p = &f.polys[s[k].idx];
-            if (two_pass_poly(p)) batch_add(p, 0, -1, 1, spans[s[k].idx].first, spans[s[k].idx].count);
+            int first = spans[s[k].idx].first, cnt = spans[s[k].idx].count / 3;
+            if (!cnt) continue;
+            const pvr_poly *p = &f.polys[s[k].idx]; const pvr_vtx *v = f.verts + p->first;
+            float z0 = v[0].z, z1 = v[0].z, amin = v[0].c[3];
+            for (int j = 1; j < p->n; j++) { if (v[j].z < z0) z0 = v[j].z; if (v[j].z > z1) z1 = v[j].z; if (v[j].c[3] < amin) amin = v[j].c[3]; }
+            /* split: deep, of one see-through-ness throughout (texture alpha ignored, vertex alpha
+             * solid: a fence or net drawn see-through as a whole) and not reaching the camera. Layers
+             * that blend by their texture's alpha (a ship's wake fading out over the sea) or a sea or
+             * sky sheet keep the order they had */
+            if (cnt <= 2 || z1 < z0 * 1.5f || z1 > 1.f || amin < 0.99f || !((p->tsp >> 19) & 1)) {   /* one unit, as before */
+                t[m].first = first; t[m].count = cnt * 3; t[m].poly = s[k].idx; t[m].key = s[k].key; m++;
+                continue;
+            }
+            for (int j = 0; j < cnt; j++, m++) {        /* deep (a fence along a court side): per triangle */
+                const gv *g = &verts[first + 3 * j];
+                float zm = g[0].z; if (g[1].z < zm) zm = g[1].z; if (g[2].z < zm) zm = g[2].z;
+                t[m].first = first + 3 * j; t[m].count = 3; t[m].poly = s[k].idx; t[m].key = zm;
+            }
         }
-        batch_reset();
-        tpass = 2;
-    }
+        ntri = m;
+        qsort(t, ntri, sizeof *t, cmp_tri);
+        for (int j = 0; j < ntri; j++) batch_add(&f.polys[t[j].poly], 0, -1, 1, t[j].first, t[j].count);
+        free(t);
+    } else
     for (int k = 0; k < nt; k++) {
         const pvr_poly *p = &f.polys[s[k].idx];
         batch_add(p, 0, -1, 1, spans[s[k].idx].first, spans[s[k].idx].count);
     }
     batch_reset();
-    tpass = 0; p_glUniform1i(U.tpass, 0);
     free(s);
     p_glDisable(GL_BLEND);
     p_glDisable(GL_SCISSOR_TEST);
@@ -1755,9 +1799,13 @@ void dc_pvr_gl_render(int scale) {
             n3d++;
             for (int k = 0; k < f.polys[i].n && !wide3d; k++) if (v[k].x < -2.f || v[k].x > RW + 2.f) wide3d = 1;
         }
-        int shows_cap = 0;                                  /* a full-width capture on screen (a held replay frame) */
-        for (int i = 0; i < f.npolys && !shows_cap; i++) shows_cap = poly_cap[i] != 0;
-        if (!shows_cap && (!(n3d >= 50 && wide3d) || backdrop_card(&f, RW))) {
+        /* a full-width capture of a 3D scene on screen (a held replay frame) keeps its sides; a capture
+         * of a 2D screen (Tennis 2K2's player card, faded in through a capture) is 2D like it */
+        int shows_cap = 0;
+        for (int i = 0; i < f.npolys && !shows_cap; i++) shows_cap = poly_cap[i] != 0 && !cap[poly_cap[i] - 1].flat2d;
+        int is2d = !(n3d >= 50 && wide3d) || backdrop_card(&f, RW);
+        if (capturing) pass_2d = is2d;
+        if (!shows_cap && is2d) {
             float off = (WW - (float)RW) * 0.5f, k = (float)fb_w / WW;
             int l = (int)floorf(off * k), r = (int)ceilf((off + (float)RW) * k);
             p_glBindFramebuffer(GL_FRAMEBUFFER, fbo);
@@ -1917,7 +1965,7 @@ void dc_pvr_gl_capture(int scale) {
         cap[NCAP].addr = addr; cap[NCAP].ww = cap[c].ww; cap[NCAP].rw = cap[c].rw; cap[NCAP].rh = cap[c].rh;
     } else if (cap[NCAP].tex) cap[NCAP].addr = 0xFFFFFFFFu;
     fbo = cap[c].fbo; color_tex = cap[c].tex; depth_rb = cap[c].depth; fb_w = cap[c].w; fb_h = cap[c].h;
-    capturing = 1; cap_cur = c;
+    capturing = 1; cap_cur = c; pass_2d = 0;
     dc_pvr_gl_render(scale);
     capturing = 0; cap_cur = -1;
     {   /* the texture's alpha: RGB565 / 555 / 888 targets have none (opaque); ARGB4444 / 1555 / 8888 keep the drawn one */
@@ -1929,6 +1977,7 @@ void dc_pvr_gl_capture(int scale) {
     }
     cap[c].fbo = fbo; cap[c].tex = color_tex; cap[c].depth = depth_rb; cap[c].w = fb_w; cap[c].h = fb_h;
     cap[c].addr = addr; cap[c].ww = last_ww; cap[c].rw = last_rw; cap[c].rh = last_rh; cap[c].frame = frame_no;
+    cap[c].flat2d = pass_2d;
     if (capture_vram) capture_readback(c);
     fbo = sf; color_tex = st; depth_rb = sd; fb_w = sw; fb_h = sh;
     disp_aspect = sa; pic_offy = so; pic_y0 = sy0; pic_y1 = sy1; zoom_x0 = zx0; zoom_x1 = zx1; zoom_y0 = zy0; zoom_y1 = zy1; last_ww = sww; last_rw = srw; last_rh = srh;
