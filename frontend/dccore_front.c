@@ -14,6 +14,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(_WIN32) && !defined(__SWITCH__)
+#include <unistd.h>
+#endif
 
 extern sh4ctx *dc_current_ctx;         /* dispatch.c */
 
@@ -298,6 +301,7 @@ static void screenshot_to(const char *path) {
 }
 static void screenshot(void) { screenshot_to(NULL); }
 
+static int osd_open, osd_req;                              /* the on-screen menu (dccore_osd.inc.c) */
 static void events(void) {
     SDL_Event e;
 #ifndef __SWITCH__
@@ -312,7 +316,8 @@ static void events(void) {
 #endif
         if (e.type == SDL_WINDOWEVENT) need_present = 1;
         if (e.type == SDL_KEYDOWN && !e.key.repeat) {
-            if (e.key.keysym.sym == SDLK_ESCAPE) { dc_front_close(); exit(0); }
+            if (e.key.keysym.sym == SDLK_ESCAPE) { if (osd_open) osd_req = 1; else { dc_front_close(); exit(0); } }
+            if (e.key.keysym.sym == SDLK_F1) osd_req = 1;   /* the on-screen menu */
             if (e.key.keysym.sym == SDLK_F11) {
                 cfg.fullscreen = !cfg.fullscreen;
                 SDL_SetWindowFullscreen(win, cfg.fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
@@ -368,10 +373,12 @@ static FILE *wav_file(void) {
 
 int dc_front_fast;
 
+static void osd_overlays(int ww, int wh);
 static void present_window(void) {
     int dw, dh; SDL_GL_GetDrawableSize(win, &dw, &dh);
     if (cfg.widescreen && dh > 0) dc_pvr_gl_aspect = (float)dw / (float)dh;   /* the next frame fills the window */
     dc_pvr_gl_present(dw, dh, 0);
+    osd_overlays(dw, dh);
     if (shot_window() && dw * dh <= 1920 * 1080 * 4) { dc_pvr_gl_read_window(win_rgb, dw, dh); win_rgb_w = dw; win_rgb_h = dh; }
     SDL_GL_SwapWindow(win);
     need_present = 0;
@@ -405,6 +412,8 @@ static void pause_while_unfocused(void) {
     fprintf(stderr, "dc-core: resumed\n");
 #endif
 }
+
+#include "dccore_osd.inc.c"
 
 /* ------------------------------------------------------------------ per field */
 static void on_vblank(uint64_t f) {
@@ -456,6 +465,8 @@ static void on_vblank(uint64_t f) {
     }
     events();
     pause_while_unfocused();
+    osd_count_frame();
+    if (!dc_front_fast && (osd_req || osd_combo())) osd_run();
     /* pacing: emulated SH-4 time (200 MHz) against the wall clock */
     if (dc_front_fast) { paced = 0; return; }              /* fast-forward: no pacing, resynchronised after */
     if (!cfg.no_pacing && dc_current_ctx) {
@@ -558,6 +569,7 @@ int dc_front_open(const dc_front_config *c) {
         if (!path[0] || dc_vmu_attach(0, path)) fprintf(stderr, "VMU: cannot use %s (continuing without saves)\n", path[0] ? path : "app data");
         else fprintf(stderr, "VMU: %s\n", path);
     }
+    osd_load();
     if (!cfg.no_audio) {
         SDL_AudioSpec want = {0}, have;
         want.freq = 44100; want.format = AUDIO_S16SYS; want.channels = 2;

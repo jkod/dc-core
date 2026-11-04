@@ -364,6 +364,7 @@ static float last_ww, last_rw, last_rh;   /* the last render's target width and 
 #define NKEEP 4
 static struct { uint32_t tgt; int w, h, fbw, fbh; float ww; GLuint fbo, tex; unsigned frame; } keep[NKEEP];
 int dc_pvr_gl_keep_outside = 1;
+static int fb_scale = 1;                                   /* the render's scale over the console's lines */
 static void ensure_fbo(int w, int h) {
     if (fbo && w == fb_w && h == fb_h) return;
     if (fbo) { p_glDeleteFramebuffers(1, &fbo); p_glDeleteTextures(1, &color_tex); p_glDeleteRenderbuffers(1, &depth_rb); }
@@ -1275,6 +1276,7 @@ void dc_pvr_gl_render(int scale) {
         if (WW < (float)RW) WW = (float)RW;
     }
     ensure_fbo((int)(WW / (float)RW * (float)(f.width * scale) + 0.5f), f.height * scale);
+    fb_scale = scale;
     gl_selftest();
     disp_aspect = aspect;
     last_ww = WW;
@@ -2002,6 +2004,7 @@ void dc_pvr_gl_capture(int scale) {
     p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
+static void present_scanlines(int x, int y, int w, int h, int lines, int win_w, int win_h);
 void dc_pvr_gl_present(int win_w, int win_h, int stretch) {
     if (!fbo) return;
     int dw = win_w, dh = win_h, dx = 0, dy = 0;
@@ -2022,11 +2025,93 @@ void dc_pvr_gl_present(int win_w, int win_h, int stretch) {
         p_glBlitFramebuffer(x0, y0, x1, y1, dx, dy, dx + dw, dy + dh, GL_COLOR_BUFFER_BIT, GL_LINEAR);
     } else if (dc_pvr_gl_fill_lines && pic_y1 > pic_y0) {         /* the drawn lines fill the height */
         p_glBlitFramebuffer(0, pic_y0, fb_w, pic_y1, dx, dy, dx + dw, dy + dh, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+        if (dc_pvr_gl_scanlines) present_scanlines(dx, dy, dw, dh, (pic_y1 - pic_y0) / (fb_scale > 0 ? fb_scale : 1), win_w, win_h);
     } else {
         int sh = (int)(pic_offy * (float)dh + (pic_offy >= 0 ? 0.5f : -0.5f));   /* centre the drawn lines (GL rows go up) */
         p_glBlitFramebuffer(0, 0, fb_w, fb_h, dx, dy - sh, dx + dw, dy + dh - sh, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+        if (dc_pvr_gl_scanlines) present_scanlines(dx, dy - sh, dw, dh, fb_h / (fb_scale > 0 ? fb_scale : 1), win_w, win_h);
     }
     p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
+}
+
+/* ------------------------------------------------------------------ on top of the presented picture
+ * Scanlines: each console line darkens towards its edges, like a CRT's beam (dc_pvr_gl_scanlines 1-3:
+ * light, medium, strong). Overlays: an RGBA image drawn over the window, for the frontend's menu. */
+int dc_pvr_gl_scanlines;
+static GLuint ov_prog, ov_vao, ov_vbo, ov_tex, sl_prog;
+static GLint ov_rect, ov_texloc, sl_rect, sl_y0, sl_h, sl_lines, sl_k;
+static const char *ov_vs =
+"#version 330 core\n"
+"layout(location=0) in vec2 a_pos; uniform vec4 u_rect; out vec2 v_uv;\n"
+"void main() { v_uv = vec2(a_pos.x, 1.0 - a_pos.y); gl_Position = vec4(mix(u_rect.xy, u_rect.zw, a_pos), 0.0, 1.0); }\n";
+static const char *ov_fs =
+"#version 330 core\n"
+"in vec2 v_uv; uniform sampler2D u_tex; out vec4 o_col;\n"
+"void main() { o_col = texture(u_tex, v_uv); }\n";
+static const char *sl_fs =
+"#version 330 core\n"
+"uniform float u_y0, u_h, u_lines, u_k; out vec4 o_col;\n"
+"void main() {\n"
+"  float t = fract((gl_FragCoord.y - u_y0) / u_h * u_lines);\n"
+"  float d = 1.0 - u_k * (1.0 - sin(3.14159265 * t));\n"   /* 1 in a line's middle, 1 - k at its edges */
+"  o_col = vec4(d, d, d, 1.0);\n"
+"}\n";
+static int ov_init(void) {
+    if (ov_prog) return 1;
+    GLuint vs = compile(GL_VERTEX_SHADER, ov_vs);
+    ov_prog = p_glCreateProgram();
+    p_glAttachShader(ov_prog, vs); p_glAttachShader(ov_prog, compile(GL_FRAGMENT_SHADER, ov_fs)); p_glLinkProgram(ov_prog);
+    sl_prog = p_glCreateProgram();
+    p_glAttachShader(sl_prog, vs); p_glAttachShader(sl_prog, compile(GL_FRAGMENT_SHADER, sl_fs)); p_glLinkProgram(sl_prog);
+    GLint ok1 = 0, ok2 = 0; p_glGetProgramiv(ov_prog, GL_LINK_STATUS, &ok1); p_glGetProgramiv(sl_prog, GL_LINK_STATUS, &ok2);
+    if (!ok1 || !ok2) { ov_prog = 0; return 0; }
+    ov_rect = p_glGetUniformLocation(ov_prog, "u_rect"); ov_texloc = p_glGetUniformLocation(ov_prog, "u_tex");
+    sl_rect = p_glGetUniformLocation(sl_prog, "u_rect"); sl_y0 = p_glGetUniformLocation(sl_prog, "u_y0");
+    sl_h = p_glGetUniformLocation(sl_prog, "u_h"); sl_lines = p_glGetUniformLocation(sl_prog, "u_lines"); sl_k = p_glGetUniformLocation(sl_prog, "u_k");
+    static const float q[12] = { 0, 0, 1, 0, 0, 1, 1, 0, 1, 1, 0, 1 };
+    p_glGenVertexArrays(1, &ov_vao); p_glBindVertexArray(ov_vao);
+    p_glGenBuffers(1, &ov_vbo); p_glBindBuffer(GL_ARRAY_BUFFER, ov_vbo);
+    p_glBufferData(GL_ARRAY_BUFFER, sizeof q, q, GL_STREAM_DRAW);
+    p_glEnableVertexAttribArray(0); p_glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, (void *)0);
+    p_glGenTextures(1, &ov_tex);
+    return 1;
+}
+static void ov_begin(int win_w, int win_h) {
+    p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    p_glViewport(0, 0, win_w, win_h);
+    p_glDisable(GL_DEPTH_TEST); p_glDisable(GL_STENCIL_TEST); p_glDisable(GL_SCISSOR_TEST); p_glDisable(GL_CULL_FACE);
+    p_glEnable(GL_BLEND);
+    p_glBindVertexArray(ov_vao);
+}
+static void present_scanlines(int x, int y, int w, int h, int lines, int win_w, int win_h) {
+    int vp[4] = { 0, 0, win_w, win_h };
+    if (lines <= 0 || h < lines * 2 || !ov_init()) return;        /* under 2 window pixels a line: nothing to show */
+    static const float k[4] = { 0, 0.25f, 0.45f, 0.65f };
+    int lvl = dc_pvr_gl_scanlines < 0 ? 0 : dc_pvr_gl_scanlines > 3 ? 3 : dc_pvr_gl_scanlines;
+    ov_begin(vp[2], vp[3]);
+    p_glBlendFunc(GL_DST_COLOR, GL_ZERO);                          /* multiply */
+    p_glUseProgram(sl_prog);
+    p_glUniform4f(sl_rect, x * 2.f / vp[2] - 1, y * 2.f / vp[3] - 1, (x + w) * 2.f / vp[2] - 1, (y + h) * 2.f / vp[3] - 1);
+    p_glUniform1f(sl_y0, (float)y); p_glUniform1f(sl_h, (float)h); p_glUniform1f(sl_lines, (float)lines); p_glUniform1f(sl_k, k[lvl]);
+    p_glDrawArrays(GL_TRIANGLES, 0, 6);
+    p_glDisable(GL_BLEND); p_glUseProgram(prog); p_glBindVertexArray(vao);
+}
+void dc_pvr_gl_overlay(const uint8_t *rgba, int w, int h, int x, int y, int dw, int dh, int win_w, int win_h) {
+    if (!ready || !rgba || w <= 0 || h <= 0 || !ov_init()) return;
+    ov_begin(win_w, win_h);
+    p_glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    p_glActiveTexture(GL_TEXTURE0); p_glBindTexture(GL_TEXTURE_2D, ov_tex);
+    p_glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+    p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+    p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    p_glUseProgram(ov_prog);
+    p_glUniform1i(ov_texloc, 0);
+    /* x, y: top-left in window pixels (top row 0) */
+    float x0 = x * 2.f / win_w - 1, x1 = (x + dw) * 2.f / win_w - 1, y1 = 1 - y * 2.f / win_h, y0 = 1 - (y + dh) * 2.f / win_h;
+    p_glUniform4f(ov_rect, x0, y0, x1, y1);
+    p_glDrawArrays(GL_TRIANGLES, 0, 6);
+    p_glDisable(GL_BLEND); p_glUseProgram(prog); p_glBindVertexArray(vao);
 }
 
 /* show an RGB8 image (top row first) instead of a rendered frame: screens the CPU drew directly

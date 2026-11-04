@@ -26,6 +26,10 @@ void dc_pvr_gl_render(int scale);
 void dc_pvr_gl_present(int win_w, int win_h, int stretch);
 void dc_pvr_gl_read(uint8_t *rgb, int *w, int *h);
 void dc_pvr_gl_read_window(uint8_t *rgb, int win_w, int win_h);   /* the presented window (before swapping), RGB8 */
+extern int dc_pvr_gl_scanlines;     /* CRT-style scanlines over each console line: 0 off (default), 1 light, 2 medium, 3 strong */
+/* an RGBA image (top row first) over the presented window at x, y (window pixels, top-left), w x h
+ * scaled to dw x dh without smoothing, alpha-blended: the frontend's on-screen menu */
+void dc_pvr_gl_overlay(const uint8_t *rgba, int w, int h, int x, int y, int dw, int dh, int win_w, int win_h);
 extern int dc_pvr_gl_fill_lines;    /* show only the lines the game draws, filling the window height (default 1) */
 extern int dc_pvr_gl_side_fill;     /* widescreen: fill empty side bars with the picture's edge colour (default 1) */
 extern int dc_pvr_gl_letterbox_4_3;  /* widescreen: frames with cut-scene letterbox bars are shown at 4:3, black sides (default 1);
