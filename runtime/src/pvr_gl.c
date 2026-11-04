@@ -1056,7 +1056,7 @@ static void hud_group(const pvr_frame *f, int RW, signed char *side) {
     free(gx0);
 }
 
-/* widescreen: a cut-scene's letterbox bar (an untextured, flat, opaque, near-black polygon across the
+/* widescreen: a cut-scene's letterbox bar (an untextured or black-textured, flat, opaque, near-black polygon across the
  * whole 4:3 width, along the top or bottom edge, up to a third of the height). A frame with one is
  * shown at 4:3 with black sides: the game frames such scenes (and culls them) for 4:3, and its bars
  * stop at the 4:3 edges (Looney Tunes Space Race's intro). */
@@ -1074,16 +1074,64 @@ static int shade_poly(const pvr_poly *p, const pvr_vtx *v) {
     return 1;
 }
 
+/* a textured polygon that shows black: the texels its UVs cover are all near-black, its offset colour adds
+ * nothing, and its shading keeps them black (Propeller Arena draws its cut-scene bars as sprites of a
+ * black corner of a texture, white vertex colour) */
+static int black_textured(const pvr_poly *p, const pvr_vtx *v) {
+    if (p->tcw1 && p->twovol) return 0;
+    for (int k = 0; k < p->n; k++)
+        if (((p->isp >> 24) & 1) && (v[k].o[0] > 0.06f || v[k].o[1] > 0.06f || v[k].o[2] > 0.06f)) return 0;
+    pvr_texinfo ti; pvr_get_texture(p->tcw, p->tsp, &ti);
+    if (!ti.px || ti.w <= 0 || ti.h <= 0) return 0;
+    float u0 = v[0].u, u1 = v[0].u, w0 = v[0].v, w1 = v[0].v;
+    for (int k = 1; k < p->n; k++) {
+        if (v[k].u < u0) u0 = v[k].u; if (v[k].u > u1) u1 = v[k].u;
+        if (v[k].v < w0) w0 = v[k].v; if (v[k].v > w1) w1 = v[k].v;
+    }
+    if (u0 < 0.f || w0 < 0.f || u1 > 1.f || w1 > 1.f) return 0;    /* wrapping: not worth following */
+    int tx0 = (int)(u0 * ti.w), tx1 = (int)(u1 * ti.w), ty0 = (int)(w0 * ti.h), ty1 = (int)(w1 * ti.h);
+    if (tx1 >= ti.w) tx1 = ti.w - 1; if (ty1 >= ti.h) ty1 = ti.h - 1;
+    if (tx0 > tx1) tx0 = tx1; if (ty0 > ty1) ty0 = ty1;
+    for (int y = ty0; y <= ty1; y++)
+        for (int x = tx0; x <= tx1; x++) {
+            uint32_t c = ti.px[y * ti.w + x];
+            if (((c >> 16) & 255) > 15 || ((c >> 8) & 255) > 15 || (c & 255) > 15) return 0;
+        }
+    return 1;
+}
+
 static int letterbox_bar(const pvr_poly *p, const pvr_vtx *v, int RW, int H) {
-    if (p->n < 3 || p->list != 0 || ((p->isp >> 25) & 1)) return 0;
+    if (p->n < 3 || p->list != 0) return 0;
+    int textured = (p->isp >> 25) & 1;
     float x0 = v[0].x, x1 = v[0].x, y0 = v[0].y, y1 = v[0].y;
     for (int k = 0; k < p->n; k++) {
-        if (v[k].z != v[0].z || v[k].c[0] > 0.06f || v[k].c[1] > 0.06f || v[k].c[2] > 0.06f) return 0;
+        if (v[k].z != v[0].z) return 0;
+        if (!textured && (v[k].c[0] > 0.06f || v[k].c[1] > 0.06f || v[k].c[2] > 0.06f)) return 0;
         if (v[k].x < x0) x0 = v[k].x; if (v[k].x > x1) x1 = v[k].x;
         if (v[k].y < y0) y0 = v[k].y; if (v[k].y > y1) y1 = v[k].y;
     }
     if (x0 > 1.f || x1 < RW - 1.f || y1 - y0 < 4.f || y1 - y0 > H / 3.f) return 0;
-    return y0 <= 1.f || y1 >= H - 1.f;
+    if (!(y0 <= 1.f || y1 >= H - 1.f)) return 0;
+    return !textured || black_textured(p, v);
+}
+
+/* widescreen, bars stretched (dc_pvr_gl_letterbox_4_3 off): also a translucent dark band along the top or
+ * bottom edge across the 4:3 width, which a game fades in and out with its bars (Propeller Arena's attract
+ * intro) */
+static int letterbox_band(const pvr_poly *p, const pvr_vtx *v, int RW, int H) {
+    if (letterbox_bar(p, v, RW, H)) return 1;
+    if (p->n < 3 || p->list != 2) return 0;
+    int textured = (p->isp >> 25) & 1;
+    float x0 = v[0].x, x1 = v[0].x, y0 = v[0].y, y1 = v[0].y;
+    for (int k = 0; k < p->n; k++) {
+        if (v[k].z != v[0].z) return 0;
+        if (!textured && (v[k].c[0] > 0.06f || v[k].c[1] > 0.06f || v[k].c[2] > 0.06f)) return 0;
+        if (v[k].x < x0) x0 = v[k].x; if (v[k].x > x1) x1 = v[k].x;
+        if (v[k].y < y0) y0 = v[k].y; if (v[k].y > y1) y1 = v[k].y;
+    }
+    if (x0 > 1.f || x1 < RW - 1.f || y1 - y0 < 4.f || y1 - y0 > H / 3.f) return 0;
+    if (!(y0 <= 1.f || y1 >= H - 1.f)) return 0;
+    return !textured || black_textured(p, v);
 }
 
 /* a full-screen card: an opaque textured quad, nearly flat, that covers the whole 4:3 picture with
@@ -1470,7 +1518,7 @@ void dc_pvr_gl_render(int scale) {
         if (poly_cap[i]) { push_dx = 0; push_wide = WW; push_rw = (float)RW; cap_uv = poly_cap[i] - 1; }
         /* letterboxed scenes shown wide (dc_pvr_gl_letterbox_4_3 off): the game's bars stop at the 4:3
          * edges, so they are stretched across the full width (Jet Set Radio's tutorial and cut-scenes) */
-        else if (dc_pvr_gl_widescreen && !dc_pvr_gl_letterbox_4_3 && WW > (float)RW + 1.f && letterbox_bar(p, v, RW, f.height))
+        else if (dc_pvr_gl_widescreen && !dc_pvr_gl_letterbox_4_3 && WW > (float)RW + 1.f && letterbox_band(p, v, RW, f.height))
             { push_dx = 0; push_wide = WW; push_rw = (float)RW; }
         /* translucent polygons at exactly the same depth: on the PVR the later one is on top (text on its menu's
          * selection bar, a pause title drawn after the shade at its depth: Daytona USA 2001). The GL draws

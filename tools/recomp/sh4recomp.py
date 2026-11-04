@@ -528,6 +528,15 @@ def read_funcs(path, base, end):
     return sorted(out)
 
 
+def mirror(tr, v):
+    """A code address the game may hold in P0 or P2 (0C......, AC......; Propeller Arena calls its
+    library through 0C addresses) as the image's own segment (8C......)."""
+    if v is None: return None
+    if (v >> 29) in (0, 4, 5) and tr.base <= ((v & 0x1FFFFFFF) | (tr.base & 0xE0000000)) < tr.end:
+        return (v & 0x1FFFFFFF) | (tr.base & 0xE0000000)
+    return v
+
+
 def discover(tr, funcs, rounds=4):
     """Add call targets the seed list missed: bsr targets and `mov.l @(disp,PC),Rn ... jsr @Rn`
     constants. Scans only inside existing functions, so data is mostly avoided."""
@@ -545,7 +554,7 @@ def discover(tr, funcs, rounds=4):
                 if op is None: break
                 top = op >> 12
                 if top == 0xD:
-                    v = tr.u32(((a + 4) & ~3) + (op & 0xFF) * 4)
+                    v = mirror(tr, tr.u32(((a + 4) & ~3) + (op & 0xFF) * 4))
                     lit[(op >> 8) & 0xF] = (v, a)
                 elif top == 0xB:
                     d = op & 0xFFF; d = d - 0x1000 if d & 0x800 else d
@@ -615,7 +624,7 @@ def scan_functions(tr):
     while a < end - 1:
         op = tr.u16(a); top = op >> 12
         if top == 0xD:
-            lit[(op >> 8) & 0xF] = (tr.u32(((a + 4) & ~3) + (op & 0xFF) * 4), a)
+            lit[(op >> 8) & 0xF] = (mirror(tr, tr.u32(((a + 4) & ~3) + (op & 0xFF) * 4)), a)
         elif top == 0xB:
             d = op & 0xFFF; d = d - 0x1000 if d & 0x800 else d
             hits[a + 4 + d * 2] += 1
@@ -625,7 +634,7 @@ def scan_functions(tr):
                 hits[lit[r][0]] += 2          # literal + jsr is strong evidence
         a += 2
     for o in range(0, len(tr.data) - 3, 4):   # function pointer tables
-        v = struct.unpack_from("<I", tr.data, o)[0]
+        v = mirror(tr, struct.unpack_from("<I", tr.data, o)[0])
         if ok(v) and looks_like_start(v):
             hits[v] += 1
     funcs = {tr.base}
