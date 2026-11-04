@@ -139,11 +139,18 @@ static void adpcm_one(chan_t *h, int nib) {
     if (h->adpcm_step < 127) h->adpcm_step = 127; if (h->adpcm_step > 24576) h->adpcm_step = 24576;
 }
 
-/* ADPCM: decode forward so that adpcm_sig is sample t and adpcm_prev sample t-1 (state restored at
- * the loop start when the position jumps back) */
-static void adpcm_to(chan_t *h, uint32_t sa, uint32_t lsa, uint32_t t) {
+/* ADPCM: decode forward so that adpcm_sig is sample t and adpcm_prev sample t-1. When the position
+ * jumps back to the loop start, PCMS 2 restores the decoder state it had there; PCMS 3 ("long
+ * stream", a ring buffer the program keeps refilling) carries on with the state it has */
+static void adpcm_to(chan_t *h, uint32_t sa, uint32_t lsa, uint32_t t, int stream) {
     if (h->adpcm_at == t + 1) return;                          /* already there (pitch < 1) */
-    if (t < h->adpcm_at) {                                     /* jumped back: loop */
+    if (t < h->adpcm_at && stream && t >= lsa) {               /* looped: keep decoding from the loop start */
+        h->adpcm_at = lsa;
+        while (h->adpcm_at < t) {
+            uint8_t b = dc_aram[(sa + (h->adpcm_at >> 1)) & 0x1FFFFF];
+            h->adpcm_prev = h->adpcm_sig; adpcm_one(h, (h->adpcm_at & 1) ? b >> 4 : b & 15); h->adpcm_at++;
+        }
+    } else if (t < h->adpcm_at) {                              /* jumped back: loop */
         if (h->loop_saved && t >= lsa) { h->adpcm_sig = h->loop_sig; h->adpcm_step = h->loop_step; h->adpcm_at = lsa; }
         else { h->adpcm_sig = 0; h->adpcm_step = 127; h->adpcm_at = 0; }
         h->adpcm_prev = h->adpcm_sig;
@@ -171,7 +178,7 @@ static int16_t fetch(int c) {
     } else if (fmt == 1) {
         s0 = (int8_t)dc_aram[(sa + i) & 0x1FFFFF] << 8; s1 = (int8_t)dc_aram[(sa + i + 1) & 0x1FFFFF] << 8;
     } else {
-        adpcm_to(h, sa, creg(c, 2), i + 1);
+        adpcm_to(h, sa, creg(c, 2), i + 1, fmt == 3);
         s0 = h->adpcm_prev; s1 = h->adpcm_sig;
     }
     return (int16_t)(s0 + (int32_t)((double)(s1 - s0) * fr));
