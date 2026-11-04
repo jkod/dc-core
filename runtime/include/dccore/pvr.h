@@ -87,9 +87,11 @@ extern int dc_pvr_gl_split_panel_x;   /* widescreen: split-screen views clipped 
 extern int dc_pvr_gl_hud_sprites;       /* widescreen: only sprite polygons are HUD (Daytona USA 2001: its HUD is all sprites, while
                                          * the "ROLLING START!!" banner's strips at the HUD's depth, now and then exactly flat, are not) */
 /* widescreen: a game's fixed HUD places, in the console's pixels (640 x 480), with the side each moves to
- * (-1 left edge, 1 right edge, 0 stays). A HUD piece wholly inside a zone moves with it and joins no
- * group, so a message that appears next to it cannot pull it back (Daytona USA 2001's lap counter and
- * "TIME EXTENSION!!"). Pieces outside every zone are grouped as before. */
+ * (-1 left edge, 1 right edge, 0 stays). A HUD piece whose centre lies in a zone moves with it and joins
+ * no group, so a message that appears next to it cannot pull it back (Daytona USA 2001's lap counter and
+ * "TIME EXTENSION!!"), and a piece that zooms in moves the same way all the time (its position number).
+ * Pieces outside every zone are grouped as before. A game sets dc_pvr_gl_hud_nzones to 0 on screens
+ * where the zones do not apply. */
 typedef struct { float x0, y0, x1, y1; int side; } dc_hud_zone;
 extern const dc_hud_zone *dc_pvr_gl_hud_zones;
 extern int dc_pvr_gl_hud_nzones;

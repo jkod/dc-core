@@ -284,7 +284,7 @@ static const char *fs_src =
 "  if (u_tpass == 2 && px.a >= 0.996) discard;\n"
 "  o_col = px;\n"
 "  gl_FragDepth = clamp((log2(iw) + 64.0) / 128.0, 0.0, 1.0);\n"
-"  if (u_tpass == 1) gl_FragDepth = max(gl_FragDepth - 1.0 / 4194304.0, 0.0);\n"
+
 "}\n";
 
 static float depth_of(float invw) { float d = (log2f(fmaxf(invw, 1e-30f)) + 64.f) / 128.f; return d < 0 ? 0 : d > 1 ? 1 : d; }
@@ -465,11 +465,24 @@ static int capturing;                   /* drawing a render-to-texture pass */
 static int cap_cur = -1;                /* while capturing: the slot being drawn */
 static int cap_uv = -1;                 /* >= 0: the polygon being pushed shows capture cap_uv */
 static unsigned char *poly_cap;         /* per polygon: capture + 1, or 0 */
+/* how many translucent polygons this frame came before at exactly this depth (tdepth_reset per frame) */
+static struct { uint32_t key; int n; } tdepth[4096];
+static uint32_t tdepth_gen = 1, tdepth_used[4096];
+static void tdepth_reset(void) { tdepth_gen++; }
+static int tdepth_run(float z) {
+    uint32_t k; memcpy(&k, &z, 4);
+    for (uint32_t h = (k * 2654435761u) >> 20, n = 0; n < 4096; n++, h = (h + 1) & 4095) {
+        if (tdepth_used[h] != tdepth_gen) { tdepth_used[h] = tdepth_gen; tdepth[h].key = k; tdepth[h].n = 1; return 0; }
+        if (tdepth[h].key == k) return tdepth[h].n++;
+    }
+    return 0;
+}
+static float push_zk = 1.f;            /* translucent polygons at one depth: a later one a hair nearer (see below) */
 static void push(const pvr_vtx *v) {
     if (nverts == cap_verts) { cap_verts = cap_verts ? cap_verts * 2 : 8192; verts = realloc(verts, cap_verts * sizeof *verts); }
     gv *g = &verts[nverts++];
     g->x = v->x + push_dx;
-    if (push_wide > 0) { if (v->x <= 1.f) g->x -= push_wide; else if (v->x >= push_rw - 1.f) g->x += push_wide; } g->y = v->y; g->z = v->z; g->u = v->u; g->v = v->v; g->u1 = v->u1; g->v1 = v->v1;
+    if (push_wide > 0) { if (v->x <= 1.f) g->x -= push_wide; else if (v->x >= push_rw - 1.f) g->x += push_wide; } g->y = v->y; g->z = v->z * push_zk; g->u = v->u; g->v = v->v; g->u1 = v->u1; g->v1 = v->v1;
     memcpy(g->c, v->c, 16); memcpy(g->o, v->o, 16); memcpy(g->c1, v->c1, 16); memcpy(g->o1, v->o1, 16);
     if (cap_uv >= 0) {                  /* the capture spans [-(ww - rw) / 2, rw + (ww - rw) / 2] x [0, rh], rows up */
         g->u = (g->x + (cap[cap_uv].ww - cap[cap_uv].rw) * 0.5f) / cap[cap_uv].ww;
@@ -617,8 +630,7 @@ static void set_poly_state(const pvr_poly *p, int set) {
     p_glDepthMask(p->list != 2 && !((p->isp >> 26) & 1));
     int tp = tpass && two_pass_poly(p) ? tpass : 0;
     p_glUniform1i(U.tpass, tp);
-    /* pass 1: a later polygon at the same depth draws over an earlier one (text on its selection bar) */
-    if (tp == 1) { p_glDepthMask(1); if (zmode == 4) p_glDepthFunc(GL_GEQUAL); }
+    if (tp == 1) p_glDepthMask(1);
 }
 static GLenum blend_src(int i) { static const GLenum t[8] = { GL_ZERO, GL_ONE, GL_DST_COLOR, GL_ONE_MINUS_DST_COLOR, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_DST_ALPHA, GL_ONE_MINUS_DST_ALPHA }; return t[i & 7]; }
 static GLenum blend_dst(int i) { static const GLenum t[8] = { GL_ZERO, GL_ONE, GL_SRC_COLOR, GL_ONE_MINUS_SRC_COLOR, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_DST_ALPHA, GL_ONE_MINUS_DST_ALPHA }; return t[i & 7]; }
@@ -911,12 +923,13 @@ static void hud_group(const pvr_frame *f, int RW, signed char *side) {
         }
         if (!near) continue;
         if (dc_pvr_gl_hud_sprites && !p->sprite) continue;
-        /* the game's fixed HUD places: a piece wholly inside one moves with it, and joins no group */
+        /* the game's fixed HUD places: a piece centred in one moves with it, and joins no group */
         int z_ = 0;
         for (; z_ < dc_pvr_gl_hud_nzones; z_++) {
             const dc_hud_zone *hz = &dc_pvr_gl_hud_zones[z_];
             float zs = RW / 640.f;
-            if (x0 >= hz->x0 * zs && x1 <= hz->x1 * zs && y0 >= hz->y0 * zs && y1 <= hz->y1 * zs) { side[i] = (signed char)hz->side; break; }
+            float cx = (x0 + x1) * .5f, cy = (y0 + y1) * .5f;
+            if (cx >= hz->x0 * zs && cx <= hz->x1 * zs && cy >= hz->y0 * zs && cy <= hz->y1 * zs) { side[i] = (signed char)hz->side; break; }
         }
         if (z_ < dc_pvr_gl_hud_nzones) continue;
         /* small 3D HUD models (Rush's spinning coins) count; up to a fifth of the width: Space Race's
@@ -1158,6 +1171,7 @@ void dc_pvr_gl_render(int scale) {
 
     /* geometry: every polygon's triangles, then volume triangles, then a full-screen quad */
     nverts = 0;
+    tdepth_reset();
     if (f.npolys + 1 > cap_spans) { cap_spans = f.npolys + 1024; spans = realloc(spans, cap_spans * sizeof *spans); }
     float cull_small = 0; { uint32_t cv = dc_pvr_reg(0x078); memcpy(&cull_small, &cv, 4); }
     /* widescreen HUD: 2D overlay polygons (every vertex at the same 1/w, >= dc_pvr_gl_hud_z) in the left or
@@ -1398,13 +1412,23 @@ void dc_pvr_gl_render(int scale) {
          * edges, so they are stretched across the full width (Jet Set Radio's tutorial and cut-scenes) */
         else if (dc_pvr_gl_widescreen && !dc_pvr_gl_letterbox_4_3 && WW > (float)RW + 1.f && letterbox_bar(p, v, RW, f.height))
             { push_dx = 0; push_wide = WW; push_rw = (float)RW; }
+        /* translucent polygons at exactly the same depth: on the PVR the later one is on top (text on its menu's
+         * selection bar, a pause title drawn after the shade at its depth: Daytona USA 2001). The GL draws
+         * the opaque parts of translucent polygons in a first pass with depth (dc_pvr_gl_tsort2), out of the
+         * game's order, so each such polygon is set a hair nearer than the ones before it at its depth */
+        push_zk = 1.f;
+        if (p->list == 2) {
+            float zmin = v[0].z; for (int k = 1; k < p->n; k++) if (v[k].z < zmin) zmin = v[k].z;
+            int run = tdepth_run(zmin);
+            if (run > 0) push_zk = 1.f + (float)(run < 255 ? run : 255) * (1.f / 16384.f);
+        }
         spans[i].first = nverts;
         if (p->sprite) { tri(p, &v[0], &v[1], &v[2], 0, cull_small); tri(p, &v[0], &v[2], &v[3], 0, cull_small); }
         else for (int k = 0; k + 2 < p->n; k++) tri(p, &v[k], &v[k + 1], &v[k + 2], k & 1, cull_small);
         if (dc_pvr_gl_extend_backdrops && dc_pvr_gl_widescreen && WW > (float)RW + 1.f && push_dx == 0 && push_wide == 0 && cap_uv < 0)
             extend_backdrop(p, v, (float)RW, (WW - (float)RW) * 0.5f + 2.f);
         spans[i].count = nverts - spans[i].first;
-        push_wide = 0; cap_uv = -1;
+        push_wide = 0; cap_uv = -1; push_zk = 1.f;
         if ((p->isp >> 25) & 1) for (int k = 0; k < p->n; k++) { if (v[k].x < cx0) cx0 = v[k].x; if (v[k].x > cx1) cx1 = v[k].x; }
     }
     push_dx = 0;
