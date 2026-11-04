@@ -2,7 +2,9 @@
  * + B held together on any controller (F1 on the keyboard); the game pauses and goes quiet while it is
  * open. Up / down pick, A (or left / right) changes, B, Start or Esc closes. Resume, Reset game,
  * Resolution (the render scale) and Aspect (widescreen / 4:3) for this session, Scanlines, Show FPS,
- * Fullscreen, Quit. Scanlines and Show FPS are kept in osd.cfg next to the VMU. */
+ * Rumble (for the controller that opened the menu: off, low, normal, strong; a short buzz shows the
+ * new strength), Fullscreen, Quit. Scanlines, Show FPS and each port's rumble are kept in osd.cfg
+ * next to the VMU. */
 
 /* an original 5x7 font */
 static const struct { char c; uint8_t r[7]; } osd_font[] = {
@@ -59,8 +61,14 @@ static const struct { char c; uint8_t r[7]; } osd_font[] = {
     { 'Z', { 0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F } },
 };
 #define OSD_W 200
-#define OSD_ITEMS 8
+#define OSD_ITEMS 9
 static int osd_scan, osd_fps;
+static int osd_rumble[4] = { 2, 2, 2, 2 };   /* per port: 0 off, 1 low, 2 normal, 3 strong */
+static int osd_port;                         /* the port whose controller opened the menu (keyboard: A) */
+static float osd_rumble_scale(int port) {
+    static const float k[4] = { 0.0f, 0.5f, 1.0f, 1.6f };
+    return port >= 0 && port < 4 ? k[osd_rumble[port] & 3] : 1.0f;
+}
 static char osd_cfg_path[1024];
 static uint8_t osd_px[OSD_W * 160 * 4];
 static int osd_h;
@@ -77,6 +85,7 @@ static void osd_load(void) {
     while (fgets(line, sizeof line, f)) {
         if (!strncmp(line, "scanlines=", 10)) osd_scan = atoi(line + 10) & 3;
         if (!strncmp(line, "fps=", 4)) osd_fps = atoi(line + 4) != 0;
+        if (!strncmp(line, "rumble_", 7) && line[7] >= 'a' && line[7] <= 'd' && line[8] == '=') osd_rumble[line[7] - 'a'] = atoi(line + 9) & 3;
     }
     fclose(f);
     dc_pvr_gl_scanlines = osd_scan;
@@ -86,6 +95,7 @@ static void osd_save(void) {
     FILE *f = fopen(osd_cfg_path, "w");
     if (!f) return;
     fprintf(f, "scanlines=%d\nfps=%d\n", osd_scan, osd_fps);
+    for (int p = 0; p < 4; p++) fprintf(f, "rumble_%c=%d\n", 'a' + p, osd_rumble[p]);
     fclose(f);
 }
 
@@ -109,6 +119,7 @@ static int osd_text(uint8_t *px, int w, int h, int x, int y, const char *s, uint
 
 static const char *osd_label(int i, char *buf, size_t n) {
     static const char *scan[4] = { "OFF", "LIGHT", "MEDIUM", "STRONG" };
+    static const char *rum[4] = { "OFF", "LOW", "NORMAL", "STRONG" };
     switch (i) {
     case 0: return "RESUME";
     case 1: return "RESET GAME";
@@ -116,10 +127,13 @@ static const char *osd_label(int i, char *buf, size_t n) {
     case 3: snprintf(buf, n, "ASPECT        < %s >", cfg.widescreen ? "WIDE" : "4:3"); return buf;
     case 4: snprintf(buf, n, "SCANLINES     < %s >", scan[osd_scan]); return buf;
     case 5: snprintf(buf, n, "SHOW FPS      < %s >", osd_fps ? "ON" : "OFF"); return buf;
+    case 6:
+        if (cfg.no_rumble) return "";
+        snprintf(buf, n, "RUMBLE PAD %c  < %s >", 'A' + osd_port, rum[osd_rumble[osd_port] & 3]); return buf;
 #ifdef __SWITCH__
-    case 6: return "";
+    case 7: return "";
 #else
-    case 6: snprintf(buf, n, "FULLSCREEN    < %s >", cfg.fullscreen ? "ON" : "OFF"); return buf;
+    case 7: snprintf(buf, n, "FULLSCREEN    < %s >", cfg.fullscreen ? "ON" : "OFF"); return buf;
 #endif
     default: return "QUIT";
     }
@@ -211,12 +225,20 @@ static void osd_restart(void) {
 #endif
 }
 
-static int osd_combo(void) {
+static int osd_combo(void) {                  /* the menu combo held: that port + 1 */
     for (int p = 0; p < 4; p++) {
         const dc_pad_state *s = &dc_pad[p];
-        if (s->lt >= 160 && s->rt >= 160 && (s->buttons & (DC_BTN_RIGHT | DC_BTN_B)) == (DC_BTN_RIGHT | DC_BTN_B)) return 1;
+        if (s->lt >= 160 && s->rt >= 160 && (s->buttons & (DC_BTN_RIGHT | DC_BTN_B)) == (DC_BTN_RIGHT | DC_BTN_B)) return p + 1;
     }
     return 0;
+}
+static void osd_rumble_pad(int port, float level, Uint32 ms) {   /* rumble straight on a port's gamepad */
+    Uint16 v = (Uint16)((level > 1 ? 1 : level) * 65535.0f);
+#ifdef __SWITCH__
+    if (port == 0 && joy) SDL_JoystickRumble(joy, v, v, ms);
+#else
+    if (port >= 0 && port < 4 && pads[port]) SDL_GameControllerRumble(pads[port], v, v, ms);
+#endif
 }
 static uint16_t osd_buttons(void) {          /* every pad, the stick as the d-pad */
     uint16_t b = 0;
@@ -235,8 +257,10 @@ static int osd_all_released(void) {
 }
 static void osd_frame(void) { events(); need_present = 1; present_window(); SDL_Delay(8); }
 
-static void osd_run(void) {
+static void osd_run(int port) {
     osd_req = 0;
+    osd_port = port >= 0 && port < 4 ? port : 0;
+    for (int p = 0; p < 4; p++) osd_rumble_pad(p, 0, 0);  /* the game is paused: so is its rumble */
     if (audio) SDL_PauseAudioDevice(audio, 1);
     fprintf(stderr, "dc-core: menu\n");
     int sel = 0;
@@ -274,10 +298,14 @@ static void osd_run(void) {
             }
             if (sel == 4) { osd_scan = (osd_scan + 4 + step) % 4; dc_pvr_gl_scanlines = osd_scan; osd_save(); }
             if (sel == 5) { osd_fps = !osd_fps; osd_save(); }
+            if (sel == 6) {                                 /* this controller's rumble, felt at once */
+                osd_rumble[osd_port] = (osd_rumble[osd_port] + 4 + step) % 4; osd_save();
+                osd_rumble_pad(osd_port, 0.6f * osd_rumble_scale(osd_port), 250);
+            }
 #ifndef __SWITCH__
-            if (sel == 6) { cfg.fullscreen = !cfg.fullscreen; SDL_SetWindowFullscreen(win, cfg.fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0); }
+            if (sel == 7) { cfg.fullscreen = !cfg.fullscreen; SDL_SetWindowFullscreen(win, cfg.fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0); }
 #endif
-            if (sel == 7 && (down & DC_BTN_A)) { dc_front_close(); exit(0); }
+            if (sel == 8 && (down & DC_BTN_A)) { dc_front_close(); exit(0); }
         }
         osd_paint(sel);
     }

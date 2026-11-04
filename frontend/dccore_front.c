@@ -425,6 +425,9 @@ static void rumble_tick(void) {
     for (int k = 0; k < 4; k++) {
         float lo, hi;
         int on = dc_rumble_level(k, &lo, &hi);
+        float m = osd_rumble_scale(k);                     /* the player's strength from the menu */
+        lo = lo * m > 1 ? 1 : lo * m; hi = hi * m > 1 ? 1 : hi * m;
+        if (m == 0) on = 0;
         float q = on ? lo + hi : 0;
         if (q == last[k] && !(on && ++age[k] >= 20)) continue;
         last[k] = q; age[k] = 0;
@@ -489,7 +492,7 @@ static void on_vblank(uint64_t f) {
     events();
     pause_while_unfocused();
     osd_count_frame();
-    if (!dc_front_fast && (osd_req || osd_combo())) osd_run();
+    if (!dc_front_fast) { int by = osd_combo(); if (osd_req || by) osd_run(by ? by - 1 : 0); }
     /* pacing: emulated SH-4 time (200 MHz) against the wall clock */
     if (dc_front_fast) { paced = 0; return; }              /* fast-forward: no pacing, resynchronised after */
     if (!cfg.no_pacing && dc_current_ctx) {

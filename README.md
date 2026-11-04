@@ -99,7 +99,9 @@ find it and send their effects. `dc_rumble_level(port, &low, &high)`, called onc
 the current effect into levels for the host's two motors: power 1-7 sets the strength, rising and
 falling effects ramp over their pulses, and slow pulses (4 Hz) use only the big motor while fast
 ones (30 Hz) add the small one. The frontend sends this to the gamepad on that port through SDL;
-`no_rumble` in its config, or `DC_NO_RUMBLE=1`, leaves the packs out. Continuous vibration stops
+`no_rumble` in its config, or `DC_NO_RUMBLE=1`, leaves the packs out. In the on-screen menu,
+*Rumble pad X* sets the strength for the controller that opened it (off, low, normal, strong; a
+short buzz shows the new setting), kept per port in `osd.cfg`. Continuous vibration stops
 after 5 s if the game never sends its stop.
 
 ## Add to Steam
