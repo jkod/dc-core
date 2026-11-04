@@ -174,7 +174,7 @@ static int gd_exec(int cmd, uint32_t *p) {
         int first = 0, last = 0, n = dc_disc_track_count();
         for (int i = 0; i < n; i++) {
             uint32_t lba, secs; int data; dc_disc_track_info(i, &lba, &data, &secs);
-            int hd = lba >= 45000;
+            int hd = !dc_disc_is_cd() && lba >= 45000;   /* a CD has only the one area */
             if ((area == 1) != hd) continue;
             dc_wr32(buf + i * 4, toc_entry(lba, data));
             if (!first) first = i + 1;
@@ -277,8 +277,9 @@ static uint32_t h_gdrom(sh4ctx *c) {
         break;
     }
     case 4:                                           /* get_drv_stat(status[2]) */
-        if (c->r[4]) {                                /* standby / playing / paused, GD-ROM */
-            dc_wr32(c->r[4], cdda.playing ? (cdda.paused ? 1 : 3) : 2); dc_wr32(c->r[4] + 4, 0x80);
+        if (c->r[4]) {                                /* standby / playing / paused */
+            dc_wr32(c->r[4], cdda.playing ? (cdda.paused ? 1 : 3) : 2);
+            dc_wr32(c->r[4] + 4, dc_disc_is_cd() ? 0x20 : 0x80);   /* disc type: CD-ROM XA / GD-ROM */
         }
         c->r[0] = 0;
         break;
@@ -336,8 +337,8 @@ int dc_bios_install(sh4ctx *c, char region) {
         dc_wr32(v[i].vec, entry);
         dc_hle_register(entry, v[i].fn);
     }
-    /* IP.BIN (first 0x8000 bytes of the HD area) where the boot ROM leaves it */
-    if (dc_disc_track_count() && dc_disc_read(45000, 16, dc_ram + 0x8000) == 0)
+    /* IP.BIN (first 0x8000 bytes of the boot area) where the boot ROM leaves it */
+    if (dc_disc_track_count() && dc_disc_read(dc_disc_boot_lba(), 16, dc_ram + 0x8000) == 0)
         return 0;
     return -1;
 }

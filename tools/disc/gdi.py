@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""dc-core GD-ROM image reader: .gdi + track files -> ISO9660 file tree of the high-density area.
+"""dc-core disc image reader: .gdi/.cue + track files -> ISO9660 file tree of the boot area (the
+high-density area of a GD-ROM, or the last session of a CD-ROM such as a MIL-CD / CD-R release).
 
     gdi.py check   game.gdi|game.cue        # validate tracks, print IP.BIN header (Redump .cue works too)
     gdi.py list    game.gdi                 # list files (path, LBA, size)
     gdi.py extract game.gdi OUTDIR [names]  # extract all files (or only the given names)
 
-Handles 2352- and 2048-byte sectors and file data spread over several data tracks
-(e.g. track03 + track05). Reads only the player's own image; nothing is bundled.
+Handles 2352- (MODE1 and MODE2 XA) and 2048-byte sectors, file data spread over several data tracks
+(e.g. track03 + track05) and multi-session CDs. On a CD the boot file named in IP.BIN is scrambled;
+`extract` descrambles it like the boot ROM does. Reads only the player's own image; nothing is bundled.
 """
 import os, struct, sys
 
@@ -36,6 +38,7 @@ def _msf(t):
 class GDI:
     def __init__(self, path):
         self.path = path
+        self.gd = True
         d = os.path.dirname(os.path.abspath(path))
         if path.lower().endswith(".cue"):
             self._load_cue(path, d)
@@ -60,12 +63,15 @@ class GDI:
         """Redump-style Dreamcast cue: one FILE per track, REM HIGH-DENSITY AREA restarts at LBA 45000,
         each file starts at its pregap (INDEX 00) and the track's LBA is its INDEX 01."""
         self.tracks = []
+        self.gd = False         # a GD-ROM cue has a high-density area; otherwise this is a CD-ROM
         cur_file, file_lba, cur = None, 0, None
         pending = []
         for raw in open(path, encoding="latin-1"):
             line = raw.strip()
             if line.upper().startswith("REM HIGH-DENSITY"):
-                file_lba = HD_START
+                file_lba = HD_START; self.gd = True
+            elif line.upper().startswith("REM SESSION") and int(line.split()[2]) > 1 and not self.gd:
+                file_lba += 11400       # lead-out 6750 + next lead-in 4500 + pregap 150
             elif line.upper().startswith("FILE"):
                 cur_file = os.path.join(d, line.split('"')[1])
             elif line.upper().startswith("TRACK"):
@@ -108,7 +114,8 @@ class GDI:
         t.f.seek((idx + t.offset) * t.sector)
         raw = t.f.read(t.sector)
         if t.sector == 2352:
-            return raw[16:16 + 2048]     # MODE1: 12 sync + 4 header
+            o = 24 if raw[15] == 2 else 16   # 12 sync + 4 header (+ 8 subheader in MODE2 XA)
+            return raw[o:o + 2048]
         return raw[:2048]
 
     def read(self, lba, size):
@@ -119,20 +126,30 @@ class GDI:
         return bytes(out[:size])
 
     # ---- IP.BIN / ISO9660 ----
+    def boot_lba(self):
+        """IP.BIN and the file system: the high-density area, or a CD's last data track"""
+        if self.gd:
+            return HD_START
+        data = [t.lba for t in self.tracks if t.is_data]
+        return max(data) if data else 0
+
+    def is_cd(self):
+        return not self.gd
+
     def ip_bin(self):
-        return self.read(HD_START, 0x8000)
+        return self.read(self.boot_lba(), 0x8000)
 
     def header(self):
-        ip = self.read_sector(HD_START)
+        ip = self.read_sector(self.boot_lba())
         f = lambda a, b: ip[a:b].decode("latin-1").strip()
         return {"hardware": f(0x00, 0x10), "maker": f(0x10, 0x20), "device": f(0x20, 0x30),
                 "area": f(0x30, 0x38), "product": f(0x40, 0x4A), "version": f(0x4A, 0x50),
                 "date": f(0x50, 0x60), "boot": f(0x60, 0x70), "company": f(0x70, 0x80), "title": f(0x80, 0x100)}
 
     def pvd(self):
-        p = self.read_sector(HD_START + 16)
+        p = self.read_sector(self.boot_lba() + 16)
         if p[1:6] != b"CD001":
-            raise ValueError("no ISO9660 primary volume descriptor at LBA %d" % (HD_START + 16))
+            raise ValueError("no ISO9660 primary volume descriptor at LBA %d" % (self.boot_lba() + 16))
         return p
 
     def walk(self):
@@ -163,6 +180,27 @@ class GDI:
                 yield path, elba, esz, False
 
 
+def descramble(data):
+    """undo the CD boot file scrambling (scramble.c): 32-byte slices shuffled within 2 MB .. 32-byte chunks"""
+    src, out, size = bytes(data), bytearray(len(data)), len(data)
+    seed, pos, chunk = size & 0xFFFF, 0, 2048 * 1024
+    while chunk >= 32:
+        while size - pos >= chunk:
+            n = chunk // 32
+            idx = list(range(n))
+            s = pos
+            for i in range(n - 1, -1, -1):
+                seed = (seed * 2109 + 9273) & 0x7FFF
+                x = (((seed + 0xC000) & 0xFFFF) * i) >> 16
+                idx[i], idx[x] = idx[x], idx[i]
+                o = pos + 32 * idx[i]
+                out[o:o + 32] = src[s:s + 32]; s += 32
+            pos += chunk
+        chunk >>= 1
+    out[pos:] = src[pos:]
+    return bytes(out)
+
+
 def cmd_check(g):
     ok = True
     for t in g.tracks:
@@ -175,7 +213,8 @@ def cmd_check(g):
         ok &= t.exists
     try:
         h = g.header()
-        print("\n%s  %s  v%s  %s  boot=%s  area=%s" % (h["product"], h["title"], h["version"], h["date"], h["boot"], h["area"]))
+        print("\n%s  %s  v%s  %s  boot=%s  area=%s  %s" % (h["product"], h["title"], h["version"], h["date"], h["boot"], h["area"],
+                                                  "CD-ROM (boot area at LBA %d)" % g.boot_lba() if g.is_cd() else "GD-ROM"))
     except MissingTrack as e:
         print("\ncannot read IP.BIN:", e); return 1
     # can every file be read?
@@ -210,6 +249,7 @@ def main():
     if cmd == "extract":
         out = sys.argv[3]; only = {n.upper() for n in sys.argv[4:]}
         n = 0
+        boot = g.header()["boot"].upper() if g.is_cd() else None
         for path, lba, size, isdir in g.walk():
             if isdir:
                 continue
@@ -222,6 +262,12 @@ def main():
                 while left > 0:
                     chunk = min(left, 2048 * 512)
                     f.write(g.read(cur, chunk)); cur += chunk // 2048; left -= chunk
+            if boot and path.upper() == boot:
+                with open(dst, "rb") as f:
+                    d = f.read()
+                with open(dst, "wb") as f:
+                    f.write(descramble(d))
+                print("%s: descrambled (CD boot file)" % path)
             n += 1
         print("extracted %d files to %s" % (n, out))
         return 0

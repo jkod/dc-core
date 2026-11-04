@@ -294,6 +294,7 @@ static tex_t *get_tex(uint32_t tcw, uint32_t tsp) {
     int linear = (tcw >> 26) & 1, stride = (tcw >> 25) & 1;
     uint32_t addr = (tcw & 0x1FFFFF) << 3;
     if (fmt == 5 || fmt == 6) linear = 0, stride = 0;       /* palette formats are always twiddled */
+    int vq_linear = vq && linear && !mip;
     int pitch = w;                                           /* texels per row in memory */
     if (linear && stride) { pitch = (int)(REG(0x0E4) & 31) * 32; if (pitch <= 0) pitch = w; }
     if (mip) h = w;                                          /* mip-mapped textures are square */
@@ -320,9 +321,12 @@ static tex_t *get_tex(uint32_t tcw, uint32_t tsp) {
     for (int y = 0; y < h; y++)
         for (int x = 0; x < w; x++) {
             uint32_t c;
-            if (vq) {                                       /* 2x2 blocks of 16-bit texels from a 256-entry codebook */
-                uint32_t idx = tex8(addr + 2048 + twiddle(x >> 1, y >> 1, w >> 1, h >> 1));
-                uint32_t sub = ((x & 1) << 1) | (y & 1);
+            if (vq) {                                       /* 16-bit texels from a 256-entry codebook of 4 */
+                /* twiddled: an index per 2x2 block; non-twiddled (scan order 1, which Rush Rush Rally
+                 * Reloaded uses): row by row, each codebook entry 4 texels of one row */
+                uint32_t idx, sub;
+                if (vq_linear) { idx = tex8(addr + 2048 + (uint32_t)(y * (pitch >> 2) + (x >> 2))); sub = x & 3; }
+                else { idx = tex8(addr + 2048 + twiddle(x >> 1, y >> 1, w >> 1, h >> 1)); sub = ((x & 1) << 1) | (y & 1); }
                 uint16_t p = tex16(cb + idx * 8 + sub * 2);
                 c = fmt == 3 ? 0xFF808080u : conv16(fmt, p);
             } else if (fmt == 5) {
