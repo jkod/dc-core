@@ -1,7 +1,8 @@
 /* dc-core on-screen menu (included by dccore_front.c). Open it with L trigger + R trigger + d-pad right
  * + B held together on any controller (F1 on the keyboard); the game pauses and goes quiet while it is
  * open. Up / down pick, A (or left / right) changes, B, Start or Esc closes. Resume, Reset game,
- * Scanlines, Show FPS, Fullscreen, Quit. Scanlines and Show FPS are kept in osd.cfg next to the VMU. */
+ * Resolution (the render scale) and Aspect (widescreen / 4:3) for this session, Scanlines, Show FPS,
+ * Fullscreen, Quit. Scanlines and Show FPS are kept in osd.cfg next to the VMU. */
 
 /* an original 5x7 font */
 static const struct { char c; uint8_t r[7]; } osd_font[] = {
@@ -58,10 +59,10 @@ static const struct { char c; uint8_t r[7]; } osd_font[] = {
     { 'Z', { 0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F } },
 };
 #define OSD_W 200
-#define OSD_ITEMS 6
+#define OSD_ITEMS 8
 static int osd_scan, osd_fps;
 static char osd_cfg_path[1024];
-static uint8_t osd_px[OSD_W * 128 * 4];
+static uint8_t osd_px[OSD_W * 160 * 4];
 static int osd_h;
 static float fps_now;
 
@@ -111,12 +112,14 @@ static const char *osd_label(int i, char *buf, size_t n) {
     switch (i) {
     case 0: return "RESUME";
     case 1: return "RESET GAME";
-    case 2: snprintf(buf, n, "SCANLINES     < %s >", scan[osd_scan]); return buf;
-    case 3: snprintf(buf, n, "SHOW FPS      < %s >", osd_fps ? "ON" : "OFF"); return buf;
+    case 2: snprintf(buf, n, "RESOLUTION    < %dX %dP >", cfg.scale, 480 * cfg.scale); return buf;
+    case 3: snprintf(buf, n, "ASPECT        < %s >", cfg.widescreen ? "WIDE" : "4:3"); return buf;
+    case 4: snprintf(buf, n, "SCANLINES     < %s >", scan[osd_scan]); return buf;
+    case 5: snprintf(buf, n, "SHOW FPS      < %s >", osd_fps ? "ON" : "OFF"); return buf;
 #ifdef __SWITCH__
-    case 4: return "";
+    case 6: return "";
 #else
-    case 4: snprintf(buf, n, "FULLSCREEN    < %s >", cfg.fullscreen ? "ON" : "OFF"); return buf;
+    case 6: snprintf(buf, n, "FULLSCREEN    < %s >", cfg.fullscreen ? "ON" : "OFF"); return buf;
 #endif
     default: return "QUIT";
     }
@@ -237,6 +240,7 @@ static void osd_run(void) {
     if (audio) SDL_PauseAudioDevice(audio, 1);
     fprintf(stderr, "dc-core: menu\n");
     int sel = 0;
+    if (cfg.scale < 1) cfg.scale = 2;
     osd_open = 1; osd_paint(sel);
     while (!osd_all_released() && osd_open) osd_frame();   /* the buttons that opened it don't count */
     uint16_t prev = 0;
@@ -257,12 +261,24 @@ static void osd_run(void) {
         if (step) {
             if (sel == 0 && (down & DC_BTN_A)) break;
             if (sel == 1 && (down & DC_BTN_A)) osd_restart();
-            if (sel == 2) { osd_scan = (osd_scan + 4 + step) % 4; dc_pvr_gl_scanlines = osd_scan; osd_save(); }
-            if (sel == 3) { osd_fps = !osd_fps; osd_save(); }
-#ifndef __SWITCH__
-            if (sel == 4) { cfg.fullscreen = !cfg.fullscreen; SDL_SetWindowFullscreen(win, cfg.fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0); }
+            if (sel == 2) {                                 /* the next frame renders at the new size */
+#ifdef __SWITCH__
+                const int max_scale = 3;
+#else
+                const int max_scale = 6;
 #endif
-            if (sel == 5 && (down & DC_BTN_A)) { dc_front_close(); exit(0); }
+                cfg.scale += step; if (cfg.scale < 1) cfg.scale = max_scale; if (cfg.scale > max_scale) cfg.scale = 1;
+            }
+            if (sel == 3) {
+                cfg.widescreen = !cfg.widescreen; dc_pvr_gl_widescreen = cfg.widescreen;
+                if (!cfg.widescreen) dc_pvr_gl_aspect = 4.f / 3.f;   /* else the window's shape, set when presenting */
+            }
+            if (sel == 4) { osd_scan = (osd_scan + 4 + step) % 4; dc_pvr_gl_scanlines = osd_scan; osd_save(); }
+            if (sel == 5) { osd_fps = !osd_fps; osd_save(); }
+#ifndef __SWITCH__
+            if (sel == 6) { cfg.fullscreen = !cfg.fullscreen; SDL_SetWindowFullscreen(win, cfg.fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0); }
+#endif
+            if (sel == 7 && (down & DC_BTN_A)) { dc_front_close(); exit(0); }
         }
         osd_paint(sel);
     }
