@@ -39,6 +39,12 @@ typedef struct {
                                    implies this); DC_RUN_IN_BACKGROUND=1 does the same */
 } dc_front_config;
 int  dc_front_open(const dc_front_config *cfg);   /* 0 = ok */
+int  dc_front_open_icon(const dc_front_config *cfg, const unsigned char *icon_rgba32x32);
+/* a player built with an ICON (dccore_add_player) shows the game's VMU icon on its window */
+#ifdef DCCORE_ICON
+extern const unsigned char dccore_icon_rgba[32 * 32 * 4];
+#define dc_front_open(cfg) dc_front_open_icon((cfg), dccore_icon_rgba)
+#endif
 void dc_front_close(void);
 /* frames presented so far / whether the window was closed (for tests and headless runs) */
 unsigned long dc_front_frames(void);

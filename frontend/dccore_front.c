@@ -489,6 +489,9 @@ static void on_vblank(uint64_t f) {
     }
 }
 
+static const unsigned char *app_icon;
+int dc_front_open_icon(const dc_front_config *c, const unsigned char *icon_rgba) { app_icon = icon_rgba; return dc_front_open(c); }
+
 int dc_front_open(const dc_front_config *c) {
     cfg = *c;
 #ifdef _WIN32
@@ -527,6 +530,14 @@ int dc_front_open(const dc_front_config *c) {
     win = SDL_CreateWindow(cfg.title ? cfg.title : "dc-core", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, cfg.width, cfg.height,
                            SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI | (cfg.fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0));
     if (!win) { fprintf(stderr, "SDL window: %s\n", SDL_GetError()); return -1; }
+#ifndef __SWITCH__
+    if (app_icon) {                                       /* the game's VMU icon (window, taskbar, Dock), x4 unsmoothed */
+        static uint8_t big[128 * 128 * 4];
+        for (int y = 0; y < 128; y++) for (int x = 0; x < 128; x++) memcpy(big + (y * 128 + x) * 4, app_icon + ((y / 4) * 32 + x / 4) * 4, 4);
+        SDL_Surface *ic = SDL_CreateRGBSurfaceWithFormatFrom(big, 128, 128, 32, 128 * 4, SDL_PIXELFORMAT_RGBA32);
+        if (ic) { SDL_SetWindowIcon(win, ic); SDL_FreeSurface(ic); }
+    }
+#endif
     glc = SDL_GL_CreateContext(win);
     if (!glc) { fprintf(stderr, "OpenGL 3.3: %s\n", SDL_GetError()); return -1; }
     if (cfg.vsync) {                                       /* adaptive (late frames don't wait) where offered */

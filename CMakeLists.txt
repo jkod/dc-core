@@ -56,13 +56,37 @@ else()
   message(STATUS "dc-core: SDL2 not found, frontend disabled")
 endif()
 
-# dccore_add_player(<target> SOURCES <files...> [TITLE t] [AUTHOR a] [VERSION v])
+# dccore_add_player(<target> SOURCES <files...> [TITLE t] [AUTHOR a] [VERSION v]
+#                   [ICON <file> [ICON_ARGS args...]])
 #
 # An executable on the frontend; on Switch also <target>.nro (homebrew menu app).
+# ICON: the game's VMU icon data, taken from your disc by the setup step (palette + 32x32 frames,
+# tools/icon/vmuicon.py; ICON_ARGS e.g. --flip). It becomes the Windows executable's icon, the
+# window / taskbar / Dock icon and the Switch homebrew-menu icon. Skipped when the file isn't there.
 function(dccore_add_player target)
-  cmake_parse_arguments(A "" "TITLE;AUTHOR;VERSION" "SOURCES" ${ARGN})
+  cmake_parse_arguments(A "" "TITLE;AUTHOR;VERSION;ICON" "SOURCES;ICON_ARGS" ${ARGN})
+  set(icon_dir)
+  if(A_ICON AND EXISTS "${A_ICON}")
+    set(icon_dir ${CMAKE_CURRENT_BINARY_DIR}/${target}_icon)
+    execute_process(COMMAND ${DCCORE_PYTHON} ${DCCORE_DIR}/tools/icon/vmuicon.py "${A_ICON}" ${icon_dir} ${A_ICON_ARGS}
+                    RESULT_VARIABLE rc ERROR_VARIABLE err OUTPUT_QUIET)
+    if(NOT rc EQUAL 0)
+      message(WARNING "icon skipped: vmuicon.py failed: ${err}")
+      set(icon_dir)
+    else()
+      set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${A_ICON}")
+      list(APPEND A_SOURCES ${icon_dir}/icon_rgba.c)
+      if(WIN32)
+        file(WRITE ${icon_dir}/icon.rc "1 ICON \"${icon_dir}/icon.ico\"\n")
+        list(APPEND A_SOURCES ${icon_dir}/icon.rc)
+      endif()
+    endif()
+  endif()
   add_executable(${target} ${A_SOURCES})
   target_link_libraries(${target} PRIVATE dccore_front)
+  if(icon_dir)
+    target_compile_definitions(${target} PRIVATE DCCORE_ICON=1)
+  endif()
   if(NINTENDO_SWITCH)
     if(NOT A_TITLE)
       set(A_TITLE ${target})
@@ -74,14 +98,23 @@ function(dccore_add_player target)
       set(A_VERSION "0.1")
     endif()
     nx_generate_nacp(${target}.nacp NAME "${A_TITLE}" AUTHOR "${A_AUTHOR}" VERSION "${A_VERSION}")
-    nx_create_nro(${target} NACP ${target}.nacp)
+    if(icon_dir)
+      nx_create_nro(${target} NACP ${target}.nacp ICON ${icon_dir}/icon.jpg)
+    else()
+      nx_create_nro(${target} NACP ${target}.nacp)
+    endif()
   endif()
 endfunction()
 
 # Demo: draws through the PowerVR model with no game code (a quick check of a new platform)
 option(DCCORE_DEMO "Build the frontend demo" OFF)
 if(DCCORE_DEMO AND TARGET dccore_front)
-  dccore_add_player(dccore_demo SOURCES examples/demo.c TITLE "dc-core demo" VERSION "0.1")
+  # a made-up icon (no game data) so CI builds the icon path on every platform
+  set(demo_icon ${CMAKE_CURRENT_BINARY_DIR}/demo_icon.bin)
+  execute_process(COMMAND ${Python3_EXECUTABLE} -c
+    "import struct,sys;p=b''.join(struct.pack('<H',0xF000|(k*0x111)) for k in range(16));b=bytes(((x//2+y)%16)*17 for y in range(32) for x in range(16));open(sys.argv[1],'wb').write(p+b)"
+    ${demo_icon})
+  dccore_add_player(dccore_demo SOURCES examples/demo.c TITLE "dc-core demo" VERSION "0.1" ICON ${demo_icon})
 endif()
 
 # dccore_add_recomp(<target> BIN <1ST_READ.BIN> FUNCS <funcs.txt> [BASE 0x8C010000] [SETJMP addr...]
