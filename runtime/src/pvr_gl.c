@@ -1685,17 +1685,32 @@ void dc_pvr_gl_render(int scale) {
          * to their bounding box. Soulcalibur's shadows are hundreds of one-triangle volumes per frame, and
          * two full-screen passes for each of them left the GPU fill-bound in fights. */
         float bx0 = 1e30f, bx1 = -1e30f, by0 = 1e30f, by1 = -1e30f, kx = (float)fb_w / WW, ky = (float)fb_h / (float)RH;
-        for (int i = 0; i < f.nmods; i++) {
-            const pvr_modtri *m = &f.mods[i];
-            if (m->list != 1) continue;
-            p_glEnable(GL_DEPTH_TEST); p_glDepthFunc(GL_GEQUAL);
-            p_glStencilMask(1); p_glStencilFunc(GL_ALWAYS, 0, 0xFF); p_glStencilOp(GL_KEEP, GL_KEEP, GL_INVERT);
-            p_glDrawArrays(GL_TRIANGLES, mod_first + i * 3, 3);
+        /* a volume's triangles are drawn with one call (the parity flip does not depend on their order):
+         * Dead or Alive 2's shadows are hundreds of volume triangles per frame, and a call (and five state
+         * changes) for each one made fights CPU-bound in the Windows GL driver */
+        int run = -1, parity_state = 0;
+        for (int i = 0; i <= f.nmods; i++) {
+            const pvr_modtri *m = i < f.nmods ? &f.mods[i] : NULL;
+            if (m && m->list == 1 && run < 0) run = i;
+            int closes = m && m->list == 1 && (m->inst == 1 || m->inst == 2);
+            /* draw the pending run when this triangle ends a volume, a triangle of another list breaks it, or at the end */
+            if (run >= 0 && (closes || !m || m->list != 1)) {
+                int end = closes ? i + 1 : i;
+                if (!parity_state) {
+                    p_glEnable(GL_DEPTH_TEST); p_glDepthFunc(GL_GEQUAL);
+                    p_glStencilMask(1); p_glStencilFunc(GL_ALWAYS, 0, 0xFF); p_glStencilOp(GL_KEEP, GL_KEEP, GL_INVERT);
+                    parity_state = 1;
+                }
+                p_glDrawArrays(GL_TRIANGLES, mod_first + run * 3, (end - run) * 3);
+                run = -1;
+            }
+            if (!m || m->list != 1) continue;
             for (int k = 0; k < 3; k++) {
                 if (m->x[k] < bx0) bx0 = m->x[k]; if (m->x[k] > bx1) bx1 = m->x[k];
                 if (m->y[k] < by0) by0 = m->y[k]; if (m->y[k] > by1) by1 = m->y[k];
             }
-            if (m->inst == 1 || m->inst == 2) {            /* volume closed: parity -> bit 2, clear parity */
+            if (closes) {                                  /* volume closed: parity -> bit 2, clear parity */
+                parity_state = 0;
                 {   /* GL pixels of the box (rows go up), a pixel of margin, inside the render's own scissor */
                     float fx0 = (bx0 + sc_off) * kx - 1.f, fx1 = (bx1 + sc_off) * kx + 2.f;
                     float fy0 = (float)fb_h - by1 * ky - 1.f, fy1 = (float)fb_h - by0 * ky + 2.f;
