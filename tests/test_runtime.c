@@ -200,14 +200,16 @@ int main(void) {
         { int16_t junk[2048]; while (dc_aica_audio_read(junk, 1024) > 0) {} }
         #define AR(o, v) dc_wr32(0xA0700000u + (o), (v))
         #define STEP(st, w0, w1, w2, w3) do { AR(0x3400 + (st) * 16, w0); AR(0x3404 + (st) * 16, w1); AR(0x3408 + (st) * 16, w2); AR(0x340C + (st) * 16, w3); } while (0)
-        AR(0x3000, 0x0FFFu << 3);                                         /* COEF0 ~ 1.0 */
+        AR(0x3000, 0x0FFFu << 3); AR(0x3018, 0x0FFFu << 3);             /* COEF of steps 0 and 6 ~ 1.0 */
         AR(0x3200, 0); AR(0x3204, 100);                                   /* MADRS0 = 0, MADRS1 = 100 */
         AR(0x2804, 0x100);                                                /* ring buffer at 0x80000, 8K words */
-        STEP(0, 0, 1u << 15 | 1u << 13 | 0x20u << 7, 1u << 1, 0);                                   /* ACC = MIXS0 * COEF0 */
-        STEP(1, 0, 0, 1u << 14, 1u << 15 | 0u << 2);                                                 /* write ring[dec] (NOFL) */
-        STEP(3, 0, 0, 1u << 13, 1u << 15 | 1u << 2);                                                 /* MEMVAL = ring[dec+100] */
-        STEP(4, 0, 1u << 15 | 1u << 13 | 0u << 7 | 1u << 6 | 0u << 1, 1u << 1, 0);                   /* MEMS0 = MEMVAL; ACC = it * COEF0 */
-        STEP(5, 0, 0, 1u << 12 | 0u << 8, 0);                                                         /* EFREG0 = ACC */
+        /* AICA layout: MASA in word 3 bits 14-9, a read reaches MEMS through IWT two steps later */
+        STEP(0, 0, 1u << 15 | 1u << 13 | 0x20u << 7, 1u << 1, 0);                                   /* ACC = MIXS0 * COEF */
+        STEP(1, 0, 0, 1u << 14, 0u << 9);                                                            /* write ring[dec] */
+        STEP(3, 0, 0, 1u << 13, 1u << 9);                                                            /* read ring[dec+100] */
+        STEP(5, 0, 1u << 6 | 0u << 1, 0, 0);                                                         /* MEMS0 = what step 3 read */
+        STEP(6, 0, 1u << 15 | 1u << 13 | 0u << 7, 1u << 1, 0);                                       /* ACC = MEMS0 * COEF */
+        STEP(7, 0, 0, 1u << 12 | 0u << 8, 0);                                                         /* EFREG0 = ACC */
         AR(0x2000, 15u << 8);                                             /* EFSDL 15, centre */
         #define CH1(r, v) dc_wr32(0xA0700080u + (r) * 4, (v))
         CH1(1, 0x0000); CH1(2, 0); CH1(3, 200); CH1(4, 31); CH1(5, 0x3C00); CH1(6, 0);

@@ -204,12 +204,13 @@ static void advance_channels(void) {
 /* ---------------------------------------------------------------- effects DSP
  * 128-step microprogram run once per sample (reverb, echo, chorus). Channels send to the 16 MIXS
  * inputs (ISEL / IMXL), the program works on 24-bit values with a ring buffer in sound RAM
- * (RBP / RBL), and its 16 EFREG outputs are mixed back with EFSDL / EFPAN. Follows the
- * documented SCSP/AICA DSP as implemented by MAME and Flycast.
+ * (RBP / RBL), and its 16 EFREG outputs are mixed back with EFSDL / EFPAN. The AICA's own
+ * instruction layout, not the Saturn SCSP's: each step uses its own COEF (COEF[step]), 64 MADRS,
+ * and a memory read reaches MEMS two steps later.
  *   COEF 0x3000 (128 x 13 bit), MADRS 0x3200 (64), MPRO 0x3400 (128 x 64 bit), EFSDL/EFPAN 0x2000 */
 static struct {
     int32_t temp[128], mems[32], mixs[16], efreg[16];
-    int32_t acc, shifted, x, y, b, inputs, memval, frc, yreg, adrs;
+    int32_t acc, shifted, x, y, b, inputs, memval[4], frc, yreg, adrs;
     uint32_t dec;
     int last_step;                                  /* -1 = program changed, recount */
 } dsp = { .last_step = -1 };
@@ -246,18 +247,24 @@ static void dsp_step(void) {
     uint16_t *ram = (uint16_t *)dc_aram;
     for (int st = 0; st < dsp.last_step; st++) {
         uint32_t i0 = MPRO(st, 0), i1 = MPRO(st, 1), i2 = MPRO(st, 2), i3 = MPRO(st, 3);
-        uint32_t TRA = (i0 >> 8) & 0x7F, TWT = (i0 >> 7) & 1, TWA = i0 & 0x7F;
+        if (!(i0 | i1 | i2 | i3)) {                         /* empty step: the multiplier keeps running */
+            dsp.x = sx24(dsp.temp[dsp.dec & 0x7F]); dsp.y = dsp.frc;
+            int32_t y13 = (int32_t)((uint32_t)dsp.y << 19) >> 19;
+            dsp.acc = (int32_t)(((int64_t)dsp.x * y13) >> 12) + dsp.x;
+            continue;
+        }
+        uint32_t TRA = (i0 >> 9) & 0x7F, TWT = (i0 >> 8) & 1, TWA = (i0 >> 1) & 0x7F;
         uint32_t XSEL = (i1 >> 15) & 1, YSEL = (i1 >> 13) & 3, IRA = (i1 >> 7) & 0x3F, IWT = (i1 >> 6) & 1, IWA = (i1 >> 1) & 0x1F;
         uint32_t TABLE = (i2 >> 15) & 1, MWT = (i2 >> 14) & 1, MRD = (i2 >> 13) & 1, EWT = (i2 >> 12) & 1, EWA = (i2 >> 8) & 15;
         uint32_t ADRL = (i2 >> 7) & 1, FRCL = (i2 >> 6) & 1, SHIFT = (i2 >> 4) & 3, YRL = (i2 >> 3) & 1;
         uint32_t NEGB = (i2 >> 2) & 1, ZERO = (i2 >> 1) & 1, BSEL = i2 & 1;
-        uint32_t NOFL = (i3 >> 15) & 1, COEF = (i3 >> 9) & 0x3F, MASA = (i3 >> 2) & 0x1F, ADREB = (i3 >> 1) & 1, NXADR = i3 & 1;
+        uint32_t MASA = (i3 >> 9) & 0x3F, ADREB = (i3 >> 8) & 1, NXADR = (i3 >> 7) & 1;
 
         if (IRA <= 0x1F) dsp.inputs = dsp.mems[IRA];
         else if (IRA <= 0x2F) dsp.inputs = dsp.mixs[IRA - 0x20] << 4;          /* 20 -> 24 bit */
         else dsp.inputs = 0;                                                    /* EXTS (CD audio): none */
         dsp.inputs = sx24(dsp.inputs);
-        if (IWT) { dsp.mems[IWA] = dsp.memval; if (IRA == IWA) dsp.inputs = dsp.memval; }
+        if (IWT) dsp.mems[IWA] = dsp.memval[st & 3];                            /* read two steps ago */
 
         if (ZERO) dsp.b = 0;
         else {
@@ -266,8 +273,8 @@ static void dsp_step(void) {
         }
         dsp.x = XSEL ? dsp.inputs : sx24(dsp.temp[(TRA + dsp.dec) & 0x7F]);
         if (YSEL == 0) dsp.y = dsp.frc;
-        else if (YSEL == 1) dsp.y = (int32_t)((R(0x3000 + COEF * 4) & 0xFFFF) >> 3);
-        else if (YSEL == 2) dsp.y = (dsp.yreg >> 11) & 0x1FFF;
+        else if (YSEL == 1) dsp.y = (int32_t)(int16_t)(R(0x3000 + st * 4) & 0xFFFF) >> 3;
+        else if (YSEL == 2) dsp.y = dsp.yreg >> 11;
         else dsp.y = (dsp.yreg >> 4) & 0x0FFF;
         if (YRL) dsp.yreg = dsp.inputs;
 
@@ -284,16 +291,15 @@ static void dsp_step(void) {
 
         if ((MRD || MWT) && (st & 1)) {                     /* memory access on odd steps */
             uint32_t addr = R(0x3200 + MASA * 4) & 0xFFFF;
-            if (!TABLE) addr += dsp.dec;
             if (ADREB) addr += (uint32_t)dsp.adrs & 0xFFF;
             if (NXADR) addr++;
-            addr &= TABLE ? 0xFFFF : rbl - 1;
+            if (!TABLE) addr = (addr + dsp.dec) & (rbl - 1); else addr &= 0xFFFF;
             addr = (addr + (rbp << 10)) & 0xFFFFF;          /* 16-bit words in 2 MB */
-            if (MRD) dsp.memval = NOFL ? (int32_t)(int16_t)ram[addr] << 8 : dsp_unpack(ram[addr]);
-            if (MWT) ram[addr] = NOFL ? (uint16_t)(dsp.shifted >> 8) : dsp_pack(dsp.shifted);
+            if (MRD) dsp.memval[(st + 2) & 3] = dsp_unpack(ram[addr]);
+            if (MWT) ram[addr] = dsp_pack(dsp.shifted);
         }
         if (ADRL) dsp.adrs = SHIFT == 3 ? (dsp.shifted >> 12) & 0xFFF : dsp.inputs >> 16;
-        if (EWT) dsp.efreg[EWA] += dsp.shifted >> 8;
+        if (EWT) dsp.efreg[EWA] = dsp.shifted >> 8;
     }
     dsp.dec--;
     memset(dsp.mixs, 0, sizeof dsp.mixs);
@@ -353,7 +359,7 @@ static void mix_sample(void) {
                 l += gl; r += gr;
             }
     }
-    float mv = gain(32 * (int)(15 - (R(0x2800) & 15))) * 32767.f * 0.5f;   /* headroom for many voices */
+    float mv = gain(32 * (int)(15 - (R(0x2800) & 15))) * 32767.f * 0.5f;   /* headroom: no voice filter yet, so bright voices run hotter than on the console */
     l *= mv; r *= mv;
     int il = l > 32767 ? 32767 : l < -32768 ? -32768 : (int)l, ir = r > 32767 ? 32767 : r < -32768 ? -32768 : (int)r;
     if (ring_w - ring_r >= RING) ring_r++;                       /* nobody listening: drop the oldest */
