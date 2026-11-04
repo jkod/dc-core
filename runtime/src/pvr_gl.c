@@ -966,6 +966,7 @@ int dc_pvr_gl_hud_before_shade;
 const dc_hud_zone *dc_pvr_gl_hud_zones;
 int dc_pvr_gl_hud_sprites;
 int dc_pvr_gl_hud_nzones;
+int dc_pvr_gl_shade_any_z;
 static void hud_group(const pvr_frame *f, int RW, signed char *side) {
     static hud_box *b; static int cap;
     int n = 0;
@@ -1342,7 +1343,12 @@ void dc_pvr_gl_render(int scale) {
         const float big = (float)RW * (float)f.height / 20.f;
         for (int i = 0; i < f.npolys; i++) {
             const pvr_poly *p = &f.polys[i]; const pvr_vtx *v = f.verts + p->first;
-            if (p->n != 4 || !shade_poly(p, v) || v[0].z < dc_pvr_gl_hud_z || v[0].z >= ovl_z) continue;
+            if (p->n != 4 || !shade_poly(p, v) || v[0].z >= ovl_z) continue;
+            if (v[0].z < dc_pvr_gl_hud_z) {         /* deeper: only a dark shade, and only when the game asks */
+                if (!dc_pvr_gl_shade_any_z) continue;
+                int dark = 1; for (int k = 0; k < 4; k++) if (v[k].c[0] > .3f || v[k].c[1] > .3f || v[k].c[2] > .3f) dark = 0;
+                if (!dark) continue;
+            }
             float x0 = 1e30f, x1 = -1e30f, y0 = 1e30f, y1 = -1e30f; int rect = 1;
             for (int k = 0; k < 4; k++) {
                 if (v[k].x < x0) x0 = v[k].x; if (v[k].x > x1) x1 = v[k].x;

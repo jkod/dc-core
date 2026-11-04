@@ -36,6 +36,9 @@ extern int dc_pvr_gl_letterbox_zoom;  /* widescreen: with dc_pvr_gl_letterbox_4_
 extern int dc_pvr_gl_shade_translucent; /* widescreen: a full-screen pause shade can be any colour of translucent quad, textured or
                                          * not (Daytona USA 2001's is a white-modulated texture at 60% alpha); default 0: untextured
                                          * or black only */
+extern int dc_pvr_gl_shade_any_z;      /* widescreen: a dark full-screen shade made of tiles counts at any depth, not
+                                          * only at HUD depth: what is drawn over it stays centred with it (Tennis
+                                          * 2K2's match results: names and 1P / COM beside the box). Default 0 */
 extern int dc_pvr_gl_hud_before_shade;  /* widescreen: polygons drawn before a full-screen pause shade are HUD even when
                                          * they lie above it (they keep moving); only those after it are the menu (default 0) */
 extern int dc_pvr_gl_show_4_3;       /* widescreen: set by a port for screens framed for 4:3 (e.g. a 2D title picture over a 3D
