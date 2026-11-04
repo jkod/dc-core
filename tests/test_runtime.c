@@ -167,7 +167,7 @@ int main(void) {
     CH0(4, 31); CH0(5, 0x3C00 | 0);                  /* AR 31; KRS 15 (off), DL 0, RR 0 */
     CH0(6, 0);                                       /* pitch 1.0 */
     CH0(9, 15 << 8);                                 /* DISDL 15, centre */
-    CH0(10, 0);                                      /* TL 0 */
+    CH0(10, 0x20);                                   /* TL 0, LPOFF (no low-pass filter) */
     { int16_t junk[2048]; while (dc_aica_audio_read(junk, 1024) > 0) {} }
     CH0(0, 0xC000 | (1 << 9) | (0 << 7) | 0x01);    /* KYONEX KYONB, loop, PCM16, SA 0x10000 */
     uint64_t t0 = c.cycles;
@@ -214,7 +214,7 @@ int main(void) {
         #define CH1(r, v) dc_wr32(0xA0700080u + (r) * 4, (v))
         CH1(1, 0x0000); CH1(2, 0); CH1(3, 200); CH1(4, 31); CH1(5, 0x3C00); CH1(6, 0);
         CH1(8, 15u << 4 | 0);                                             /* IMXL 15 -> MIXS0 */
-        CH1(9, 0); CH1(10, 0);                                            /* DISDL 0: dry signal muted */
+        CH1(9, 0); CH1(10, 0x20);                                         /* DISDL 0: dry signal muted; LPOFF */
         uint64_t t1 = c.cycles + 100000000ull;
         dc_aica_advance(t1);
         { int16_t junk[2048]; while (dc_aica_audio_read(junk, 1024) > 0) {} }
@@ -233,7 +233,7 @@ int main(void) {
     {
         for (int i = 0; i < 0x4000; i++) dc_wr8(0xA0840000u + i, (uint8_t)(i * 37 + (i >> 3)));
         #define CH2(r, v) dc_wr32(0xA0700100u + (r) * 4, (v))
-        CH2(1, 0x0000); CH2(2, 0x1000); CH2(3, 0x7000); CH2(4, 31); CH2(5, 0x3C00); CH2(6, 0xF800); CH2(8, 0); CH2(9, 15 << 8); CH2(10, 0);
+        CH2(1, 0x0000); CH2(2, 0x1000); CH2(3, 0x7000); CH2(4, 31); CH2(5, 0x3C00); CH2(6, 0xF800); CH2(8, 0); CH2(9, 15 << 8); CH2(10, 0x20);
         uint64_t t2 = c.cycles + 300000000ull;
         dc_aica_advance(t2);
         { int16_t junk[2048]; while (dc_aica_audio_read(junk, 1024) > 0) {} }
@@ -248,6 +248,31 @@ int main(void) {
         }
         CHECK(got > 400 && nonzero > got / 8 && mids > got / 2 - 20);
         CH2(5, 0x3C00 | 31); CH2(0, 0x8000 | 0x04);
+    }
+    /* 10b2. voice low-pass filter: the square wave (period 200) through a nearly closed filter is far
+     * quieter; wide open (0x1FFF) it passes at full level */
+    {
+        #define CH3(r, v) dc_wr32(0xA0700180u + (r) * 4, (v))
+        int peaks[2];
+        for (int pass = 0; pass < 2; pass++) {
+            uint32_t flv = pass ? 0x1FFF : 0x0A00;
+            CH3(1, 0x0000); CH3(2, 0); CH3(3, 200); CH3(4, 31); CH3(5, 0x3C00); CH3(6, 0); CH3(8, 0); CH3(9, 15 << 8);
+            CH3(10, 0);                                                       /* TL 0, filter on, Q 0 */
+            for (int r = 11; r <= 15; r++) CH3(r, flv);
+            CH3(16, 0); CH3(17, 0);
+            uint64_t t3 = c.cycles + 300000000ull * (uint64_t)(pass + 1);
+            dc_aica_advance(t3);
+            { int16_t junk[2048]; while (dc_aica_audio_read(junk, 1024) > 0) {} }
+            CH3(0, 0xC000 | (1 << 9) | 0x01);                                 /* PCM16 square at 0x10000, loop */
+            for (int k = 1; k <= 10; k++) dc_aica_advance(t3 + (uint64_t)k * 200000000ull / 44100 * 50);
+            got = dc_aica_audio_read(au, 4096);
+            peaks[pass] = 0;
+            for (int i = got / 2; i < got; i++) { int v = abs(au[i * 2]); if (v > peaks[pass]) peaks[pass] = v; }
+            CH3(5, 0x3C00 | 31); CH3(0, 0x8000 | 0x01);
+            for (int k = 11; k <= 14; k++) dc_aica_advance(t3 + (uint64_t)k * 200000000ull / 44100 * 50);
+        }
+        CHECK(peaks[1] > 7000 && peaks[1] < 9000);
+        CHECK(peaks[0] < peaks[1] / 4);
     }
     /* 10c. hblank interrupt (SPG_HBLANK_INT modes): count ISTNRM bit 5 over one field */
     {

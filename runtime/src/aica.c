@@ -48,7 +48,8 @@ static uint32_t level_reg(void) {
 /* Channel registers (16 bits each, 4 bytes apart, 0x80 per channel):
  *  0 KYONEX KYONB SSCTL LPCTL PCMS(8:7) SA[22:16]   1 SA[15:0]   2 LSA   3 LEA
  *  4 D2R(15:11) D1R(10:6) AR(4:0)   5 LPSLNK KRS(13:10) DL(9:5) RR(4:0)   6 OCT(14:11) FNS(9:0)
- *  9 DISDL(11:8) DIPAN(4:0)   10 TL(15:8)
+ *  9 DISDL(11:8) DIPAN(4:0)   10 TL(15:8) LPOFF(5) Q(4:0)   11..15 FLV0..FLV4 (12:0)
+ *  16 FAR(12:8) FD1R(4:0)   17 FD2R(12:8) FRR(4:0)
  * Envelope attenuation is 10 bits (0 loudest, 0x3FF silent); EG readback is 13 bits. */
 enum { EG_ATTACK, EG_DECAY1, EG_DECAY2, EG_RELEASE };
 typedef struct {
@@ -61,6 +62,9 @@ typedef struct {
     int32_t adpcm_prev;               /* the sample before adpcm_sig (for interpolation) */
     int32_t loop_sig, loop_step; int loop_saved;
     int16_t cur;                      /* last decoded sample */
+    /* low-pass filter: its own envelope (13-bit cutoff, FLV0 -> FLV1 -> FLV2 -> FLV3, release to FLV4) */
+    int feg_state; double feg;
+    float lp_low, lp_band;
 } chan_t;
 static chan_t ch[64];
 
@@ -91,6 +95,7 @@ static void key_on(int c) {
     h->eg_state = EG_ATTACK; h->att = 0x3FF;
     if (eff_rate(c, creg(c, 4) & 31) >= 62) h->att = 0;     /* instant attack */
     h->adpcm_sig = 0; h->adpcm_step = 127; h->adpcm_at = 0; h->loop_saved = 0; h->cur = 0; h->adpcm_prev = 0;
+    h->feg_state = EG_ATTACK; h->feg = creg(c, 11) & 0x1FFF; h->lp_low = h->lp_band = 0;
 }
 static void key_execute(void) {
     for (int c = 0; c < 64; c++) {
@@ -99,7 +104,7 @@ static void key_execute(void) {
          * sample that ran out keeps its slot keyed, and games leave KYONB set on it (Soulcalibur), so
          * restarting every finished KYONB slot replayed old effects with each new sound. */
         if (kyonb && !ch[c].keyed) key_on(c);
-        else if (!kyonb && ch[c].keyed) { ch[c].keyed = 0; if (ch[c].playing) ch[c].eg_state = EG_RELEASE; }
+        else if (!kyonb && ch[c].keyed) { ch[c].keyed = 0; if (ch[c].playing) ch[c].eg_state = ch[c].feg_state = EG_RELEASE; }
     }
 }
 
@@ -126,6 +131,38 @@ static void envelope(int c) {
         if (h->att >= 0x3FF) { h->att = 0x3FF; h->playing = 0; }
         break;
     }
+}
+
+/* The voice's low-pass filter (on unless LPOFF): a 2-pole resonant low-pass whose cutoff follows
+ * its own envelope. The 13-bit cutoff is a float, exponent (12:9) and mantissa (8:0 with a hidden
+ * bit), so each exponent step is an octave; 0x1FFF is wide open. The envelope moves from FLV0 to
+ * FLV1 (FAR), FLV2 (FD1R), FLV3 (FD2R) and on key off to FLV4 (FRR), at the amplitude envelope's
+ * decay speeds over a range 8 times as long. Q (0..31) is the resonance, 0.75 dB a step from -3 dB.
+ * Done here as a state-variable filter. */
+static float filter(int c, float x) {
+    chan_t *h = &ch[c];
+    uint32_t r10 = creg(c, 10);
+    if (r10 & 0x20) return x;                                  /* LPOFF */
+    static const int target_reg[4] = { 12, 13, 14, 15 };
+    uint32_t r16 = creg(c, 16), r17 = creg(c, 17);
+    int rate = h->feg_state == EG_ATTACK ? (int)((r16 >> 8) & 31) : h->feg_state == EG_DECAY1 ? (int)(r16 & 31)
+             : h->feg_state == EG_DECAY2 ? (int)((r17 >> 8) & 31) : (int)(r17 & 31);
+    double target = creg(c, target_reg[h->feg_state]) & 0x1FFF, d = eg_step(dr_ms[eff_rate(c, rate)]);
+    if (h->feg < target) { h->feg += d; if (h->feg >= target) h->feg = target; }
+    else if (h->feg > target) { h->feg -= d; if (h->feg <= target) h->feg = target; }
+    if (h->feg == target && (h->feg_state == EG_ATTACK || h->feg_state == EG_DECAY1)) h->feg_state++;
+    uint32_t fv = (uint32_t)h->feg, e = fv >> 9, m = (fv & 0x1FF) | 0x200;
+    float fn = (float)m * (float)(1u << e) / 33554432.f;      /* cutoff, 1 = half the sample rate */
+    if (fn >= 0.98f) { h->lp_low = x; h->lp_band = 0; return x; }
+    static float damp[32];
+    if (damp[0] == 0) for (int q = 0; q < 32; q++) damp[q] = 1.f / powf(10.f, (0.75f * q - 3.f) / 20.f);
+    float F = 2.f * sinf(3.14159265f * fn * 0.5f), dq = damp[r10 & 31];
+    if (F > 1.9f - dq) F = 1.9f - dq;                           /* keep the filter stable near the top */
+    if (F < 0.f) F = 0.f;
+    h->lp_low += F * h->lp_band;
+    float hp = x - h->lp_low - dq * h->lp_band;
+    h->lp_band += F * hp;
+    return h->lp_low;
 }
 
 /* Yamaha 4-bit ADPCM */
@@ -319,7 +356,10 @@ static void mix_sample(void) {
     for (int c = 0; c < 64; c++) {
         chan_t *h = &ch[c];
         if (!h->playing) continue;
-        h->cur = fetch(c);
+        {
+            float y = filter(c, (float)fetch(c));
+            h->cur = (int16_t)(y > 32767.f ? 32767.f : y < -32768.f ? -32768.f : y);
+        }
         envelope(c);
         uint32_t r9 = creg(c, 9), disdl = (r9 >> 8) & 15, dipan = r9 & 31, tl = creg(c, 10) >> 8;
         uint32_t r8 = creg(c, 8), imxl = (r8 >> 4) & 15, isel = r8 & 15;
