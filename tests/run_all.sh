@@ -12,4 +12,9 @@ else echo "(no SDL2: frontend test skipped)"; fi
 cc -O1 -w -I"$ROOT/runtime/include" "$ROOT/tests/test_disc.c" "$ROOT/runtime/src/disc.c" -o "$T/disc" && "$T/disc"
 cc -O1 -w -I"$ROOT/runtime/include" "$ROOT/tests/test_cdda.c" "$ROOT"/runtime/src/*.c -lm -o "$T/cdda" && (cd "$T" && ./cdda)
 python3 "$ROOT/tests/test_recomp.py" | tail -1
+python3 "$ROOT/tests/test_steam.py" | tail -1
+if command -v chdman >/dev/null; then   # the Python CHD reader (the runtime's libchdr path needs the CMake build)
+  python3 "$ROOT/tests/make_gd_fixture.py" "$T/gd" && chdman createcd -i "$T/gd/disc.gdi" -o "$T/gd/disc.chd" >/dev/null 2>&1
+  python3 "$ROOT/tests/test_chd.py" "$T/gd"
+else echo "(no chdman: CHD tests skipped)"; fi
 if python3 -c "import keystone" 2>/dev/null; then python3 "$ROOT/tests/test_arm7.py" | tail -1; else echo "(no keystone: ARM7 tests skipped)"; fi

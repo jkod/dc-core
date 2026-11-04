@@ -8,11 +8,13 @@ Nothing here contains game data. Every tool works on the player's own disc image
 
 | Path | What |
 |---|---|
-| `tools/disc/gdi.py` | GDI reader: track validation (names missing tracks), IP.BIN header, ISO9660 walk across all data tracks, extraction |
+| `tools/disc/gdi.py` | disc reader for `.gdi`, Redump `.cue` and `.chd`: track validation (names missing tracks), IP.BIN header, ISO9660 walk across all data tracks, extraction |
+| `tools/disc/chd.py` | pure-Python CHD (v5) reader for CD/GD-ROM images, so setup needs no chdman (the runtime reads CHDs through libchdr) |
 | `tools/recomp/sh4recomp.py` | SH-4 → C static recompiler: full integer + FPU ISA (PR/SZ/FR modes, XMTRX, fsca/fipr/ftrv), delay slots, call-target discovery, in-function jump tables |
 | `runtime/` | CPU context, RAM/hardware access, dispatch table, HLE overrides, call hooks |
 | `tools/assets/pvr.py` | PowerVR2 texture decoder (twiddled, VQ, small VQ, rect, palettised, mipmaps) → PNG |
 | `tools/textures/upscale.py` | texture packs: upscales a port's texture dump with Real-ESRGAN (GPU program or CPU) — see below |
+| `tools/steam/steam_shortcut.py` | adds a built port to Steam as a non-Steam game, with library art — see below |
 | `tests/` | recompiler unit tests (hand-assembled SH-4), PVR round-trip tests |
 
 ## Recompiling a game
@@ -37,6 +39,25 @@ dc_hle_register(0x8C014D6A, my_native_sqrt);    // or replace one with your own 
 
 In CMake, `dccore_add_recomp(game BIN path/1ST_READ.BIN FUNCS funcs.txt)` builds the
 generated code as a static library.
+
+Every tool and the runtime take a `.chd` wherever they take a `.gdi` (CHDs made with `chdman
+createcd`, from a `.gdi` or a `.cue`). The runtime reads them through
+[libchdr](https://github.com/rtissera/libchdr) (BSD-3-Clause), fetched by CMake at a pinned commit;
+`-DDCCORE_CHD=OFF` builds without it.
+
+### Found functions: each run makes the next build faster
+
+Code the function list missed still runs, through the interpreter. The runtime notes each such
+address in the executable once, in `dc_found_funcs_path` (the frontend puts `found_funcs.txt` next
+to the VMU saves; `DC_FOUND_FUNCS=path` sets it anywhere). Give that file to the build and those
+functions are recompiled too:
+
+```cmake
+dccore_add_recomp(game BIN path/1ST_READ.BIN FUNCS funcs.txt FOUND ${CMAKE_CURRENT_SOURCE_DIR}/found_funcs.txt)
+```
+
+(`sh4recomp.py --extra-funcs FILE` does the same by hand; a missing file is skipped.) Copy the
+frontend's file into the port, rebuild, and the code that was interpreted runs natively.
 
 ## Texture packs
 
@@ -70,6 +91,20 @@ Each texture is wrapped at its edges before upscaling so tiling stays seamless, 
 alpha (cut-outs) stays on/off. Any PNG editor works for hand fixes: keep the file name.
 A pack is tied to the game's texture data, never to a dc-core version, as long as the
 texture decoder keeps decoding the same pixels.
+
+## Add to Steam
+
+```sh
+python3 tools/steam/steam_shortcut.py add --exe build/rush2049.exe --name "San Francisco Rush 2049" \
+        --portrait cover.png --hero hero.png --logo logo.png --tag Dreamcast
+python3 tools/steam/steam_shortcut.py remove --exe build/rush2049.exe --name "San Francisco Rush 2049"
+python3 tools/steam/steam_shortcut.py list
+```
+
+Writes the shortcut to every Steam user's `shortcuts.vdf` (Windows, macOS, Linux and Steam Deck,
+Flatpak Steam included; `--steam DIR` / `--user ID` to choose) and puts the art under the id Steam
+gives the shortcut. Adding again updates it; other shortcuts and unknown fields are kept, and a
+`.bak` is written first. Close Steam before running it: Steam rewrites the file when it exits.
 
 ## Status
 

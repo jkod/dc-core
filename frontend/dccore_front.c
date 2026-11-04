@@ -572,6 +572,10 @@ int dc_front_open(const dc_front_config *c) {
         if (!path[0] || dc_vmu_attach(0, path)) fprintf(stderr, "VMU: cannot use %s (continuing without saves)\n", path[0] ? path : "app data");
         else fprintf(stderr, "VMU: %s\n", path);
     }
+    if (!dc_found_funcs_path) {                            /* functions only the interpreter ran: for the next build */
+        static char found[1024]; char *dir = SDL_GetPrefPath("dc-core", cfg.save_name ? cfg.save_name : "default");
+        if (dir) { snprintf(found, sizeof found, "%sfound_funcs.txt", dir); dc_found_funcs_path = found; SDL_free(dir); }
+    }
     osd_load();
     if (!cfg.no_audio) {
         SDL_AudioSpec want = {0}, have;

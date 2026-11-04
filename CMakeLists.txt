@@ -14,6 +14,23 @@ option(DCCORE_RAM_32MB "32 MB of RAM (Windows CE games: the whole user address s
 if(DCCORE_RAM_32MB)
   target_compile_definitions(dccore PUBLIC DC_RAM_32MB)
 endif()
+# CHD disc images (libchdr, BSD-3-Clause): fetched at a pinned commit. Offline builds can point
+# FETCHCONTENT_SOURCE_DIR_LIBCHDR at a checkout, or turn this off (.gdi / .cue still work).
+option(DCCORE_CHD "Read .chd disc images (libchdr)" ON)
+if(DCCORE_CHD)
+  include(FetchContent)
+  FetchContent_Declare(libchdr
+    GIT_REPOSITORY https://github.com/rtissera/libchdr.git
+    GIT_TAG 47d794151b2b64f6aba60304e6480f4f5a2bc24b)
+  set(CHDR_WANT_TESTS OFF CACHE BOOL "" FORCE)
+  set(INSTALL_STATIC_LIBS OFF CACHE BOOL "" FORCE)
+  set(dccore_shared ${BUILD_SHARED_LIBS})
+  set(BUILD_SHARED_LIBS OFF)                     # chdr-static only
+  FetchContent_MakeAvailable(libchdr)
+  set(BUILD_SHARED_LIBS ${dccore_shared})
+  target_link_libraries(dccore PUBLIC chdr-static)
+  target_compile_definitions(dccore PRIVATE DCCORE_CHD)
+endif()
 set(DCCORE_MSVC_JOBS 4 CACHE STRING "MSVC: generated files compiled at the same time (/MP)")
 if(MSVC)
   target_compile_definitions(dccore PUBLIC _CRT_SECURE_NO_WARNINGS)
@@ -126,12 +143,14 @@ if(DCCORE_DEMO AND TARGET dccore_front)
 endif()
 
 # dccore_add_recomp(<target> BIN <1ST_READ.BIN> FUNCS <funcs.txt> [BASE 0x8C010000] [SETJMP addr...]
-#                   [MAX_FUNC_BYTES n] [NO_DISCOVER] [PREFIX name])
+#                   [MAX_FUNC_BYTES n] [NO_DISCOVER] [PREFIX name] [FOUND <found_funcs.txt>])
 #
 # Recompiles the player's own executable at configure time and builds it as a static
 # library. The generated C is derived from the game and stays in the build directory.
+# FOUND: function starts a run found by interpreting (dc_found_funcs_path); when the file changes,
+# the next build recompiles with them. Missing is fine.
 function(dccore_add_recomp target)
-  cmake_parse_arguments(A "NO_DISCOVER" "BIN;FUNCS;BASE;MAX_FUNC_BYTES;PREFIX" "SETJMP" ${ARGN})
+  cmake_parse_arguments(A "NO_DISCOVER" "BIN;FUNCS;BASE;MAX_FUNC_BYTES;PREFIX;FOUND" "SETJMP" ${ARGN})
   if(NOT A_BASE)
     set(A_BASE 0x8C010000)
   endif()
@@ -156,6 +175,12 @@ function(dccore_add_recomp target)
   # PREFIX: a second executable of the same program (symbols PREFIX_dc_fn_table, ...; dc_use_code)
   if(A_PREFIX)
     list(APPEND sj --prefix ${A_PREFIX})
+  endif()
+  if(A_FOUND)
+    list(APPEND sj --extra-funcs ${A_FOUND})
+    if(EXISTS ${A_FOUND})
+      set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${A_FOUND})
+    endif()
   endif()
   execute_process(
     COMMAND ${DCCORE_PYTHON} ${DCCORE_DIR}/tools/recomp/sh4recomp.py ${A_BIN}
@@ -192,6 +217,21 @@ if(DCCORE_TESTS)
     target_link_libraries(test_${t} PRIVATE dccore)
     add_test(NAME ${t} COMMAND test_${t})
   endforeach()
+  # CHD: the synthetic GD-ROM as .gdi and as the .chd chdman makes of it (skipped without chdman),
+  # read by the runtime (libchdr) and by tools/disc (pure Python)
+  set(fx ${CMAKE_CURRENT_BINARY_DIR}/gd_fixture)
+  find_program(CHDMAN chdman)
+  if(CHDMAN AND NOT EXISTS ${fx}/disc.chd)
+    execute_process(COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/make_gd_fixture.py ${fx})
+    execute_process(COMMAND ${CHDMAN} createcd -i ${fx}/disc.gdi -o ${fx}/disc.chd OUTPUT_QUIET ERROR_QUIET)
+  endif()
+  add_test(NAME chd_python COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_chd.py ${fx})
+  add_test(NAME steam_shortcut COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_steam.py)
+  if(DCCORE_CHD)
+    add_executable(test_chd tests/test_chd.c)
+    target_link_libraries(test_chd PRIVATE dccore)
+    add_test(NAME chd COMMAND test_chd ${fx})
+  endif()
   if(TARGET dccore_front AND CMAKE_SYSTEM_NAME STREQUAL "Linux")   # headless GL needs Mesa
     add_executable(test_front tests/test_front.c)
     target_link_libraries(test_front PRIVATE dccore_front)

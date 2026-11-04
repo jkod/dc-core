@@ -47,6 +47,12 @@ extern uint32_t dc_loop_cost;           /* ... per backward branch (default 16);
  * The notify callback sees each interpreted address once. */
 extern int dc_interp_enabled, dc_interp_all;
 void  dc_set_interp_notify(dc_miss_fn f);                   /* cycles charged per dispatched call (default 40) */
+/* Found functions: each address in the loaded executable that had to be interpreted (no recompiled
+ * function covers it) is appended to this file once, as a hex line; give the file to
+ * dccore_add_recomp(... FOUND file) and the next build recompiles those functions too. NULL (the
+ * default) records nothing; env DC_FOUND_FUNCS sets it; the frontend puts it next to the saves.
+ * A program that switches executables (dc_use_code) points it at one file per executable. */
+extern const char *dc_found_funcs_path;
 
 #ifdef __cplusplus
 }

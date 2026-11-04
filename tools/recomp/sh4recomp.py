@@ -648,6 +648,9 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("bin"); ap.add_argument("--base", default="0x8C010000")
     ap.add_argument("--funcs", help="function start list; omit to scan the image (--scan)")
+    ap.add_argument("--extra-funcs", action="append", default=[],
+                    help="more function starts, e.g. the found-functions file a run wrote (dc_found_funcs_path); "
+                    "a missing file is skipped")
     ap.add_argument("--out", required=True)
     ap.add_argument("--write-funcs", help="save the final function list here")
     ap.add_argument("--chunk", type=int, default=150, help="functions per .c file")
@@ -667,6 +670,12 @@ def main():
     funcs = read_funcs(args.funcs, base, base + len(data)) if args.funcs else scan_functions(tr)
     if not args.funcs:
         print("scan: %d function starts" % len(funcs))
+    for ex in args.extra_funcs:
+        if os.path.exists(ex):
+            more = set(read_funcs(ex, base, base + len(data))) - set(funcs)
+            if more:
+                funcs = sorted(set(funcs) | more)
+                print("%s: %d more function starts" % (os.path.basename(ex), len(more)))
     tabs = set(bra_tables(tr)) - set(funcs)
     if FUNC_ENDS:          # exact function list: switch tables can only be inside its functions
         kn = sorted(FUNC_ENDS.items()); ks = [a for a, _ in kn]
