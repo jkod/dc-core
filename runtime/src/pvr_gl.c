@@ -22,6 +22,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stddef.h>
+#include <sys/stat.h>   /* first: newlib (Switch) #defines quad, used as a name below */
+#include "dccore/texpack.h"
 
 /* ------------------------------------------------------------------ minimal GL binding */
 typedef unsigned int GLenum, GLuint, GLbitfield; typedef int GLint, GLsizei; typedef float GLfloat;
@@ -383,8 +385,6 @@ static void ensure_fbo(int w, int h) {
  * Textures are named by a hash of their decoded pixels and size: <hash>_<w>x<h>.png. With a dump
  * folder set, every texture the game uploads is saved there once; with a pack folder set, a PNG of
  * that name there (any size, e.g. upscaled) is uploaded in its place. */
-#include <sys/stat.h>
-#include "dccore/texpack.h"
 const char *dc_pvr_gl_tex_dump;
 const char *dc_pvr_gl_tex_pack;
 unsigned long dc_pvr_gl_tex_dumped, dc_pvr_gl_tex_replaced;
