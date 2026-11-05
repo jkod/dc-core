@@ -25,6 +25,8 @@ static dc_call_hook call_hook;
 /* direct-mapped cache in front of dc_lookup (games call through registers a lot) */
 #define LCACHE 8192
 static struct { uint32_t addr; sh4fn fn; } lcache[LCACHE];
+uint32_t dc_idle_step = 20000;
+uint64_t dc_idle_skipped;
 uint32_t dc_dispatch_gen = 1;                 /* call sites (dc_site) resolve again when it changes */
 static void lcache_clear(void) { memset(lcache, 0, sizeof lcache); dc_dispatch_gen++; }
 
@@ -249,6 +251,7 @@ void dc_init(sh4ctx *c) {
     c->fpscr = 0x00040001u;             /* DN=1, RM=nearest, PR=0 SZ=0 FR=0 */
     c->vbr = 0x8C00F400u;
     { const char *e = getenv("DC_INTERP_ALL"); if (e && *e == '1') dc_interp_all = 1; }
+    { const char *e = getenv("DC_IDLE_STEP"); if (e && *e) dc_idle_step = (uint32_t)strtoul(e, NULL, 0); }
     dc_dispatch_gen++;
     { const char *e = getenv("DC_INTERP"); if (e && *e == '0') dc_interp_enabled = 0; }
     { const char *e = getenv("DC_FOUND_FUNCS"); if (e && *e) dc_found_funcs_path = e; }

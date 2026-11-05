@@ -149,6 +149,14 @@ extern uint64_t dc_next_event;
 void dc_events(struct sh4ctx *c);
 extern uint32_t dc_loop_cost;      /* cycles charged per backward branch (default 16); dc_call_cost per call */
 #define DC_TICK(c, n) do { (c)->cycles += (n); if ((c)->cycles >= dc_next_event) dc_events(c); } while (0)
+/* a poll loop (the recompiler's idle_loop: it only loads, tests and branches back) can only end when
+ * something outside it changes what it reads, so each pass lets time jump up to dc_idle_step cycles
+ * ahead (default 20000, 0.1 ms), never past the next hardware event: waiting for the next frame no
+ * longer runs the loop hundreds of thousands of times. DC_IDLE_STEP=0 turns it off. */
+extern uint32_t dc_idle_step;
+extern uint64_t dc_idle_skipped;
+#define DC_IDLE(c) do { uint64_t t_ = (c)->cycles + dc_idle_step; if (t_ > dc_next_event) t_ = dc_next_event; \
+    if (t_ > (c)->cycles) { dc_idle_skipped += t_ - (c)->cycles; (c)->cycles = t_; } DC_TICK(c, dc_loop_cost); } while (0)
 extern uint32_t dc_call_cost;
 static inline void dc_call_site(sh4ctx *c, uint32_t addr, dc_site *s) {
     DC_TICK(c, dc_call_cost);

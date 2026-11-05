@@ -54,6 +54,14 @@ void  dc_set_interp_notify(dc_miss_fn f);                   /* cycles charged pe
  * A program that switches executables (dc_use_code) points it at one file per executable. */
 extern const char *dc_found_funcs_path;
 
+/* native copy routines for a game's C library (runtime/src/crt.c): memmove / memcpy (r4 dst, r5 src,
+ * r6 bytes) and memset (r4 dst, r5 byte, r6 bytes), all returning dst in r0. orig is the recompiled
+ * routine, used when a range isn't all main RAM. */
+enum { DC_CRT_MEMMOVE, DC_CRT_MEMCPY, DC_CRT_MEMSET, DC_CRT_COUNT };
+void dc_crt_register(int which, uint32_t addr, sh4fn orig);
+/* from a port's hook on the game's idle loop (it found nothing to do): time jumps ahead, as in DC_IDLE */
+void dc_idle(sh4ctx *c);
+
 #ifdef __cplusplus
 }
 #endif

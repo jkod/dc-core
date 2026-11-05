@@ -48,6 +48,7 @@ class Translator:
         self.data = data; self.base = base; self.end = base + len(data)
         self.volatile = self._volatile_literals()
         self.setjmp = set()          # the game's setjmp routine(s): calls get DC_CALL_SETJMP
+        self.idle_loops = True       # poll loops get DC_IDLE (--no-idle-loops: plain DC_TICK)
         self.prefix = ""             # symbol prefix (a second executable: PREFIX_dc_fn_table, f_PREFIX_...)
 
     def _volatile_literals(self):
@@ -399,9 +400,57 @@ class Translator:
             return 'dc_trap(c, %s, "branch in delay slot");' % h(s.addr)
         return s.code
 
-    def goto_or_call(self, t, start, end, here=None):
+    def idle_loop(self, t, here):
+        """True if t..here (here: a bt/bf back to t, no delay slot) is a poll loop: it only loads from
+        memory, tests or compares what it loaded, and branches back. Such a loop can only end when
+        something outside it (an interrupt, a DMA, the hardware model) changes what it reads, so time
+        may jump ahead in it (DC_IDLE). Registers it writes must be set again before they are read in
+        the same pass, so skipping passes changes nothing else."""
+        if here - t > 16 or here < t:
+            return False
+        written, defined, loads = set(), set(), 0
+        ops = []
+        for a in range(t, here, 2):
+            op = self.u16(a)
+            if op is None:
+                return False
+            ops.append(op)
+        def info(op):
+            hi, n, m, lo = op >> 12, (op >> 8) & 15, (op >> 4) & 15, op & 15
+            if hi == 6 and lo in (0, 1, 2): return [m], [n], 1          # mov.x @Rm,Rn
+            if hi == 5: return [m], [n], 1                              # mov.l @(disp,Rm),Rn
+            if hi == 8 and n in (4, 5): return [m], [0], 1              # mov.b/w @(disp,Rm),R0
+            if hi == 0xC and n in (4, 5, 6): return [], [0], 1          # mov.x @(disp,GBR),R0
+            if hi == 0 and lo in (0xC, 0xD, 0xE): return [m, 0], [n], 1 # mov.x @(R0,Rm),Rn
+            if hi == 0xD: return [], [n], 0                             # mov.l @(disp,PC),Rn
+            if hi == 0xE: return [], [n], 0                             # mov #imm,Rn
+            if hi == 2 and lo == 8: return [n, m], [], 0                # tst Rm,Rn
+            if hi == 2 and lo == 9: return [n, m], [n], 0               # and Rm,Rn
+            if hi == 0xC and n in (8, 9): return [0], ([] if n == 8 else [0]), 0   # tst/and #imm,R0
+            if hi == 8 and n == 8: return [0], [], 0                    # cmp/eq #imm,R0
+            if hi == 3 and lo in (0, 2, 3, 6, 7): return [n, m], [], 0  # cmp/xx Rm,Rn
+            if hi == 4 and (op & 0xFF) in (0x11, 0x15): return [n], [], 0   # cmp/pz, cmp/pl
+            if hi == 6 and lo in (3, 0xC, 0xD, 0xE, 0xF): return [m], [n], 0  # mov, extu, exts
+            if op == 0x0009: return [], [], 0                           # nop
+            return None
+        parsed = [info(op) for op in ops]
+        if any(x is None for x in parsed):
+            return False
+        for src, dst, ld in parsed:
+            written.update(dst)
+        for src, dst, ld in parsed:
+            for r in src:
+                if r in written and r not in defined:
+                    return False                                       # carries a value from the last pass
+            defined.update(dst)
+            loads += ld
+        return loads > 0
+
+    def goto_or_call(self, t, start, end, here=None, idle=False):
         if start <= t < end and (t & 1) == 0:
             if here is not None and t <= here:          # loop: let time pass / interrupts in
+                if idle:                                # a poll loop: time may jump ahead (DC_IDLE)
+                    return "{ DC_IDLE(c); goto L_%08X; }" % t
                 return "{ DC_TICK(c, dc_loop_cost); goto L_%08X; }" % t
             return "goto L_%08X;" % t
         return "return %s;" % h(t)
@@ -414,7 +463,8 @@ class Translator:
         nxt = a + 4
         if k == "cbr":
             if not i.delayed:
-                return "if (%s) %s" % (i.cond, self.goto_or_call(i.target, start, end, a))
+                idle = self.idle_loops and i.target <= a and self.idle_loop(i.target, a)
+                return "if (%s) %s" % (i.cond, self.goto_or_call(i.target, start, end, a, idle))
             slot = self.slot_code(i, insns)
             return "{ int cc = %s; %s if (cc) %s goto L_%08X; }" % (
                 i.cond, slot, self.goto_or_call(i.target, start, end, a),
@@ -664,6 +714,7 @@ def main():
     ap.add_argument("--max-func-bytes", type=lambda x: int(x, 0), default=0x40000,
                     help="cap a function's range (protects against huge data gaps)")
     ap.add_argument("--no-discover", action="store_true")
+    ap.add_argument("--no-idle-loops", action="store_true", help="no DC_IDLE in poll loops (time doesn't jump ahead there)")
     ap.add_argument("--setjmp", action="append", default=[], type=lambda x: int(x, 0),
                     help="address of the game's setjmp (cooperative threads; see dccore/coro.h)")
     ap.add_argument("--prefix", default="", help="symbol prefix for a second executable in the same program "
@@ -673,6 +724,7 @@ def main():
     base = int(args.base, 0)
     tr = Translator(data, base)
     tr.setjmp = {(a & 0x1FFFFFFF) | 0x80000000 for a in args.setjmp}
+    tr.idle_loops = not args.no_idle_loops
     tr.prefix = args.prefix + "_" if args.prefix else ""
     funcs = read_funcs(args.funcs, base, base + len(data)) if args.funcs else scan_functions(tr)
     if not args.funcs:
