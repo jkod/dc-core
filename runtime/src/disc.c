@@ -94,7 +94,16 @@ static const uint8_t *chd_frame_at(uint32_t f) {
 #endif
 
 /* sector `k` of track `t` as stored: t->sector bytes (audio in CHDs is big-endian: swapped here) */
+void (*dc_disc_lock)(int on);          /* set when the disc is also read from another thread (CD audio) */
+static int track_sector_unlocked(track_t *t, uint32_t k, uint8_t *dst);
 static int track_sector(track_t *t, uint32_t k, uint8_t *dst) {
+    if (!dc_disc_lock) return track_sector_unlocked(t, k, dst);
+    dc_disc_lock(1);
+    int r = track_sector_unlocked(t, k, dst);
+    dc_disc_lock(0);
+    return r;
+}
+static int track_sector_unlocked(track_t *t, uint32_t k, uint8_t *dst) {
 #ifdef DCCORE_CHD
     if (t->chd) {
         const uint8_t *p = chd_frame_at(t->chd_frame + k);

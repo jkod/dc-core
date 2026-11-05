@@ -26,12 +26,16 @@ static int arm_running;
 static int tim_sub[3];                         /* sample prescaler counters for timers A/B/C */
 
 /* ---------------------------------------------------------------- interrupts */
+dc_aica_async_t dc_aica_async;
+static volatile int irq_want = -1;
 static void update_irqs(void) {
     uint32_t sci = R(0x28A0) & R(0x289C) & 0x7FF;
     arm7.fiq_line = sci != 0;
     uint32_t mci = R(0x28B8) & R(0x28B4) & 0x7FF;
-    dc_set_ext_irq(1u << 1, mci != 0);                       /* Holly ISTEXT bit 1: AICA */
+    if (dc_aica_async.advance) irq_want = mci != 0;           /* delivered on the game's thread */
+    else dc_set_ext_irq(1u << 1, mci != 0);                  /* Holly ISTEXT bit 1: AICA */
 }
+void dc_aica_apply_irq(void) { int w = irq_want; if (w >= 0) dc_set_ext_irq(1u << 1, w); }
 static void raise(uint32_t bit) { R(0x28A0) |= bit; R(0x28B8) |= bit; update_irqs(); }
 
 /* L register: level of the lowest-numbered pending enabled interrupt */
@@ -440,6 +444,7 @@ void dc_aica_advance(uint64_t now) {
     if (dc_prof_clock) dc_prof_aica += dc_prof_clock() - t0;
 }
 void dc_aica_run_samples(uint32_t n) { while (n--) sample_tick(); }
+uint64_t dc_aica_clock(void) { return sample_clock; }
 uint64_t dc_aica_next(void) { return sample_clock + 64 * (CPU_HZ / SAMPLE_HZ); }
 
 /* ---------------------------------------------------------------- registers */

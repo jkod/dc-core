@@ -5,6 +5,7 @@
 #include "dccore/hw.h"
 #include "dccore/pvr.h"
 #include "dccore/aica.h"
+#include "dccore/disc.h"
 #include "dccore/maple.h"
 #define SDL_MAIN_HANDLED
 #include <SDL.h>
@@ -389,6 +390,7 @@ static FILE *wav_file(void) {
 int dc_front_fast;
 
 static void osd_overlays(int ww, int wh);
+static int aica_audio_read(int16_t *dst, int frames);
 static void present_window(void) {
     Uint64 pt = SDL_GetPerformanceCounter();
     int dw, dh; SDL_GL_GetDrawableSize(win, &dw, &dh);
@@ -501,7 +503,7 @@ static void on_vblank(uint64_t f) {
     if (wav_file() || audio) {
         static int16_t buf[4096 * 2];
         int n;
-        while ((n = dc_aica_audio_read(buf, 4096)) > 0) {
+        while ((n = aica_audio_read(buf, 4096)) > 0) {
             if (wav) { fwrite(buf, 4, (size_t)n, wav); wav_frames += (uint32_t)n; }
             if (audio && SDL_GetQueuedAudioSize(audio) < 44100 * 4 / 5) SDL_QueueAudio(audio, buf, (Uint32)n * 4);   /* keep < 0.2 s queued */
         }
@@ -542,6 +544,76 @@ static void on_vblank(uint64_t f) {
         else if (real - emu > 0.25) { t0_count = now; t0_cycles = dc_current_ctx->cycles; }   /* too slow: don't try to catch up */
         prof_idle += SDL_GetPerformanceCounter() - idle0;
     }
+}
+
+/* ------------------------------------------------------------------ the sound chip on its own thread
+ * Its ARM7 and 64 channels run ~44,100 times a second; on the Switch that was about a third of a frame's
+ * time on the game's core. The thread runs the chip up to where the game is (aica.h: advance), and each
+ * game access to the chip waits for it to catch up there first (enter / leave), so the game sees the same
+ * chip it did inline. On by default on the Switch (its own core), DC_AICA_THREAD=1 / 0 elsewhere / to
+ * turn it off. */
+static SDL_Thread *aica_thr;
+static SDL_mutex *aica_mx, *disc_mx;
+static SDL_cond *aica_cv;
+static volatile uint64_t aica_target;
+static volatile int aica_stop;
+#ifdef __SWITCH__
+extern unsigned int svcSetThreadCoreMask(unsigned int handle, int preferred_core, unsigned int affinity_mask);
+#endif
+static int aica_thread(void *u) {
+    (void)u;
+#ifdef __SWITCH__
+    svcSetThreadCoreMask(0xFFFF8000u, 1, 1u << 1);         /* core 1; the game's thread is on core 0 */
+#endif
+    const uint64_t chunk = 64ull * 200000000ull / 44100ull; /* 64 samples a turn, then the game may get in */
+    SDL_LockMutex(aica_mx);
+    while (!aica_stop) {
+        uint64_t t = aica_target, at = dc_aica_clock();
+        if (at > t) { SDL_CondWait(aica_cv, aica_mx); continue; }
+        dc_aica_advance(t - at > chunk ? at + chunk : t);
+        SDL_CondBroadcast(aica_cv);
+        SDL_UnlockMutex(aica_mx);
+        SDL_LockMutex(aica_mx);
+    }
+    SDL_UnlockMutex(aica_mx);
+    return 0;
+}
+static void aica_async_advance(uint64_t now) {
+    if (now > aica_target) { aica_target = now; SDL_CondSignal(aica_cv); }
+}
+static void aica_async_enter(uint64_t now) {
+    SDL_LockMutex(aica_mx);
+    if (now > aica_target) aica_target = now;
+    while (dc_aica_clock() <= now) { SDL_CondSignal(aica_cv); SDL_CondWait(aica_cv, aica_mx); }
+}
+static void aica_async_leave(void) { dc_aica_apply_irq(); SDL_UnlockMutex(aica_mx); }
+static void disc_lock(int on) { if (on) SDL_LockMutex(disc_mx); else SDL_UnlockMutex(disc_mx); }
+static void aica_thread_start(void) {
+    const char *e = getenv("DC_AICA_THREAD");
+#ifdef __SWITCH__
+    int on = !(e && *e == '0');
+#else
+    int on = e && *e == '1';
+#endif
+    if (!on || aica_thr) return;
+    aica_mx = SDL_CreateMutex(); disc_mx = SDL_CreateMutex(); aica_cv = SDL_CreateCond();
+    if (!aica_mx || !disc_mx || !aica_cv) return;
+    dc_disc_lock = disc_lock;
+    dc_aica_async.advance = aica_async_advance; dc_aica_async.enter = aica_async_enter; dc_aica_async.leave = aica_async_leave;
+    aica_thr = SDL_CreateThread(aica_thread, "aica", NULL);
+    if (!aica_thr) { memset(&dc_aica_async, 0, sizeof dc_aica_async); dc_disc_lock = NULL; return; }
+    fprintf(stderr, "sound chip on its own thread\n");
+}
+static void aica_thread_stop(void) {
+    if (!aica_thr) return;
+    SDL_LockMutex(aica_mx); aica_stop = 1; SDL_CondBroadcast(aica_cv); SDL_UnlockMutex(aica_mx);
+    SDL_WaitThread(aica_thr, NULL); aica_thr = NULL;
+    memset(&dc_aica_async, 0, sizeof dc_aica_async); dc_disc_lock = NULL;
+}
+static int aica_audio_read(int16_t *dst, int frames) {
+    if (!aica_thr) return dc_aica_audio_read(dst, frames);
+    SDL_LockMutex(aica_mx); int n = dc_aica_audio_read(dst, frames); SDL_UnlockMutex(aica_mx);
+    return n;
 }
 
 static const unsigned char *app_icon;
@@ -621,6 +693,7 @@ int dc_front_open(const dc_front_config *c) {
     }
     osd_load();
     dc_prof_clock = prof_clock;
+    aica_thread_start();
     if (!cfg.no_audio) {
         SDL_AudioSpec want = {0}, have;
         want.freq = 44100; want.format = AUDIO_S16SYS; want.channels = 2;
@@ -649,6 +722,7 @@ int dc_front_open(const dc_front_config *c) {
 }
 
 void dc_front_close(void) {
+    aica_thread_stop();
     wav_close();
     for (int k = 0; k < 4; k++) if (pads[k]) SDL_GameControllerClose(pads[k]);
 #ifndef __SWITCH__

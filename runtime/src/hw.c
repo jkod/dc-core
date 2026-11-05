@@ -188,6 +188,10 @@ static int holly_level(void) {
 }
 
 void dc_raise(uint32_t istnrm_bits) { SBR(ISTNRM) |= istnrm_bits; dc_next_event = 0; }
+/* an SH-4 access to the sound chip: inline, or with the sound thread caught up and paused (aica.h) */
+static void aica_enter(uint64_t now) { if (dc_aica_async.enter) dc_aica_async.enter(now); else dc_aica_advance(now); }
+static void aica_leave(void) { if (dc_aica_async.leave) dc_aica_async.leave(); }
+
 void dc_set_ext_irq(uint32_t bit, int on) {                    /* ISTEXT is level-driven by the devices */
     uint32_t o = SBR(ISTEXT);
     SBR(ISTEXT) = on ? (o | bit) : (o & ~bit);
@@ -265,7 +269,8 @@ void dc_events(sh4ctx *c) {
     for (int ch = 0; ch < 3; ch++) tmu_sync(ch, now);
     for (int i = 0; i < evn; )
         if (evq[i].at <= now) { SBR(ISTNRM) |= evq[i].bits; evq[i] = evq[--evn]; } else i++;
-    dc_aica_advance(now);
+    if (dc_aica_async.advance) { dc_aica_apply_irq(); dc_aica_async.advance(now); }   /* the sound thread */
+    else dc_aica_advance(now);
     check_irqs(c);
     /* next event: the next vblank in/out edge or TMU underflow */
     uint64_t nx = (last_vbin_field == field) ? (field + 1) * f + (uint64_t)vbin * f / lines : at_in;
@@ -491,8 +496,8 @@ static uint32_t rd(uint32_t a, int size) {
         uint32_t t = (uint32_t)time(NULL) + 631152000u;                  /* 1950-01-01 -> 1970-01-01 */
         return (m & 4) ? (t & 0xFFFF) : (t >> 16);
     }
-    if (m >= 0x00700000u && m < 0x00710000u) { dc_aica_advance(now_cycles()); return dc_aica_read(m, size); }
-    if (m >= 0x00800000u && m < 0x00A00000u) { dc_aica_advance(now_cycles()); uint32_t v = 0; memcpy(&v, aram + (m & 0x1FFFFF), size); return v; }
+    if (m >= 0x00700000u && m < 0x00710000u) { aica_enter(now_cycles()); uint32_t v = dc_aica_read(m, size); aica_leave(); return v; }
+    if (m >= 0x00800000u && m < 0x00A00000u) { aica_enter(now_cycles()); uint32_t v = 0; memcpy(&v, aram + (m & 0x1FFFFF), size); aica_leave(); return v; }
     if ((m >> 24) == 0x04 || (m >> 24) == 0x06) { uint32_t v = 0; memcpy(&v, dc_vram + (m & 0x7FFFFF), size); return v; }
     if ((m >> 24) == 0x05 || (m >> 24) == 0x07) { uint32_t v = 0; memcpy(&v, dc_vram + (vram32(m) | (m & 3)), size); return v; }   /* 8/16-bit: byte lanes within the word */
     if (m < 0x00200000u && dc_bios_rom) { uint32_t v = 0; memcpy(&v, dc_bios_rom + m, size); return v; }   /* boot ROM */
@@ -554,7 +559,7 @@ static void wr(uint32_t a, uint32_t v, int size) {
         }
         return;
     }
-    if (m >= 0x00700000u && m < 0x00710000u) { dc_aica_advance(now_cycles()); dc_aica_write(m, v, size); if (dc_hw.on_aica_write) dc_hw.on_aica_write(m, v); dc_next_event = 0; return; }
+    if (m >= 0x00700000u && m < 0x00710000u) { aica_enter(now_cycles()); dc_aica_write(m, v, size); aica_leave(); if (dc_hw.on_aica_write) dc_hw.on_aica_write(m, v); dc_next_event = 0; return; }
     if (m >= 0x00800000u && m < 0x00A00000u) { memcpy(aram + (m & 0x1FFFFF), &v, size); if (dc_hw.on_aica_write) dc_hw.on_aica_write(m, v); return; }
     if ((m >> 24) == 0x04 || (m >> 24) == 0x06) { memcpy(dc_vram + (m & 0x7FFFFF), &v, size); VRAM_TOUCH(m); return; }
     if ((m >> 24) == 0x05 || (m >> 24) == 0x07) { memcpy(dc_vram + (vram32(m) | (m & 3)), &v, size); VRAM_TOUCH(vram32(m)); VRAM32_TOUCH(m); return; }

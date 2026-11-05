@@ -12,6 +12,7 @@ void dc_disc_close(void);
 int  dc_disc_read(uint32_t lba, uint32_t count, uint8_t *dst);
 /* Read raw 2352-byte sectors (CD audio tracks) starting at image LBA `lba`. */
 int  dc_disc_read_raw(uint32_t lba, uint32_t count, uint8_t *dst);
+extern void (*dc_disc_lock)(int on);   /* the frontend sets it when the sound thread reads CD audio too */
 int  dc_disc_track_count(void);
 int  dc_disc_track_info(int i, uint32_t *lba, int *is_data, uint32_t *sectors);
 /* LBA of IP.BIN and the file system: 45000 (high-density area) on a GD-ROM, the last session's data
