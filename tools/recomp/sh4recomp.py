@@ -424,11 +424,18 @@ class Translator:
         if k == "bra":
             return "{ %s %s }" % (slot, self.goto_or_call(i.target, start, end, a))
         if k == "bsr":
-            call = "DC_CALL_SETJMP" if i.target in self.setjmp else "dc_call"
-            return "{ c->pr = %s; %s %s(c, %s); %s }" % (h(nxt), slot, call, h(i.target), self._after_call(nxt, end))
+            if i.target in self.setjmp:
+                return "{ c->pr = %s; %s DC_CALL_SETJMP(c, %s); %s }" % (h(nxt), slot, h(i.target), self._after_call(nxt, end))
+            # a fixed target: the call site keeps what it resolves to (dc_call_site)
+            return "{ static dc_site s_; c->pr = %s; %s dc_call_site(c, %s, &s_); %s }" % (h(nxt), slot, h(i.target), self._after_call(nxt, end))
         if k == "jsr":
-            call = "DC_CALL_SETJMP" if self.setjmp and self._reg_const(insns, a, i.reg, start) in self.setjmp else "dc_call"
-            return "{ uint32_t t_ = %s; c->pr = %s; %s %s(c, t_); %s }" % (R(i.reg), h(nxt), slot, call, self._after_call(nxt, end))
+            v = self._reg_const(insns, a, i.reg, start)
+            if self.setjmp and v in self.setjmp:
+                return "{ uint32_t t_ = %s; c->pr = %s; %s DC_CALL_SETJMP(c, t_); %s }" % (R(i.reg), h(nxt), slot, self._after_call(nxt, end))
+            if v is not None:                           # register just loaded with a constant: checked, then cached
+                return "{ static dc_site s_; uint32_t t_ = %s; c->pr = %s; %s if (((t_ & 0x1FFFFFFFu) | 0x80000000u) == %s) dc_call_site(c, %s, &s_); else dc_call(c, t_); %s }" % (
+                    R(i.reg), h(nxt), slot, h(v), h(v), self._after_call(nxt, end))
+            return "{ uint32_t t_ = %s; c->pr = %s; %s dc_call(c, t_); %s }" % (R(i.reg), h(nxt), slot, self._after_call(nxt, end))
         if k == "bsrf":
             return "{ uint32_t t_ = %s + %s; c->pr = %s; %s dc_call(c, t_); %s }" % (R(i.reg), h(nxt), h(nxt), slot, self._after_call(nxt, end))
         if k == "rts":

@@ -96,6 +96,14 @@ static inline void  dc_wrf(uint32_t a, float f) { uint32_t u; memcpy(&u, &f, 4);
 typedef uint32_t (*sh4fn)(sh4ctx *c);
 /* Call guest code at `addr` and run until it returns. */
 void dc_call(sh4ctx *c, uint32_t addr);
+/* a call to a fixed address (bsr, or jsr through a register just loaded with a constant): each call site
+ * keeps the function it resolved to, so the dispatcher's lookup, address folding and alias scan run once
+ * per site instead of on every call. dc_dispatch_gen changes whenever what an address resolves to can
+ * change (an HLE hook, an alias, another executable, a call hook), and the site resolves again. */
+typedef struct { uint32_t gen, entry; sh4fn fn; } dc_site;
+extern uint32_t dc_dispatch_gen;
+int  dc_site_resolve(dc_site *s, uint32_t addr);
+void dc_call_ticked(sh4ctx *c, uint32_t addr);      /* dc_call with the first call's time already charged */
 /* Called for things the recompiler cannot do statically (trapa, sleep, rte, unknown opcodes). */
 void dc_trap(sh4ctx *c, uint32_t pc, const char *what);
 
@@ -141,6 +149,14 @@ extern uint64_t dc_next_event;
 void dc_events(struct sh4ctx *c);
 extern uint32_t dc_loop_cost;      /* cycles charged per backward branch (default 16); dc_call_cost per call */
 #define DC_TICK(c, n) do { (c)->cycles += (n); if ((c)->cycles >= dc_next_event) dc_events(c); } while (0)
+extern uint32_t dc_call_cost;
+static inline void dc_call_site(sh4ctx *c, uint32_t addr, dc_site *s) {
+    DC_TICK(c, dc_call_cost);
+    if (s->gen != dc_dispatch_gen && !dc_site_resolve(s, addr)) { dc_call_ticked(c, addr); return; }
+    c->entry = s->entry;
+    uint32_t n = s->fn(c);
+    if (n) dc_call(c, n);
+}
 static inline void sh4_swap_fbank(sh4ctx *c) {
     uint32_t tmp[16];
     memcpy(tmp, &c->fr.u[0], 64); memcpy(&c->fr.u[0], &c->fr.u[16], 64); memcpy(&c->fr.u[16], tmp, 64);

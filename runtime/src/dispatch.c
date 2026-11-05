@@ -25,7 +25,8 @@ static dc_call_hook call_hook;
 /* direct-mapped cache in front of dc_lookup (games call through registers a lot) */
 #define LCACHE 8192
 static struct { uint32_t addr; sh4fn fn; } lcache[LCACHE];
-static void lcache_clear(void) { memset(lcache, 0, sizeof lcache); }
+uint32_t dc_dispatch_gen = 1;                 /* call sites (dc_site) resolve again when it changes */
+static void lcache_clear(void) { memset(lcache, 0, sizeof lcache); dc_dispatch_gen++; }
 
 void dc_hle_register(uint32_t addr, sh4fn fn) {
     lcache_clear();
@@ -52,7 +53,7 @@ static sh4fn lookup_range(uint32_t addr) {
 }
 void dc_set_miss_handler(dc_miss_fn f) { miss_handler = f; }
 void dc_set_trap_handler(dc_trap_fn f) { trap_handler = f; }
-void dc_set_call_hook(dc_call_hook f) { call_hook = f; }
+void dc_set_call_hook(dc_call_hook f) { call_hook = f; dc_dispatch_gen++; }
 
 /* ---- runtime-copied code: RAM ranges that hold a copy of code from the executable ---- */
 #define MAX_ALIAS 64
@@ -176,9 +177,22 @@ static sh4fn lookup_hle(uint32_t addr) {
     return lookup_range(addr);
 }
 
-void dc_call(sh4ctx *c, uint32_t addr) {
+static void call_loop(sh4ctx *c, uint32_t addr, int ticked);
+void dc_call(sh4ctx *c, uint32_t addr) { call_loop(c, addr, 0); }
+void dc_call_ticked(sh4ctx *c, uint32_t addr) { call_loop(c, addr, 1); }
+int dc_site_resolve(dc_site *s, uint32_t addr) {
+    if (call_hook || dc_interp_all) return 0;                /* every call must go through dc_call */
+    sh4fn f = dc_lookup(addr);
+    if (!f) return 0;
+    uint32_t e = (addr & 0x1FFFFFFFu) | 0x80000000u;
+    for (int i = 0; i < alias_n; i++)
+        if (e - alias[i].dst < alias[i].len) { e = alias[i].src + (e - alias[i].dst); break; }
+    s->fn = f; s->entry = e; s->gen = dc_dispatch_gen;
+    return 1;
+}
+static void call_loop(sh4ctx *c, uint32_t addr, int ticked) {
     while (addr) {
-        DC_TICK(c, dc_call_cost);
+        if (ticked) ticked = 0; else DC_TICK(c, dc_call_cost);
         if (call_hook) call_hook(c, addr);
         sh4fn f = dc_interp_all ? lookup_hle(addr) : dc_lookup(addr);
         if (!f && !dc_interp_all && img_end && ((addr & 0x1FFFFFFFu) | 0x80000000u) - img_base >= img_end - img_base) {
@@ -235,6 +249,7 @@ void dc_init(sh4ctx *c) {
     c->fpscr = 0x00040001u;             /* DN=1, RM=nearest, PR=0 SZ=0 FR=0 */
     c->vbr = 0x8C00F400u;
     { const char *e = getenv("DC_INTERP_ALL"); if (e && *e == '1') dc_interp_all = 1; }
+    dc_dispatch_gen++;
     { const char *e = getenv("DC_INTERP"); if (e && *e == '0') dc_interp_enabled = 0; }
     { const char *e = getenv("DC_FOUND_FUNCS"); if (e && *e) dc_found_funcs_path = e; }
 }
