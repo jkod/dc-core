@@ -61,7 +61,7 @@ static const struct { char c; uint8_t r[7]; } osd_font[] = {
     { 'Z', { 0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F } },
 };
 #define OSD_W 200
-#define OSD_ITEMS 9
+#define OSD_ITEMS 10
 static int osd_scan, osd_fps, osd_boost;
 static int osd_rumble[4] = { 2, 2, 2, 2 };   /* per port: 0 off, 1 low, 2 normal, 3 strong */
 static int osd_port;                         /* the port whose controller opened the menu (keyboard: A) */
@@ -70,7 +70,7 @@ static float osd_rumble_scale(int port) {
     return port >= 0 && port < 4 ? k[osd_rumble[port] & 3] : 1.0f;
 }
 static char osd_cfg_path[1024];
-static uint8_t osd_px[OSD_W * 160 * 4];
+static uint8_t osd_px[OSD_W * 192 * 4];
 static int osd_h;
 static float fps_now;
 static char fps_detail[48];
@@ -87,6 +87,7 @@ static void osd_load(void) {
         if (!strncmp(line, "scanlines=", 10)) osd_scan = atoi(line + 10) & 3;
         if (!strncmp(line, "fps=", 4)) osd_fps = atoi(line + 4) != 0;
         if (!strncmp(line, "boost=", 6)) osd_boost = atoi(line + 6) != 0;
+        if (!strncmp(line, "framerate=", 10) && dc_front_fps60 >= 0) dc_front_fps60 = atoi(line + 10) >= 60;
         if (!strncmp(line, "rumble_", 7) && line[7] >= 'a' && line[7] <= 'd' && line[8] == '=') osd_rumble[line[7] - 'a'] = atoi(line + 9) & 3;
     }
     fclose(f);
@@ -100,6 +101,7 @@ static void osd_save(void) {
     FILE *f = fopen(osd_cfg_path, "w");
     if (!f) return;
     fprintf(f, "scanlines=%d\nfps=%d\nboost=%d\n", osd_scan, osd_fps, osd_boost);
+    if (dc_front_fps60 >= 0) fprintf(f, "framerate=%d\n", dc_front_fps60 ? 60 : 30);
     for (int p = 0; p < 4; p++) fprintf(f, "rumble_%c=%d\n", 'a' + p, osd_rumble[p]);
     fclose(f);
 }
@@ -140,6 +142,9 @@ static const char *osd_label(int i, char *buf, size_t n) {
 #else
     case 7: snprintf(buf, n, "FULLSCREEN    < %s >", cfg.fullscreen ? "ON" : "OFF"); return buf;
 #endif
+    case 8:                                               /* only for a port that offers both */
+        if (dc_front_fps60 < 0) return "";
+        snprintf(buf, n, "FRAME RATE    < %s >", dc_front_fps60 ? "60" : "30"); return buf;
     default: return "QUIT";
     }
 }
@@ -326,7 +331,8 @@ static void osd_run(int port) {
 #else
             if (sel == 7) { cfg.fullscreen = !cfg.fullscreen; SDL_SetWindowFullscreen(win, cfg.fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0); }
 #endif
-            if (sel == 8 && (down & DC_BTN_A)) { dc_front_close(); exit(0); }
+            if (sel == 8 && dc_front_fps60 >= 0) { dc_front_fps60 = !dc_front_fps60; osd_save(); }
+            if (sel == 9 && (down & DC_BTN_A)) { dc_front_close(); exit(0); }
         }
         osd_paint(sel);
     }

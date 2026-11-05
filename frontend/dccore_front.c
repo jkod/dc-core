@@ -315,6 +315,7 @@ static void screenshot_to(const char *path) {
 }
 static void screenshot(void) { screenshot_to(NULL); }
 
+int dc_front_fps60 = -1;
 static int osd_open, osd_req;                              /* the on-screen menu (dccore_osd.inc.c) */
 static void events(void) {
     SDL_Event e;

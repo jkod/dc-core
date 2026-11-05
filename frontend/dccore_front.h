@@ -40,6 +40,10 @@ typedef struct {
     int no_rumble;              /* no Jump Pack in the controllers (by default each has one, and its
                                    effects rumble the host's gamepad); DC_NO_RUMBLE=1 does the same */
 } dc_front_config;
+/* frame rate choice in the on-screen menu: a port that can run at 60 or 30 fps sets this to 1 or 0 (its
+ * default) before dc_front_open and follows it every field; -1 (the default) hides the menu item. A choice
+ * made in the menu is kept in osd.cfg and replaces the port's default at the next start. */
+extern int dc_front_fps60;
 int  dc_front_open(const dc_front_config *cfg);   /* 0 = ok */
 int  dc_front_open_icon(const dc_front_config *cfg, const unsigned char *icon_rgba32x32);
 /* a player built with an ICON (dccore_add_player) shows the game's VMU icon on its window */
