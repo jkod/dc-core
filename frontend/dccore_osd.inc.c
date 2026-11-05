@@ -73,7 +73,7 @@ static char osd_cfg_path[1024];
 static uint8_t osd_px[OSD_W * 192 * 4];
 static int osd_h;
 static float fps_now;
-static char fps_detail[48];
+static char fps_detail[48], fps_sound[48];
 
 static void osd_load(void) {
     char *dir = SDL_GetPrefPath("dc-core", cfg.save_name ? cfg.save_name : "default");
@@ -174,14 +174,16 @@ static void osd_overlays(int ww, int wh) {
         dc_pvr_gl_overlay(osd_px, OSD_W, osd_h, (ww - OSD_W * k) / 2, (wh - osd_h * k) / 2, OSD_W * k, osd_h * k, ww, wh);
     }
     if (osd_fps) {                                        /* frames a second, and where the time goes */
-        enum { FW = 140, FH = 20 };
+        enum { FW = 140, FH = 29 };
         static uint8_t px[FW * FH * 4];
         char s[16]; snprintf(s, sizeof s, "%.0f FPS", fps_now);
         memset(px, 0, sizeof px);
-        int w1 = (int)strlen(s) * 6 + 3, w2 = (int)strlen(fps_detail) * 6 + 3, w = w1 > w2 ? w1 : w2;
+        int w1 = (int)strlen(s) * 6 + 3, w2 = (int)strlen(fps_detail) * 6 + 3, w3 = (int)strlen(fps_sound) * 6 + 3;
+        int w = w1 > w2 ? w1 : w2; if (w3 > w) w = w3;
         osd_fill(px, FW, 0, 0, w < FW ? w : FW, FH, 0x000000A0u);
         osd_text(px, FW, FH, 2, 2, s, 0x7CFF7CFFu);
         osd_text(px, FW, FH, 2, 11, fps_detail, 0xC8D2DCFFu);
+        osd_text(px, FW, FH, 2, 20, fps_sound, 0xA0AAB4FFu);
         int k = wh / 360; if (k < 2) k = 2;
         dc_pvr_gl_overlay(px, FW, FH, 8, 8, FW * k, FH * k, ww, wh);
     }
@@ -190,20 +192,28 @@ static void osd_overlays(int ww, int wh) {
  * S the sound chip, R rendering, P presenting (with vsync, waiting for the display), I pacing sleeps */
 
 static void osd_count_frame(void) {
-    static Uint64 t0, a0, r0t, p0, i0; static unsigned long r0;
+    static Uint64 t0, a0, r0t, p0, i0, w0, ar0, ds0; static unsigned long r0;
     Uint64 now = SDL_GetPerformanceCounter();
-    if (!t0) { t0 = now; r0 = renders; a0 = dc_prof_aica; r0t = prof_render; p0 = prof_present; i0 = prof_idle; return; }
+    if (!t0) { t0 = now; r0 = renders; a0 = dc_prof_aica; r0t = prof_render; p0 = prof_present; i0 = prof_idle; w0 = prof_wait;
+               ar0 = dc_prof_aica_arm; ds0 = dc_prof_aica_dsp; return; }
     double f = (double)SDL_GetPerformanceFrequency(), dt = (double)(now - t0) / f;
     if (dt < 0.5) return;
     unsigned long fr = renders - r0;
     fps_now = (float)(fr / dt);
     double per = fr ? 1000.0 / f / (double)fr : 0;
     double a = (double)(dc_prof_aica - a0) * per, r = (double)(prof_render - r0t) * per, p = (double)(prof_present - p0) * per,
-           i = (double)(prof_idle - i0) * per, tot = fr ? dt * 1000.0 / (double)fr : 0, g = tot - a - r - p - i;
-    snprintf(fps_detail, sizeof fps_detail, "G%.0f S%.0f R%.0f P%.0f I%.0f", g < 0 ? 0 : g, a, r, p, i);
-    if (cfg.stats) fprintf(stderr, "dc-core: %.1f fps, ms a frame: game %.1f, sound %.1f, render %.1f, present %.1f, idle %.1f\n",
-                           fps_now, g < 0 ? 0 : g, a, r, p, i);
-    t0 = now; r0 = renders; a0 = dc_prof_aica; r0t = prof_render; p0 = prof_present; i0 = prof_idle;
+           i = (double)(prof_idle - i0) * per, w = (double)(prof_wait - w0) * per, tot = fr ? dt * 1000.0 / (double)fr : 0,
+           arm = (double)(dc_prof_aica_arm - ar0) * per, dsp = (double)(dc_prof_aica_dsp - ds0) * per;
+    /* with the sound chip on its own thread its time isn't the game thread's; W is the game waiting for it */
+    double g = tot - r - p - i - (aica_thr ? w : a);
+    if (aica_thr) snprintf(fps_detail, sizeof fps_detail, "G%.0f W%.0f R%.0f P%.0f I%.0f", g < 0 ? 0 : g, w, r, p, i);
+    else snprintf(fps_detail, sizeof fps_detail, "G%.0f S%.0f R%.0f P%.0f I%.0f", g < 0 ? 0 : g, a, r, p, i);
+    snprintf(fps_sound, sizeof fps_sound, "S%.0f ARM%.0f DSP%.0f MIX%.0f%s", a, arm, dsp, a - arm - dsp > 0 ? a - arm - dsp : 0,
+             aica_thr ? " THREAD" : "");
+    if (cfg.stats) fprintf(stderr, "dc-core: %.1f fps, ms a frame: game %.1f, wait %.1f, render %.1f, present %.1f, idle %.1f; sound %.1f (arm %.1f, dsp %.1f)%s\n",
+                           fps_now, g < 0 ? 0 : g, w, r, p, i, a, arm, dsp, aica_thr ? " on its own thread" : "");
+    t0 = now; r0 = renders; a0 = dc_prof_aica; r0t = prof_render; p0 = prof_present; i0 = prof_idle; w0 = prof_wait;
+    ar0 = dc_prof_aica_arm; ds0 = dc_prof_aica_dsp;
     if (osd_fps) need_present = 1;
 }
 

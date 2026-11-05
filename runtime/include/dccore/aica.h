@@ -11,7 +11,7 @@ void     dc_aica_advance(uint64_t sh4_cycles);       /* run samples (and the ARM
 /* profiling: with dc_prof_clock set (the frontend sets it for Show FPS / --stats), the time spent in the
  * sound chip (its ARM7 and the channels), in dc_prof_clock units */
 extern uint64_t (*dc_prof_clock)(void);
-extern uint64_t dc_prof_aica;
+extern uint64_t dc_prof_aica, dc_prof_aica_arm, dc_prof_aica_dsp;   /* all, its ARM7, its effects DSP */
 /* the sound chip on its own thread (the frontend runs it, see dccore_front.c): with these set, the event
  * loop only tells the thread how far it may run (advance), and each SH-4 access to the chip's registers
  * or a read of its RAM is bracketed by enter (the thread catches up to `now` and pauses) and leave. The

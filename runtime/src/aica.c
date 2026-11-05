@@ -392,7 +392,8 @@ static void mix_sample(void) {
         if (dipan & 16) gr *= pan == 15 ? 0.f : gain(32 * pan); else gl *= pan == 15 ? 0.f : gain(32 * pan);
         l += gl; r += gr;
     }
-    dsp_step();
+    if (dc_prof_clock) { uint64_t t = dc_prof_clock(); dsp_step(); dc_prof_aica_dsp += dc_prof_clock() - t; }
+    else dsp_step();
     for (int i = 0; i < 16; i++) {                                   /* effect returns */
         if (!dsp.efreg[i]) continue;
         uint32_t e = R(0x2000 + i * 4) & 0xFFFF, efsdl = (e >> 8) & 15, efpan = e & 31;
@@ -450,7 +451,10 @@ static void arm_slice(void) {
     arm7_run(quiet > ARM_QUIET ? ARM_CYCLES_PER_SAMPLE / ARM_IDLE_DIV : ARM_CYCLES_PER_SAMPLE);
 }
 static void sample_tick(void) {
-    if (arm_running) arm_slice();
+    if (arm_running) {
+        if (dc_prof_clock) { uint64_t t = dc_prof_clock(); arm_slice(); dc_prof_aica_arm += dc_prof_clock() - t; }
+        else arm_slice();
+    }
     mix_sample();
     advance_channels();
     for (int t = 0; t < 3; t++) {
@@ -466,7 +470,7 @@ static void sample_tick(void) {
 }
 
 uint64_t (*dc_prof_clock)(void);
-uint64_t dc_prof_aica;
+uint64_t dc_prof_aica, dc_prof_aica_arm, dc_prof_aica_dsp;
 void dc_aica_advance(uint64_t now) {
     const uint64_t per = CPU_HZ / SAMPLE_HZ;
     if (now < sample_clock) return;

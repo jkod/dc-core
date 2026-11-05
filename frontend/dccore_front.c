@@ -317,6 +317,8 @@ static void screenshot_to(const char *path) {
 static void screenshot(void) { screenshot_to(NULL); }
 
 int dc_front_fps60 = -1;
+static SDL_Thread *aica_thr;                               /* the sound chip's thread (below) */
+static Uint64 prof_wait;                                    /* the game waiting for it */
 static int osd_open, osd_req;                              /* the on-screen menu (dccore_osd.inc.c) */
 static void events(void) {
     SDL_Event e;
@@ -552,7 +554,6 @@ static void on_vblank(uint64_t f) {
  * game access to the chip waits for it to catch up there first (enter / leave), so the game sees the same
  * chip it did inline. On by default on the Switch (its own core), DC_AICA_THREAD=1 / 0 elsewhere / to
  * turn it off. */
-static SDL_Thread *aica_thr;
 static SDL_mutex *aica_mx, *disc_mx;
 static SDL_cond *aica_cv;
 static volatile uint64_t aica_target;
@@ -582,9 +583,11 @@ static void aica_async_advance(uint64_t now) {
     if (now > aica_target) { aica_target = now; SDL_CondSignal(aica_cv); }
 }
 static void aica_async_enter(uint64_t now) {
+    Uint64 t = SDL_GetPerformanceCounter();
     SDL_LockMutex(aica_mx);
     if (now > aica_target) aica_target = now;
     while (dc_aica_clock() <= now) { SDL_CondSignal(aica_cv); SDL_CondWait(aica_cv, aica_mx); }
+    prof_wait += SDL_GetPerformanceCounter() - t;
 }
 static void aica_async_leave(void) { dc_aica_apply_irq(); SDL_UnlockMutex(aica_mx); }
 static void disc_lock(int on) { if (on) SDL_LockMutex(disc_mx); else SDL_UnlockMutex(disc_mx); }
