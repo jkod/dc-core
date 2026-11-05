@@ -203,8 +203,16 @@ function(dccore_add_recomp target)
     # ran out of memory and the build stopped with D8040
     target_compile_options(${target} PRIVATE /bigobj /w /MP${DCCORE_MSVC_JOBS})
   else()
-    # -O1 keeps compile times sane, aliasing must stay off
-    target_compile_options(${target} PRIVATE -O1 -w -fno-strict-aliasing)
+    # -O1 keeps compile times sane, aliasing must stay off. On the Switch the game is CPU-bound:
+    # -O2 there (DCCORE_RECOMP_OPT overrides, e.g. -O1 for a quicker build)
+    if(NOT DCCORE_RECOMP_OPT)
+      if(CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch" OR NINTENDO_SWITCH)
+        set(DCCORE_RECOMP_OPT -O2)
+      else()
+        set(DCCORE_RECOMP_OPT -O1)
+      endif()
+    endif()
+    target_compile_options(${target} PRIVATE ${DCCORE_RECOMP_OPT} -w -fno-strict-aliasing)
   endif()
 endfunction()
 

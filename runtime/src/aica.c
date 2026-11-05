@@ -428,12 +428,16 @@ static void sample_tick(void) {
     raise(1u << 10);                                          /* one-sample interval */
 }
 
+uint64_t (*dc_prof_clock)(void);
+uint64_t dc_prof_aica;
 void dc_aica_advance(uint64_t now) {
     const uint64_t per = CPU_HZ / SAMPLE_HZ;
     if (now < sample_clock) return;
+    uint64_t t0 = dc_prof_clock ? dc_prof_clock() : 0;
     uint64_t n = (now - sample_clock) / per + 1;
     if (n > 4410) { sample_clock = now - 4410 * per; n = 4410; }   /* never fall more than 0.1 s behind */
     while (n--) { sample_tick(); sample_clock += per; }
+    if (dc_prof_clock) dc_prof_aica += dc_prof_clock() - t0;
 }
 void dc_aica_run_samples(uint32_t n) { while (n--) sample_tick(); }
 uint64_t dc_aica_next(void) { return sample_clock + 64 * (CPU_HZ / SAMPLE_HZ); }

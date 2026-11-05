@@ -60,6 +60,16 @@ static void pad_close(SDL_JoystickID id) {
 }
 #ifdef __SWITCH__
 static SDL_Joystick *joy;
+/* libnx: the CPU boost mode (1785 MHz instead of 1020; the system may lower the GPU clock in it), set
+ * from the on-screen menu (CPU BOOST) and kept in osd.cfg */
+extern unsigned int appletSetCpuBoostMode(int mode);
+static int boosted;
+static void set_boost(int on) {
+    if (on == boosted) return;
+    unsigned int rc = appletSetCpuBoostMode(on ? 1 : 0);
+    if (rc == 0) boosted = on;
+    fprintf(stderr, "CPU boost %s%s\n", on ? "on" : "off", rc ? " (refused: start from a game, not the Album)" : "");
+}
 #else
 /* a joystick SDL has no gamepad mapping for: buttons 0-3 = A B X Y, 7 or 9 = Start, axes 0/1 = stick,
  * axes 2/5 or 4/5 = triggers, hat 0 = d-pad (the usual XInput/DirectInput layout); it drives the
@@ -127,6 +137,10 @@ static int shows_render(void) {
     return 0;
 }
 
+/* where the time goes (Show FPS, --stats): rendering, presenting (with vsync: waiting for the display),
+ * pacing sleeps; the sound chip in dc_prof_aica; the rest is the game's own code */
+static Uint64 prof_render, prof_present, prof_idle;
+static uint64_t prof_clock(void) { return SDL_GetPerformanceCounter(); }
 static void on_render(void) {
     /* clip 0..0 (Soulcalibur's VS screen while the stage loads): nothing is drawn, the picture stays */
     if (dc_pvr_clip_empty()) { renders++; last_render_frame = (unsigned long)vblanks; return; }
@@ -148,7 +162,7 @@ static void on_render(void) {
         static uint8_t rgb[1280 * 1024 * 3]; int w, h;
         dc_pvr_sw_render();
         if (dc_pvr_display(rgb, 1280, 1024, &w, &h) == 0) dc_pvr_gl_load_rgb(rgb, w, h);
-    } else dc_pvr_gl_render(cfg.scale);
+    } else { Uint64 t = SDL_GetPerformanceCounter(); dc_pvr_gl_render(cfg.scale); prof_render += SDL_GetPerformanceCounter() - t; }
     note_render_target();
     need_present = 1;
     renders++; last_render_frame = (unsigned long)vblanks;
@@ -375,6 +389,7 @@ int dc_front_fast;
 
 static void osd_overlays(int ww, int wh);
 static void present_window(void) {
+    Uint64 pt = SDL_GetPerformanceCounter();
     int dw, dh; SDL_GL_GetDrawableSize(win, &dw, &dh);
     /* the window's shape, also in 4:3: the widescreen target uses it (the next frame fills the window),
      * and a port can keep its culling widened to it in 4:3 too, so switching to widescreen in the menu
@@ -385,6 +400,7 @@ static void present_window(void) {
     if (shot_window() && dw * dh <= 1920 * 1080 * 4) { dc_pvr_gl_read_window(win_rgb, dw, dh); win_rgb_w = dw; win_rgb_h = dh; }
     SDL_GL_SwapWindow(win);
     need_present = 0;
+    prof_present += SDL_GetPerformanceCounter() - pt;
 }
 
 /* the game pauses and goes quiet while its window is not focused (another window clicked, minimised,
@@ -496,7 +512,7 @@ static void on_vblank(uint64_t f) {
     /* pacing: emulated SH-4 time (200 MHz) against the wall clock */
     if (dc_front_fast) { paced = 0; return; }              /* fast-forward: no pacing, resynchronised after */
     if (!cfg.no_pacing && dc_current_ctx) {
-        Uint64 freq = SDL_GetPerformanceFrequency(), now = SDL_GetPerformanceCounter();
+        Uint64 freq = SDL_GetPerformanceFrequency(), now = SDL_GetPerformanceCounter(), idle0 = now;
         if (!paced) { t0_count = now; t0_cycles = dc_current_ctx->cycles; paced = 1; return; }
         double emu = (double)(dc_current_ctx->cycles - t0_cycles) / 200e6, real = (double)(now - t0_count) / (double)freq;
         /* with vsync the swap already waits for the display; sleep only when more than a field ahead
@@ -523,6 +539,7 @@ static void on_vblank(uint64_t f) {
         }
         else if (emu > real + ahead) SDL_Delay((Uint32)((emu - real - ahead) * 1000.0));
         else if (real - emu > 0.25) { t0_count = now; t0_cycles = dc_current_ctx->cycles; }   /* too slow: don't try to catch up */
+        prof_idle += SDL_GetPerformanceCounter() - idle0;
     }
 }
 
@@ -602,6 +619,7 @@ int dc_front_open(const dc_front_config *c) {
         if (dir) { snprintf(found, sizeof found, "%sfound_funcs.txt", dir); dc_found_funcs_path = found; SDL_free(dir); }
     }
     osd_load();
+    dc_prof_clock = prof_clock;
     if (!cfg.no_audio) {
         SDL_AudioSpec want = {0}, have;
         want.freq = 44100; want.format = AUDIO_S16SYS; want.channels = 2;
@@ -638,6 +656,7 @@ void dc_front_close(void) {
 #ifdef __SWITCH__
     if (joy) SDL_JoystickClose(joy);
     joy = NULL;
+    set_boost(0);
 #endif
     if (audio) SDL_CloseAudioDevice(audio);
     if (glc) SDL_GL_DeleteContext(glc);

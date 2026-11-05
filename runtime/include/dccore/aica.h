@@ -8,6 +8,10 @@ extern uint8_t dc_aram[0x200000];                    /* sound RAM */
 uint32_t dc_aica_read(uint32_t ofs, int size);       /* ofs: 0x0000..0xFFFF in the register space */
 void     dc_aica_write(uint32_t ofs, uint32_t v, int size);
 void     dc_aica_advance(uint64_t sh4_cycles);       /* run samples (and the ARM) up to this time */
+/* profiling: with dc_prof_clock set (the frontend sets it for Show FPS / --stats), the time spent in the
+ * sound chip (its ARM7 and the channels), in dc_prof_clock units */
+extern uint64_t (*dc_prof_clock)(void);
+extern uint64_t dc_prof_aica;
 uint64_t dc_aica_next(void);                         /* when it next needs to run */
 int      dc_aica_arm_running(void);
 /* run n samples (and the ARM) now, outside the SH-4's time: a boot step that lets the sound CPU's

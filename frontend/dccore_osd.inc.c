@@ -62,7 +62,7 @@ static const struct { char c; uint8_t r[7]; } osd_font[] = {
 };
 #define OSD_W 200
 #define OSD_ITEMS 9
-static int osd_scan, osd_fps;
+static int osd_scan, osd_fps, osd_boost;
 static int osd_rumble[4] = { 2, 2, 2, 2 };   /* per port: 0 off, 1 low, 2 normal, 3 strong */
 static int osd_port;                         /* the port whose controller opened the menu (keyboard: A) */
 static float osd_rumble_scale(int port) {
@@ -73,6 +73,7 @@ static char osd_cfg_path[1024];
 static uint8_t osd_px[OSD_W * 160 * 4];
 static int osd_h;
 static float fps_now;
+static char fps_detail[48];
 
 static void osd_load(void) {
     char *dir = SDL_GetPrefPath("dc-core", cfg.save_name ? cfg.save_name : "default");
@@ -85,16 +86,20 @@ static void osd_load(void) {
     while (fgets(line, sizeof line, f)) {
         if (!strncmp(line, "scanlines=", 10)) osd_scan = atoi(line + 10) & 3;
         if (!strncmp(line, "fps=", 4)) osd_fps = atoi(line + 4) != 0;
+        if (!strncmp(line, "boost=", 6)) osd_boost = atoi(line + 6) != 0;
         if (!strncmp(line, "rumble_", 7) && line[7] >= 'a' && line[7] <= 'd' && line[8] == '=') osd_rumble[line[7] - 'a'] = atoi(line + 9) & 3;
     }
     fclose(f);
     dc_pvr_gl_scanlines = osd_scan;
+#ifdef __SWITCH__
+    if (osd_boost) set_boost(1);
+#endif
 }
 static void osd_save(void) {
     if (!osd_cfg_path[0]) return;
     FILE *f = fopen(osd_cfg_path, "w");
     if (!f) return;
-    fprintf(f, "scanlines=%d\nfps=%d\n", osd_scan, osd_fps);
+    fprintf(f, "scanlines=%d\nfps=%d\nboost=%d\n", osd_scan, osd_fps, osd_boost);
     for (int p = 0; p < 4; p++) fprintf(f, "rumble_%c=%d\n", 'a' + p, osd_rumble[p]);
     fclose(f);
 }
@@ -131,7 +136,7 @@ static const char *osd_label(int i, char *buf, size_t n) {
         if (cfg.no_rumble) return "";
         snprintf(buf, n, "RUMBLE PAD %c  < %s >", 'A' + osd_port, rum[osd_rumble[osd_port] & 3]); return buf;
 #ifdef __SWITCH__
-    case 7: return "";
+    case 7: snprintf(buf, n, "CPU BOOST     < %s >", osd_boost ? "ON" : "OFF"); return buf;
 #else
     case 7: snprintf(buf, n, "FULLSCREEN    < %s >", cfg.fullscreen ? "ON" : "OFF"); return buf;
 #endif
@@ -163,24 +168,38 @@ static void osd_overlays(int ww, int wh) {
         int k = wh * 6 / 10 / osd_h; if (k * OSD_W > ww * 9 / 10) k = ww * 9 / 10 / OSD_W; if (k < 1) k = 1;
         dc_pvr_gl_overlay(osd_px, OSD_W, osd_h, (ww - OSD_W * k) / 2, (wh - osd_h * k) / 2, OSD_W * k, osd_h * k, ww, wh);
     }
-    if (osd_fps) {
-        static uint8_t px[40 * 11 * 4];
-        char s[16]; snprintf(s, sizeof s, "%.0f", fps_now);
+    if (osd_fps) {                                        /* frames a second, and where the time goes */
+        enum { FW = 140, FH = 20 };
+        static uint8_t px[FW * FH * 4];
+        char s[16]; snprintf(s, sizeof s, "%.0f FPS", fps_now);
         memset(px, 0, sizeof px);
-        int w = (int)strlen(s) * 6 + 3;
-        osd_fill(px, 40, 0, 0, w, 11, 0x000000A0u);
-        osd_text(px, 40, 11, 2, 2, s, 0x7CFF7CFFu);
-        int k = wh / 270; if (k < 2) k = 2;
-        dc_pvr_gl_overlay(px, 40, 11, 8, 8, 40 * k, 11 * k, ww, wh);
+        int w1 = (int)strlen(s) * 6 + 3, w2 = (int)strlen(fps_detail) * 6 + 3, w = w1 > w2 ? w1 : w2;
+        osd_fill(px, FW, 0, 0, w < FW ? w : FW, FH, 0x000000A0u);
+        osd_text(px, FW, FH, 2, 2, s, 0x7CFF7CFFu);
+        osd_text(px, FW, FH, 2, 11, fps_detail, 0xC8D2DCFFu);
+        int k = wh / 360; if (k < 2) k = 2;
+        dc_pvr_gl_overlay(px, FW, FH, 8, 8, FW * k, FH * k, ww, wh);
     }
 }
-/* rendered frames a second, for Show FPS */
+/* rendered frames a second, for Show FPS, and where each frame's time goes (ms): G the game's code,
+ * S the sound chip, R rendering, P presenting (with vsync, waiting for the display), I pacing sleeps */
+
 static void osd_count_frame(void) {
-    static Uint64 t0; static unsigned long r0;
+    static Uint64 t0, a0, r0t, p0, i0; static unsigned long r0;
     Uint64 now = SDL_GetPerformanceCounter();
-    if (!t0) { t0 = now; r0 = renders; return; }
-    double dt = (double)(now - t0) / (double)SDL_GetPerformanceFrequency();
-    if (dt >= 0.5) { fps_now = (float)((renders - r0) / dt); t0 = now; r0 = renders; if (osd_fps) need_present = 1; }
+    if (!t0) { t0 = now; r0 = renders; a0 = dc_prof_aica; r0t = prof_render; p0 = prof_present; i0 = prof_idle; return; }
+    double f = (double)SDL_GetPerformanceFrequency(), dt = (double)(now - t0) / f;
+    if (dt < 0.5) return;
+    unsigned long fr = renders - r0;
+    fps_now = (float)(fr / dt);
+    double per = fr ? 1000.0 / f / (double)fr : 0;
+    double a = (double)(dc_prof_aica - a0) * per, r = (double)(prof_render - r0t) * per, p = (double)(prof_present - p0) * per,
+           i = (double)(prof_idle - i0) * per, tot = fr ? dt * 1000.0 / (double)fr : 0, g = tot - a - r - p - i;
+    snprintf(fps_detail, sizeof fps_detail, "G%.0f S%.0f R%.0f P%.0f I%.0f", g < 0 ? 0 : g, a, r, p, i);
+    if (cfg.stats) fprintf(stderr, "dc-core: %.1f fps, ms a frame: game %.1f, sound %.1f, render %.1f, present %.1f, idle %.1f\n",
+                           fps_now, g < 0 ? 0 : g, a, r, p, i);
+    t0 = now; r0 = renders; a0 = dc_prof_aica; r0t = prof_render; p0 = prof_present; i0 = prof_idle;
+    if (osd_fps) need_present = 1;
 }
 
 static void osd_restart(void) {
@@ -302,7 +321,9 @@ static void osd_run(int port) {
                 osd_rumble[osd_port] = (osd_rumble[osd_port] + 4 + step) % 4; osd_save();
                 osd_rumble_pad(osd_port, 0.6f * osd_rumble_scale(osd_port), 250);
             }
-#ifndef __SWITCH__
+#ifdef __SWITCH__
+            if (sel == 7) { osd_boost = !osd_boost; set_boost(osd_boost); osd_save(); }
+#else
             if (sel == 7) { cfg.fullscreen = !cfg.fullscreen; SDL_SetWindowFullscreen(win, cfg.fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0); }
 #endif
             if (sel == 8 && (down & DC_BTN_A)) { dc_front_close(); exit(0); }
