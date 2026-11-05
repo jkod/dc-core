@@ -736,7 +736,9 @@ void dc_front_close(void) {
     joy = NULL;
     set_boost(0);
 #endif
-    if (audio) SDL_CloseAudioDevice(audio);
+    /* the on-screen menu (and the focus pause) leave the device paused; on the Switch, closing a paused
+     * device crashed SDL's audio thread (Reset / Quit from the menu): empty it and let it run first */
+    if (audio) { SDL_ClearQueuedAudio(audio); SDL_PauseAudioDevice(audio, 0); SDL_CloseAudioDevice(audio); audio = 0; }
     if (glc) SDL_GL_DeleteContext(glc);
     if (win) SDL_DestroyWindow(win);
     memset(pads, 0, sizeof pads); audio = 0; glc = NULL; win = NULL;
