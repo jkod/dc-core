@@ -533,15 +533,15 @@ static int clip_edge(const pvr_vtx *in, int n, pvr_vtx *out, int axis, float lim
  * strips out to the widescreen edges that repeat its edge column (same UV and colours along each edge),
  * so the picture continues instead of ending in black; its own 4:3 part is unchanged. */
 int dc_pvr_gl_extend_backdrops;
-/* dc_pvr_gl_extend_tiles: also a flat tile of such a backdrop that touches one side (Soulcalibur's
- * opening: a 640-wide picture of four 320x320 tiles), continued mirrored at that edge */
+/* dc_pvr_gl_extend_tiles: also pictures made of tiles, continued mirrored past the 4:3 edges (see
+ * mirror_tile) */
 int dc_pvr_gl_extend_tiles;
 static int cmp_vy(const void *a, const void *b) { float d = (*(const pvr_vtx *const *)a)->y - (*(const pvr_vtx *const *)b)->y; return d < 0 ? -1 : d > 0; }
 /* a flat card a little wider than the picture (Soulcalibur's opening: a sky quad from x -15 to 648 at
  * one depth): strips from its side edges out to the widescreen edges showing the card's texture
  * mirrored at that edge (its own screen-to-texture mapping, reflected), rather than its edge column
  * repeated */
-static int overhang_backdrop(const pvr_poly *p, const pvr_vtx *v, float rw, float ext, int tile) {
+static int overhang_backdrop(const pvr_poly *p, const pvr_vtx *v, float rw, float ext) {
     if (p->n < 3 || p->n > 8) return 0;
     float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f;
     for (int k = 0; k < p->n; k++) {
@@ -550,9 +550,7 @@ static int overhang_backdrop(const pvr_poly *p, const pvr_vtx *v, float rw, floa
         if (v[k].x < x0) x0 = v[k].x; if (v[k].x > x1) x1 = v[k].x;
         if (v[k].y < y0) y0 = v[k].y; if (v[k].y > y1) y1 = v[k].y;
     }
-    if (tile) {   /* one tile of a backdrop made of tiles: the side(s) it touches */
-        if (x0 < -1.f || x1 > rw + 1.f || y1 - y0 < 0.25f * rw || (x0 > 1.f && x1 < rw - 2.5f)) return 0;
-    } else if (x0 > 1.f || x1 < rw - 2.5f || y1 - y0 < 0.6f * rw) return 0;   /* must cover the picture */
+    if (x0 > 1.f || x1 < rw - 2.5f || y1 - y0 < 0.6f * rw) return 0;   /* must cover the picture */
     /* screen -> (u, v): the plane through the three vertices spanning the largest area */
     int ba = 0, bb = 1, bc = 2; float best = 0;
     for (int a = 0; a < p->n; a++) for (int b = a + 1; b < p->n; b++) for (int c = b + 1; c < p->n; c++) {
@@ -570,7 +568,6 @@ static int overhang_backdrop(const pvr_poly *p, const pvr_vtx *v, float rw, floa
         if (fabsf(A->u + ux * (v[k].x - A->x) + uy * (v[k].y - A->y) - v[k].u) > 1e-3f ||
             fabsf(A->v + vx * (v[k].x - A->x) + vy * (v[k].y - A->y) - v[k].v) > 1e-3f) return 0;
     for (int sd = 0; sd < 2; sd++) {
-        if (tile && (sd ? x1 < rw - 2.5f : x0 > 1.f)) continue;
         const pvr_vtx *e[8]; int ne = 0;
         for (int k = 0; k < p->n; k++)
             if (sd ? v[k].x >= x1 - 1.f : v[k].x <= x0 + 1.f) e[ne++] = &v[k];
@@ -591,18 +588,68 @@ static int overhang_backdrop(const pvr_poly *p, const pvr_vtx *v, float rw, floa
     }
     return 1;
 }
+/* dc_pvr_gl_extend_tiles: a picture made of opaque, flat, screen-aligned tiles (Soulcalibur's intro
+ * screen: 10 x 8 tiles of 64 pixels; the opening's 320-pixel glyph wall; its main menu) continues past
+ * the 4:3 edges as its own mirror image: each tile within a side width of an edge is drawn again,
+ * reflected about that edge and cut to the side band, with UVs from the tile's own screen-to-texture
+ * mapping, so the strip meets the picture without a seam. */
+static void mirror_tile(const pvr_poly *p, const pvr_vtx *v, float rw, float ext) {
+    if (p->list != 0 || p->n != 4) return;
+    float x0 = v[0].x, x1 = v[0].x, y0 = v[0].y, y1 = v[0].y;
+    for (int k = 1; k < 4; k++) {
+        if (fabsf(v[k].z - v[0].z) > 1e-6f * fabsf(v[0].z) + 1e-9f) return;       /* flat */
+        if (v[k].x < x0) x0 = v[k].x; if (v[k].x > x1) x1 = v[k].x;
+        if (v[k].y < y0) y0 = v[k].y; if (v[k].y > y1) y1 = v[k].y;
+    }
+    if (x0 < -1.f || x1 > rw + 1.f || x1 - x0 < 8.f || y1 - y0 < 8.f) return;
+    for (int k = 0; k < 4; k++)                                                    /* a screen-aligned rectangle */
+        if ((fabsf(v[k].x - x0) > 0.5f && fabsf(v[k].x - x1) > 0.5f) || (fabsf(v[k].y - y0) > 0.5f && fabsf(v[k].y - y1) > 0.5f)) return;
+    int left = x0 < ext, right = x1 > rw - 1.f - ext;
+    if (!left && !right) return;
+    /* screen -> (u, v) through three corners */
+    const pvr_vtx *A = &v[0], *B = &v[1], *C = &v[2];
+    float d = (B->x - A->x) * (C->y - A->y) - (B->y - A->y) * (C->x - A->x);
+    if (fabsf(d) < 1.f) { C = &v[3]; d = (B->x - A->x) * (C->y - A->y) - (B->y - A->y) * (C->x - A->x); }
+    if (fabsf(d) < 1.f) return;
+    float ux = ((B->u - A->u) * (C->y - A->y) - (C->u - A->u) * (B->y - A->y)) / d;
+    float uy = ((C->u - A->u) * (B->x - A->x) - (B->u - A->u) * (C->x - A->x)) / d;
+    float vx = ((B->v - A->v) * (C->y - A->y) - (C->v - A->v) * (B->y - A->y)) / d;
+    float vy = ((C->v - A->v) * (B->x - A->x) - (B->v - A->v) * (C->x - A->x)) / d;
+    for (int k = 0; k < 4; k++)
+        if (fabsf(A->u + ux * (v[k].x - A->x) + uy * (v[k].y - A->y) - v[k].u) > 1e-3f ||
+            fabsf(A->v + vx * (v[k].x - A->x) + vy * (v[k].y - A->y) - v[k].v) > 1e-3f) return;
+    for (int sd = 0; sd < 2; sd++) {
+        if (sd ? !right : !left) continue;
+        float edge = rw - 1.f;                              /* the picture's right edge: 640 in a 641-wide frame */
+        float m = sd ? 2.f * edge : 0.f;                    /* mirror: x' = m - x */
+        float a = m - x1, b = m - x0;                       /* the reflected tile */
+        if (sd) { if (a < edge) a = edge; if (b > rw + ext) b = rw + ext; }
+        else { if (a < -ext) a = -ext; if (b > 0.f) b = 0.f; }
+        if (b - a < 0.01f) continue;
+        pvr_vtx q[4];
+        const float qx[4] = { a, b, b, a }, qy[4] = { y0, y0, y1, y1 };
+        for (int k = 0; k < 4; k++) {
+            q[k] = v[0];
+            float ox = m - qx[k];                           /* where this point's texel sits in the tile */
+            q[k].x = qx[k]; q[k].y = qy[k];
+            q[k].u = A->u + ux * (ox - A->x) + uy * (qy[k] - A->y);
+            q[k].v = A->v + vx * (ox - A->x) + vy * (qy[k] - A->y);
+        }
+        push(&q[0]); push(&q[1]); push(&q[2]); push(&q[0]); push(&q[2]); push(&q[3]);
+    }
+}
 static void extend_backdrop(const pvr_poly *p, const pvr_vtx *v, float rw, float ext) {
     if (p->n < 3 || p->n > 64) return;
     const pvr_vtx *e[2][64]; int ne[2] = { 0, 0 };
     for (int k = 0; k < p->n; k++) {
-        if (v[k].x < -1.f || v[k].x > rw + 1.f) { overhang_backdrop(p, v, rw, ext, 0); return; }   /* else 3D, not a backdrop */
+        if (v[k].x < -1.f || v[k].x > rw + 1.f) { overhang_backdrop(p, v, rw, ext); return; }   /* else 3D, not a backdrop */
         if (v[k].x <= 1.f) e[0][ne[0]++] = &v[k];
         else if (v[k].x >= rw - 2.5f) e[1][ne[1]++] = &v[k];   /* 639 in a 641-wide picture (Soulcalibur's save screen) */
     }
     /* both sides: a picture made of tiles (each touching one side) would get stray streaks; its
      * frame keeps the blurred edge-colour bars instead */
     if (ne[0] < 2 || ne[1] < 2) {
-        if (dc_pvr_gl_extend_tiles && ne[0] + ne[1] >= 2) overhang_backdrop(p, v, rw, ext, 1);
+        if (dc_pvr_gl_extend_tiles) mirror_tile(p, v, rw, ext);
         return;
     }
     for (int sd = 0; sd < 2; sd++) {

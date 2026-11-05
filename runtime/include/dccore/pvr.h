@@ -85,8 +85,9 @@ extern int dc_pvr_gl_clip_2d;
  * continue to the screen edges by repeating their edge column; flat cards a little wider than the
  * picture continue with their texture mirrored at their edges (default 0) */
 extern int dc_pvr_gl_extend_backdrops;
-/* with it: a flat backdrop tile touching one side of the picture (a picture made of tiles) also
- * continues, mirrored at that edge (default 0; menus whose tiles should keep side bars leave it off) */
+/* with it: a picture made of opaque, flat, screen-aligned tiles continues past the 4:3 edges as its
+ * mirror image (each tile within a side width of an edge is drawn again reflected about it; default 0,
+ * menus whose tiles should keep side bars leave it off) */
 extern int dc_pvr_gl_extend_tiles;
 /* render to texture (FB_W_SOF1 bit 24) in widescreen: also draw the pass at full width, for
  * full-screen quads that show that texture later (call at STARTRENDER, with dc_pvr_sw_render) */
