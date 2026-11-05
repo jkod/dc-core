@@ -6,6 +6,7 @@
  * channel). Everything advances in 44.1 kHz samples driven by the SH-4 cycle clock.
  * Mixing/audio output hooks onto the same channel state (dc_aica_render, TODO).
  */
+#include <stdlib.h>
 #include "dccore/aica.h"
 #include "dccore/bios.h"
 #include "dccore/arm7.h"
@@ -27,9 +28,12 @@ static int tim_sub[3];                         /* sample prescaler counters for 
 
 /* ---------------------------------------------------------------- interrupts */
 dc_aica_async_t dc_aica_async;
+volatile unsigned dc_aica_ext_events;
+static unsigned arm_wakes, arm_regwrites;
 static volatile int irq_want = -1;
 static void update_irqs(void) {
     uint32_t sci = R(0x28A0) & R(0x289C) & 0x7FF;
+    if (sci && !arm7.fiq_line) arm_wakes++;                   /* an interrupt for the ARM: full speed again */
     arm7.fiq_line = sci != 0;
     uint32_t mci = R(0x28B8) & R(0x28B4) & 0x7FF;
     if (dc_aica_async.advance) irq_want = mci != 0;           /* delivered on the game's thread */
@@ -425,8 +429,28 @@ int dc_aica_audio_read(int16_t *dst, int frames) {
 }
 
 /* ---------------------------------------------------------------- one sample */
+/* The ARM's idle throttle. Some sound drivers never idle in a way arm7.c's loop check can see: Re-Volt's
+ * main loop keeps scanning its request tables and running delay loops, with a pass counter in RAM that
+ * changes every time, so the ARM ran flat out (most of the sound chip's time). After ARM_QUIET samples in
+ * which nothing reached it (no write to the chip or its RAM from the SH-4, no interrupt for it) and it
+ * wrote no chip register, it gets 1/ARM_IDLE_DIV of its cycles until something does. Its replies to the
+ * SH-4 still come at once (an SH-4 write wakes it); its own delay loops in that time run slower. In a
+ * Re-Volt race it was throttled 75-95% of the time and the run took 14% less CPU. On when
+ * dc_aica_arm_throttle is set (the frontend does on the Switch); DC_ARM_THROTTLE=1 / 0 overrides. */
+int dc_aica_arm_throttle;
+#define ARM_QUIET    64
+#define ARM_IDLE_DIV 8
+static void arm_slice(void) {
+    static int off = -1;
+    static unsigned last, quiet;
+    if (off < 0) { const char *e = getenv("DC_ARM_THROTTLE"); off = e ? *e == '0' : !dc_aica_arm_throttle; }
+    unsigned act = arm_wakes + arm_regwrites + dc_aica_ext_events;
+    if (off || act != last) { last = act; quiet = 0; }
+    else if (quiet < ARM_QUIET + 1) quiet++;
+    arm7_run(quiet > ARM_QUIET ? ARM_CYCLES_PER_SAMPLE / ARM_IDLE_DIV : ARM_CYCLES_PER_SAMPLE);
+}
 static void sample_tick(void) {
-    if (arm_running) arm7_run(ARM_CYCLES_PER_SAMPLE);
+    if (arm_running) arm_slice();
     mix_sample();
     advance_channels();
     for (int t = 0; t < 3; t++) {
@@ -511,15 +535,15 @@ uint8_t  arm7_read8(uint32_t a)  { if (is_reg(a)) return (uint8_t)dc_aica_read(a
 extern unsigned arm7_writes;          /* memory writes by the ARM (idle-loop detection, arm7.c) */
 /* arm7_writes counts register writes and RAM writes that change something */
 void arm7_write32(uint32_t a, uint32_t v) {
-    if (is_reg(a)) { arm7_writes++; dc_aica_write(a, v, 4); return; }
+    if (is_reg(a)) { arm7_writes++; arm_regwrites++; dc_aica_write(a, v, 4); return; }
     uint8_t *p = dc_aram + (a & 0x1FFFFC); if (memcmp(p, &v, 4)) { arm7_writes++; memcpy(p, &v, 4); }
 }
 void arm7_write16(uint32_t a, uint16_t v) {
-    if (is_reg(a)) { arm7_writes++; dc_aica_write(a, v, 2); return; }
+    if (is_reg(a)) { arm7_writes++; arm_regwrites++; dc_aica_write(a, v, 2); return; }
     uint8_t *p = dc_aram + (a & 0x1FFFFE); if (memcmp(p, &v, 2)) { arm7_writes++; memcpy(p, &v, 2); }
 }
 void arm7_write8(uint32_t a, uint8_t v) {
-    if (is_reg(a)) { arm7_writes++; dc_aica_write(a, v, 1); return; }
+    if (is_reg(a)) { arm7_writes++; arm_regwrites++; dc_aica_write(a, v, 1); return; }
     if (dc_aram[a & 0x1FFFFF] != v) { arm7_writes++; dc_aram[a & 0x1FFFFF] = v; }
 }
 

@@ -693,6 +693,9 @@ int dc_front_open(const dc_front_config *c) {
     }
     osd_load();
     dc_prof_clock = prof_clock;
+#ifdef __SWITCH__
+    dc_aica_arm_throttle = 1;                              /* the sound chip's ARM: see aica.c */
+#endif
     aica_thread_start();
     if (!cfg.no_audio) {
         SDL_AudioSpec want = {0}, have;

@@ -559,8 +559,8 @@ static void wr(uint32_t a, uint32_t v, int size) {
         }
         return;
     }
-    if (m >= 0x00700000u && m < 0x00710000u) { aica_enter(now_cycles()); dc_aica_write(m, v, size); aica_leave(); if (dc_hw.on_aica_write) dc_hw.on_aica_write(m, v); dc_next_event = 0; return; }
-    if (m >= 0x00800000u && m < 0x00A00000u) { memcpy(aram + (m & 0x1FFFFF), &v, size); if (dc_hw.on_aica_write) dc_hw.on_aica_write(m, v); return; }
+    if (m >= 0x00700000u && m < 0x00710000u) { aica_enter(now_cycles()); dc_aica_ext_events++; dc_aica_write(m, v, size); aica_leave(); if (dc_hw.on_aica_write) dc_hw.on_aica_write(m, v); dc_next_event = 0; return; }
+    if (m >= 0x00800000u && m < 0x00A00000u) { memcpy(aram + (m & 0x1FFFFF), &v, size); dc_aica_ext_events++; if (dc_hw.on_aica_write) dc_hw.on_aica_write(m, v); return; }
     if ((m >> 24) == 0x04 || (m >> 24) == 0x06) { memcpy(dc_vram + (m & 0x7FFFFF), &v, size); VRAM_TOUCH(m); return; }
     if ((m >> 24) == 0x05 || (m >> 24) == 0x07) { memcpy(dc_vram + (vram32(m) | (m & 3)), &v, size); VRAM_TOUCH(vram32(m)); VRAM32_TOUCH(m); return; }
     if ((m >> 26) == 0x04) {                                                                  /* 0x10000000.. TA FIFO */
