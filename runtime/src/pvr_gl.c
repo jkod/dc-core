@@ -536,6 +536,7 @@ int dc_pvr_gl_extend_backdrops;
 /* dc_pvr_gl_extend_tiles: also pictures made of tiles, continued mirrored past the 4:3 edges (see
  * mirror_tile) */
 int dc_pvr_gl_extend_tiles;
+float dc_pvr_gl_extend_tiles_min;   /* only tiles at least this wide (a port can keep small-tile menus as they are) */
 static int cmp_vy(const void *a, const void *b) { float d = (*(const pvr_vtx *const *)a)->y - (*(const pvr_vtx *const *)b)->y; return d < 0 ? -1 : d > 0; }
 /* a flat card a little wider than the picture (Soulcalibur's opening: a sky quad from x -15 to 648 at
  * one depth): strips from its side edges out to the widescreen edges showing the card's texture
@@ -601,7 +602,7 @@ static void mirror_tile(const pvr_poly *p, const pvr_vtx *v, float rw, float ext
         if (v[k].x < x0) x0 = v[k].x; if (v[k].x > x1) x1 = v[k].x;
         if (v[k].y < y0) y0 = v[k].y; if (v[k].y > y1) y1 = v[k].y;
     }
-    if (x0 < -1.f || x1 > rw + 1.f || x1 - x0 < 8.f || y1 - y0 < 8.f) return;
+    if (x0 < -1.f || x1 > rw + 1.f || x1 - x0 < 8.f || y1 - y0 < 8.f || x1 - x0 < dc_pvr_gl_extend_tiles_min) return;
     for (int k = 0; k < 4; k++)                                                    /* a screen-aligned rectangle */
         if ((fabsf(v[k].x - x0) > 0.5f && fabsf(v[k].x - x1) > 0.5f) || (fabsf(v[k].y - y0) > 0.5f && fabsf(v[k].y - y1) > 0.5f)) return;
     int left = x0 < ext, right = x1 > rw - 1.f - ext;
@@ -1247,6 +1248,35 @@ void dc_pvr_gl_render(int scale) {
     }
     int RW = f.width * (f.hscale ? 2 : 1), RH = f.height;
     last_rw = (float)RW; last_rh = (float)RH;
+    /* Corners at infinity. A game's projection can send corners that land on the camera plane as
+     * x, y = +-inf with 1/w = FLT_MAX (Soulcalibur's opening: the spinning sunset sky quad and the
+     * rings round the camera, on single frames). Their triangles fell out in clipping and the picture
+     * flashed to the plain background for that frame. Such a polygon is drawn as it was in the last
+     * frame when that frame had the same piece (texture, mode, corner count) at the same place in its
+     * list; the camera moves little in one frame. */
+    if (!capturing) {
+        #define KEEP_POLYS 64
+        #define KEEP_VERTS 128
+        static struct { uint32_t tcw, isp; int n; pvr_vtx v[KEEP_VERTS]; } *keep_p;
+        static int nkeep;
+        if (!keep_p) keep_p = calloc(KEEP_POLYS, sizeof *keep_p);
+        int np = f.npolys < KEEP_POLYS ? f.npolys : KEEP_POLYS;
+        for (int i = 0; keep_p && i < np; i++) {
+            const pvr_poly *p = &f.polys[i]; pvr_vtx *v = (pvr_vtx *)(f.verts + p->first);
+            if (p->n > KEEP_VERTS) continue;
+            int bad = 0;
+            for (int k = 0; k < p->n && !bad; k++)
+                if (!isfinite(v[k].x) || !isfinite(v[k].y) || !isfinite(v[k].z) || v[k].z >= 1e30f) bad = 1;
+            if (bad) {
+                if (i < nkeep && keep_p[i].tcw == p->tcw && keep_p[i].isp == p->isp && keep_p[i].n == p->n)
+                    memcpy(v, keep_p[i].v, (size_t)p->n * sizeof *v);
+                continue;                                         /* the kept copy stays for the next frame */
+            }
+            keep_p[i].tcw = p->tcw; keep_p[i].isp = p->isp; keep_p[i].n = p->n;
+            memcpy(keep_p[i].v, v, (size_t)p->n * sizeof *v);
+        }
+        nkeep = np;
+    }
     {   static int cap_hud;
         if (f.npolys > cap_hud) { cap_hud = f.npolys + 1024; poly_hud = realloc(poly_hud, (size_t)cap_hud); poly_uvbox = realloc(poly_uvbox, (size_t)cap_hud * sizeof *poly_uvbox); poly_cap = realloc(poly_cap, (size_t)cap_hud); poly_edge = realloc(poly_edge, (size_t)cap_hud); }
         poly_base = f.polys;

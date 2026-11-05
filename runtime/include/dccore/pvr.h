@@ -89,6 +89,9 @@ extern int dc_pvr_gl_extend_backdrops;
  * mirror image (each tile within a side width of an edge is drawn again reflected about it; default 0,
  * menus whose tiles should keep side bars leave it off) */
 extern int dc_pvr_gl_extend_tiles;
+/* with it: only tiles at least this many pixels wide (default 0: all); a port can set it per field, e.g.
+ * to mirror a picture of small tiles on one screen but not on menus built the same way */
+extern float dc_pvr_gl_extend_tiles_min;
 /* render to texture (FB_W_SOF1 bit 24) in widescreen: also draw the pass at full width, for
  * full-screen quads that show that texture later (call at STARTRENDER, with dc_pvr_sw_render) */
 void dc_pvr_gl_capture(int scale);
