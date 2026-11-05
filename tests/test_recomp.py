@@ -197,15 +197,33 @@ t("interp_runtime_code", {0: [0xD102, 0x410B, 0x0009, 0x000B, 0x0009, 0x0009, 0x
   "{ static const uint16_t code[] = { 0xE02A, 0x7001, 0x000B, 0x300C }; memcpy(dc_ram + 0x200000, code, sizeof code); }",
   "c.r[0] == 86")
 
+# found functions: B (at +0x40) is outside the function list, so the interpreter runs it and the
+# runtime records its address in dc_found_funcs_path; recompiled again with that file, B is a function
+t("found_funcs", {0: [0x4F22, 0xD103, 0x410B, 0x0009, 0x4F26, 0x000B, 0x0009, 0x0009, 0x0040, 0x8C01],
+                  0x40: [0xE02A, 0x000B, 0x0009]},
+  'dc_found_funcs_path = "found_funcs_test.txt"; remove(dc_found_funcs_path);',
+  'c.r[0] == 42 && (dc_interp_all || file_has("found_funcs_test.txt", "8c010040"))')
+FUNCS = {"found_funcs": ["8c010000 8c010014"]}
+
+def _found_recomp(gen):
+    d = os.path.dirname(gen)
+    open(os.path.join(d, "found.txt"), "w").write("8c010040\n")
+    subprocess.check_call([sys.executable, os.path.join(ROOT, "tools/recomp/sh4recomp.py"), os.path.join(d, "t.bin"),
+                           "--funcs", os.path.join(d, "funcs.txt"), "--no-discover", "--extra-funcs", os.path.join(d, "found.txt"),
+                           "--extra-funcs", os.path.join(d, "missing.txt"), "--out", os.path.join(d, "gen2")], stdout=subprocess.DEVNULL)
+    return _table_end(os.path.join(d, "gen2"), BASE + 0x40) is not None and _table_end(gen, BASE + 0x40) is None
+
 # checks on the generated code: the split caller of setjmp is one host function up to its rts
 def _table_end(gen, start):
     import re
     for line in open(os.path.join(gen, "recomp_table.c")):
         m = re.match(r"\s*\{ 0x%08Xu, 0x([0-9A-F]{8})u," % start, line)
         if m: return int(m.group(1), 16)
-GEN_CHECK = {"coro_setjmp_split_caller": lambda gen: _table_end(gen, BASE + 4) == BASE + 0x26}   # 4: loop head
+GEN_CHECK = {"coro_setjmp_split_caller": lambda gen: _table_end(gen, BASE + 4) == BASE + 0x26,   # 4: loop head
+             "found_funcs": _found_recomp}
 
-EXTRA = {"coro_setjmp_threads": ["--setjmp", hex(S)], "coro_setjmp_split_caller": ["--setjmp", hex(S)]}
+EXTRA = {"coro_setjmp_threads": ["--setjmp", hex(S)], "coro_setjmp_split_caller": ["--setjmp", hex(S)],
+         "found_funcs": ["--no-discover"]}
 
 def build_bin(prog):
     size = max(off + 2 * len(w) for off, w in prog.items())
@@ -222,7 +240,7 @@ def prepare(tmp, name, prog, setup, check):
     d = os.path.join(tmp, name); os.makedirs(d, exist_ok=True)
     open(os.path.join(d, "t.bin"), "wb").write(build_bin(prog))
     starts = sorted(BASE + off for off in prog)
-    open(os.path.join(d, "funcs.txt"), "w").write("\n".join("%08x" % s for s in starts))
+    open(os.path.join(d, "funcs.txt"), "w").write("\n".join(FUNCS.get(name, ["%08x" % s for s in starts])))
     subprocess.check_call([sys.executable, os.path.join(ROOT, "tools/recomp/sh4recomp.py"),
                            os.path.join(d, "t.bin"), "--funcs", os.path.join(d, "funcs.txt"),
                            "--out", os.path.join(d, "gen")] + EXTRA.get(name, []), stdout=subprocess.DEVNULL)
@@ -233,6 +251,12 @@ def prepare(tmp, name, prog, setup, check):
 #include <string.h>
 #include <stdlib.h>
 extern int dc_alias_verbose;
+static int file_has(const char *path, const char *s) {
+  char line[256]; int hit = 0; FILE *f = fopen(path, "r");
+  if (!f) return 0;
+  while (fgets(line, sizeof line, f)) if (strstr(line, s)) hit = 1;
+  fclose(f); return hit;
+}
 int main(void) {
   sh4ctx c; dc_init(&c);
   if (dc_load_binary("%s", 0x8C010000u) < 0) return 2;
@@ -262,7 +286,7 @@ def main():
         exe = os.path.join(d, "t.exe" if os.environ.get("EXE") else "t")
         cc = os.environ.get("CC", "cc").split() + os.environ.get("CFLAGS", "").split()
         subprocess.check_call(cc + ["-O1", "-w", "-I" + os.path.join(ROOT, "runtime/include"), "-o", exe] + srcs + ["-lm"])
-        r = subprocess.run(os.environ.get("RUN", "").split() + [exe], capture_output=True, text=True)
+        r = subprocess.run(os.environ.get("RUN", "").split() + [exe], capture_output=True, text=True, cwd=d)
         gen_ok = GEN_CHECK.get(name, lambda g: True)(os.path.join(d, "gen"))
         if not gen_ok: r = subprocess.CompletedProcess(r.args, 1, "generated code check failed", "")
         status = "ok" if r.returncode == 0 else "FAIL " + r.stdout.strip() + r.stderr.strip()

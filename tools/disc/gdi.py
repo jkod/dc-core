@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""dc-core disc image reader: .gdi/.cue + track files -> ISO9660 file tree of the boot area (the
-high-density area of a GD-ROM, or the last session of a CD-ROM such as a MIL-CD / CD-R release).
+"""dc-core disc image reader: .gdi/.cue + track files, or a .chd -> ISO9660 file tree of the boot area
+(the high-density area of a GD-ROM, or the last session of a CD-ROM such as a MIL-CD / CD-R release).
 
-    gdi.py check   game.gdi|game.cue        # validate tracks, print IP.BIN header (Redump .cue works too)
+    gdi.py check   game.gdi|game.cue|game.chd   # validate tracks, print IP.BIN header
     gdi.py list    game.gdi                 # list files (path, LBA, size)
     gdi.py extract game.gdi OUTDIR [names]  # extract all files (or only the given names)
 
@@ -11,6 +11,9 @@ Handles 2352- (MODE1 and MODE2 XA) and 2048-byte sectors, file data spread over 
 `extract` descrambles it like the boot ROM does. Reads only the player's own image; nothing is bundled.
 """
 import os, struct, sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from chd import CHD, ChdError  # noqa: E402
 
 HD_START = 45000
 
@@ -21,6 +24,7 @@ class Track:
         self.exists = os.path.isfile(path)
         self.sectors = (os.path.getsize(path) // sector) if self.exists else 0
         self.f = None
+        self.chd = None         # a track of a .chd: CHD frames from chd_frame on
 
     @property
     def is_data(self): return self.type == 4
@@ -40,6 +44,9 @@ class GDI:
         self.path = path
         self.gd = True
         d = os.path.dirname(os.path.abspath(path))
+        if path.lower().endswith(".chd"):
+            self._load_chd(path)
+            return
         if path.lower().endswith(".cue"):
             self._load_cue(path, d)
             return
@@ -89,6 +96,15 @@ class GDI:
             off = t.get("off", 0)
             self.tracks.append(Track(t["num"], t["start"] + off, t["type"], t["sector"], t["file"], off))
 
+    def _load_chd(self, path):
+        c = CHD(path)
+        self.gd = c.gd
+        self.tracks = []
+        for ct in c.tracks:
+            t = Track(ct.num, ct.lba, ct.type, ct.sector, path, 0)
+            t.exists, t.sectors, t.chd, t.chd_frame = True, ct.sectors, c, ct.frame
+            self.tracks.append(t)
+
     def missing(self):
         return [t for t in self.tracks if not t.exists]
 
@@ -106,13 +122,16 @@ class GDI:
         if not t.exists:
             raise MissingTrack("LBA %d is in track %02d (%s), which is missing"
                                % (lba, t.num, os.path.basename(t.path)))
-        if t.f is None:
-            t.f = open(t.path, "rb")
         idx = lba - t.lba
         if idx >= t.sectors - t.offset:
             raise ValueError("LBA %d past end of track %02d" % (lba, t.num))
-        t.f.seek((idx + t.offset) * t.sector)
-        raw = t.f.read(t.sector)
+        if t.chd:
+            raw = t.chd.frame(t.chd_frame + idx)[:t.sector]
+        else:
+            if t.f is None:
+                t.f = open(t.path, "rb")
+            t.f.seek((idx + t.offset) * t.sector)
+            raw = t.f.read(t.sector)
         if t.sector == 2352:
             o = 24 if raw[15] == 2 else 16   # 12 sync + 4 header (+ 8 subheader in MODE2 XA)
             return raw[o:o + 2048]
@@ -206,10 +225,11 @@ def cmd_check(g):
     for t in g.tracks:
         kind = "data " if t.is_data else "audio"
         state = "ok" if t.exists else "MISSING"
-        if t.exists and os.path.getsize(t.path) % t.sector:
+        if t.exists and not t.chd and os.path.getsize(t.path) % t.sector:
             state = "TRUNCATED (size is not a whole number of %d-byte sectors)" % t.sector
             ok = False
-        print("track %02d  LBA %6d  %s  %4d  %-14s %s" % (t.num, t.lba, kind, t.sector, os.path.basename(t.path), state))
+        name = "(in the CHD)" if t.chd else os.path.basename(t.path)
+        print("track %02d  LBA %6d  %s  %4d  %-14s %s" % (t.num, t.lba, kind, t.sector, name, state))
         ok &= t.exists
     try:
         h = g.header()
@@ -239,7 +259,10 @@ def cmd_check(g):
 def main():
     if len(sys.argv) < 3:
         print(__doc__); return 2
-    cmd, g = sys.argv[1], GDI(sys.argv[2])
+    try:
+        cmd, g = sys.argv[1], GDI(sys.argv[2])
+    except ChdError as e:
+        print("cannot read %s: %s" % (sys.argv[2], e)); return 1
     if cmd == "check":
         return cmd_check(g)
     if cmd == "list":

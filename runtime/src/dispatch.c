@@ -129,6 +129,28 @@ extern int dc_interp_enabled, dc_interp_all;
 uint32_t dc_interp(sh4ctx *c, uint32_t pc);
 static dc_miss_fn interp_notify;
 void dc_set_interp_notify(dc_miss_fn f) { interp_notify = f; }
+/* found functions: addresses in the executable that only the interpreter could run, saved for the
+ * next build (dccore_add_recomp FOUND). The file is read once so a run never repeats a line. */
+const char *dc_found_funcs_path;
+static void record_found(uint32_t addr) {
+    static const char *loaded; static uint32_t known[4096]; static int nknown;
+    if (!dc_found_funcs_path || !img_end || addr - img_base >= img_end - img_base || (addr & 1)) return;
+    if (loaded != dc_found_funcs_path) {          /* (re)read the file this path names */
+        loaded = dc_found_funcs_path; nknown = 0;
+        FILE *r = fopen(dc_found_funcs_path, "r");
+        if (r) {
+            char line[64]; unsigned v;
+            while (nknown < 4096 && fgets(line, sizeof line, r))
+                if (sscanf(line, "%x", &v) == 1) known[nknown++] = (v & 0x1FFFFFFFu) | 0x80000000u;
+            fclose(r);
+        }
+    }
+    for (int i = 0; i < nknown; i++) if (known[i] == addr) return;
+    if (nknown < 4096) known[nknown++] = addr;
+    FILE *w = fopen(dc_found_funcs_path, "a");
+    if (w) { fprintf(w, "%08x\n", addr); fclose(w); }
+}
+
 /* first time an address is interpreted: say so (once), so it can be added to the function list */
 static void note_interp(sh4ctx *c, uint32_t addr) {
     static uint32_t seen[4096]; static int nseen;
@@ -139,6 +161,7 @@ static void note_interp(sh4ctx *c, uint32_t addr) {
         if (!*e) { if (nseen < 3500) { *e = addr; nseen++; } break; }
     }
     fprintf(stderr, "dc-core: interpreting %08X (no recompiled code; pr=%08X)\n", addr, c->pr);
+    record_found((addr & 0x1FFFFFFFu) | 0x80000000u);
     if (interp_notify) interp_notify(c, addr);
 }
 /* the interpreter met an instruction that does not exist: a jump into data */
@@ -213,4 +236,5 @@ void dc_init(sh4ctx *c) {
     c->vbr = 0x8C00F400u;
     { const char *e = getenv("DC_INTERP_ALL"); if (e && *e == '1') dc_interp_all = 1; }
     { const char *e = getenv("DC_INTERP"); if (e && *e == '0') dc_interp_enabled = 0; }
+    { const char *e = getenv("DC_FOUND_FUNCS"); if (e && *e) dc_found_funcs_path = e; }
 }

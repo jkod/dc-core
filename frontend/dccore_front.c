@@ -418,9 +418,32 @@ static void pause_while_unfocused(void) {
 
 #include "dccore_osd.inc.c"
 
+/* Jump Pack effects to the host's gamepads, once per field: sent when the level changes, refreshed
+ * while it lasts (SDL stops a rumble after the duration it was given) */
+static void rumble_tick(void) {
+    static float last[4]; static int age[4];
+    for (int k = 0; k < 4; k++) {
+        float lo, hi;
+        int on = dc_rumble_level(k, &lo, &hi);
+        float m = osd_rumble_scale(k);                     /* the player's strength from the menu */
+        lo = lo * m > 1 ? 1 : lo * m; hi = hi * m > 1 ? 1 : hi * m;
+        if (m == 0) on = 0;
+        float q = on ? lo + hi : 0;
+        if (q == last[k] && !(on && ++age[k] >= 20)) continue;
+        last[k] = q; age[k] = 0;
+        Uint16 a = (Uint16)(lo * 65535.0f), b = (Uint16)(hi * 65535.0f);
+#ifdef __SWITCH__
+        if (k == 0 && joy) SDL_JoystickRumble(joy, a, b, on ? 500 : 0);
+#else
+        if (pads[k]) SDL_GameControllerRumble(pads[k], a, b, on ? 500 : 0);
+#endif
+    }
+}
+
 /* ------------------------------------------------------------------ per field */
 static void on_vblank(uint64_t f) {
     vblanks = f;
+    if (!cfg.no_rumble) rumble_tick();
     if (vblanks - last_render_frame > 3 && !shows_render()) {   /* nothing drawn by the PVR: show the framebuffer */
         static uint8_t rgb[1280 * 1024 * 3]; int w, h;
         if (dc_pvr_display(rgb, 1280, 1024, &w, &h) == 0) {
@@ -469,7 +492,7 @@ static void on_vblank(uint64_t f) {
     events();
     pause_while_unfocused();
     osd_count_frame();
-    if (!dc_front_fast && (osd_req || osd_combo())) osd_run();
+    if (!dc_front_fast) { int by = osd_combo(); if (osd_req || by) osd_run(by ? by - 1 : 0); }
     /* pacing: emulated SH-4 time (200 MHz) against the wall clock */
     if (dc_front_fast) { paced = 0; return; }              /* fast-forward: no pacing, resynchronised after */
     if (!cfg.no_pacing && dc_current_ctx) {
@@ -571,6 +594,12 @@ int dc_front_open(const dc_front_config *c) {
         SDL_free(dir);
         if (!path[0] || dc_vmu_attach(0, path)) fprintf(stderr, "VMU: cannot use %s (continuing without saves)\n", path[0] ? path : "app data");
         else fprintf(stderr, "VMU: %s\n", path);
+    }
+    { const char *e = getenv("DC_NO_RUMBLE"); if (e && *e == '1') cfg.no_rumble = 1; }
+    for (int k = 0; k < 4; k++) dc_rumble_attach(k, !cfg.no_rumble);   /* a Jump Pack in every controller */
+    if (!dc_found_funcs_path) {                            /* functions only the interpreter ran: for the next build */
+        static char found[1024]; char *dir = SDL_GetPrefPath("dc-core", cfg.save_name ? cfg.save_name : "default");
+        if (dir) { snprintf(found, sizeof found, "%sfound_funcs.txt", dir); dc_found_funcs_path = found; SDL_free(dir); }
     }
     osd_load();
     if (!cfg.no_audio) {

@@ -25,6 +25,11 @@ void dc_maple_install(void);   /* sets dc_hw.on_maple; port A connected by defau
 int dc_vmu_attach(int port, const char *path);
 const uint8_t *dc_vmu_data(int port);
 void dc_vmu_format(uint8_t *data);       /* 128 KB blank, formatted card */
+/* Jump Pack (Puru Puru Pack) in the second slot of controller `port`: games see it and send rumble
+ * effects. Call dc_rumble_level once per field (vblank): the vibration now, 0..1, for the host's
+ * low-frequency (big) and high-frequency (small) motors; it returns non-zero while vibrating. */
+int dc_rumble_attach(int port, int on);
+int dc_rumble_level(int port, float *low, float *high);
 #ifdef __cplusplus
 }
 #endif

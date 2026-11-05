@@ -159,6 +159,46 @@ int main(void) {
         dc_vmu_attach(0, NULL); remove(vp);
     }
 
+    /* 8c. Jump Pack in slot 2 of port A: found, then rumble effects as levels per field */
+    {
+        CHECK(dc_rumble_attach(0, 1) == 0);
+        uint32_t r1 = 0x8C331800u, r2 = 0x8C331A00u, r3 = 0x8C331C00u, q = ml;
+        float lo, hi;
+        dc_wr32(q, 0); dc_wr32(q + 4, r1); dc_wr32(q + 8, 0x00002001u); q += 12;                       /* DEVINFO main */
+        dc_wr32(q, 0); dc_wr32(q + 4, r2); dc_wr32(q + 8, 0x00000201u); q += 12;                       /* DEVINFO slot 2 */
+        /* SETCOND: source 1, continuous, + power 7, 59 (30 Hz), 0 cycles */
+        dc_wr32(q, 0x80000000u | 2); dc_wr32(q + 4, r3); dc_wr32(q + 8, 0x0200020Eu);
+        dc_wr32(q + 12, 0x00010000u); dc_wr32(q + 16, 0x003B7011u);
+        dc_wr32(0xA05F6C04u, ml); dc_wr32(0xA05F6C18u, 1);
+        CHECK(((dc_rd32(r1) >> 16) & 0xFF) == 0x22);                   /* controller reports the pack */
+        CHECK((dc_rd32(r2) & 0xFF) == 5 && ((dc_rd32(r2) >> 16) & 0xFF) == 0x02 && dc_rd32(r2 + 4) == 0x00010000u);
+        CHECK(dc_rd8(r2 + 4 + 18) == 'P' && dc_rd8(r2 + 4 + 23) == 'P');   /* "Puru Puru Pack" */
+        CHECK((dc_rd32(r3) & 0xFF) == 7);                              /* ack */
+        CHECK(dc_rumble_level(0, &lo, &hi) && lo > 0.99f && hi > 0.99f);    /* full power, fast pulse: both motors */
+        int on = 1;
+        for (int i = 1; i < 300; i++) on &= dc_rumble_level(0, &lo, &hi);
+        CHECK(on && !dc_rumble_level(0, &lo, &hi) && lo == 0);          /* continuous: held, then the 5 s cap */
+
+        /* falling: - power 7, 7 (4 Hz), 3 cycles = 4 pulses = 1 s = 60 fields, big motor only */
+        q = ml;
+        dc_wr32(q, 0x80000000u | 2); dc_wr32(q + 4, r3); dc_wr32(q + 8, 0x0200020Eu);
+        dc_wr32(q + 12, 0x00010000u); dc_wr32(q + 16, 0x03078710u);
+        dc_wr32(0xA05F6C04u, ml); dc_wr32(0xA05F6C18u, 1);
+        CHECK(dc_rumble_level(0, &lo, &hi) && lo > 0.99f && hi == 0);
+        for (int i = 1; i < 30; i++) dc_rumble_level(0, &lo, &hi);
+        CHECK(lo > 0.45f && lo < 0.55f);
+        for (int i = 30; i < 60; i++) dc_rumble_level(0, &lo, &hi);
+        CHECK(!dc_rumble_level(0, &lo, &hi));
+
+        /* steady again, then the stop the game sends (no power) */
+        q = ml;
+        dc_wr32(q, 2); dc_wr32(q + 4, r3); dc_wr32(q + 8, 0x0200020Eu); dc_wr32(q + 12, 0x00010000u); dc_wr32(q + 16, 0x003B4011u); q += 20;
+        dc_wr32(q, 0x80000000u | 2); dc_wr32(q + 4, r3); dc_wr32(q + 8, 0x0200020Eu); dc_wr32(q + 12, 0x00010000u); dc_wr32(q + 16, 0x003B0011u);
+        dc_wr32(0xA05F6C04u, ml); dc_wr32(0xA05F6C18u, 1);
+        CHECK(!dc_rumble_level(0, &lo, &hi));
+        dc_rumble_attach(0, 0);
+    }
+
     /* 9. AICA mixer: looping PCM16 square wave on channel 0 */
     for (int i = 0; i < 200; i++) { int16_t v = i < 100 ? 16000 : -16000; dc_wr16(0xA0810000u + i * 2, (uint16_t)v); }
     #define CH0(r, v) dc_wr32(0xA0700000u + (r) * 4, (v))
