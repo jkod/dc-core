@@ -1152,6 +1152,9 @@ static int letterbox_bar(const pvr_poly *p, const pvr_vtx *v, int RW, int H) {
     int textured = (p->isp >> 25) & 1;
     float x0 = v[0].x, x1 = v[0].x, y0 = v[0].y, y1 = v[0].y;
     for (int k = 0; k < p->n; k++) {
+        /* corners at infinity (a piece of scenery on the camera plane: Soulcalibur's win poses) look
+         * flat and wider than the screen, and switched single frames to 4:3 with black sides */
+        if (!isfinite(v[k].x) || !isfinite(v[k].y) || !isfinite(v[k].z)) return 0;
         if (v[k].z != v[0].z) return 0;
         if (!textured && (v[k].c[0] > 0.06f || v[k].c[1] > 0.06f || v[k].c[2] > 0.06f)) return 0;
         if (v[k].x < x0) x0 = v[k].x; if (v[k].x > x1) x1 = v[k].x;
@@ -1171,6 +1174,7 @@ static int letterbox_band(const pvr_poly *p, const pvr_vtx *v, int RW, int H) {
     int textured = (p->isp >> 25) & 1;
     float x0 = v[0].x, x1 = v[0].x, y0 = v[0].y, y1 = v[0].y;
     for (int k = 0; k < p->n; k++) {
+        if (!isfinite(v[k].x) || !isfinite(v[k].y) || !isfinite(v[k].z)) return 0;
         if (v[k].z != v[0].z) return 0;
         if (!textured && (v[k].c[0] > 0.06f || v[k].c[1] > 0.06f || v[k].c[2] > 0.06f)) return 0;
         if (v[k].x < x0) x0 = v[k].x; if (v[k].x > x1) x1 = v[k].x;
@@ -1276,6 +1280,16 @@ void dc_pvr_gl_render(int scale) {
             memcpy(keep_p[i].v, v, (size_t)p->n * sizeof *v);
         }
         nkeep = np;
+    }
+    /* a polygon with no finite corner at all is never drawn; it is moved to one point far off screen
+     * so the frame's tests (letterbox bars, shades, backdrops) don't take it for something across the
+     * whole screen */
+    for (int i = 0; i < f.npolys; i++) {
+        const pvr_poly *p = &f.polys[i]; pvr_vtx *v = (pvr_vtx *)(f.verts + p->first);
+        int fin = 0;
+        for (int k = 0; k < p->n && !fin; k++) fin = isfinite(v[k].x) && isfinite(v[k].y) && isfinite(v[k].z) && v[k].z < 1e30f;
+        if (fin) continue;
+        for (int k = 0; k < p->n; k++) { v[k].x = -1e4f; v[k].y = -1e4f; v[k].z = 1e-6f; }
     }
     {   static int cap_hud;
         if (f.npolys > cap_hud) { cap_hud = f.npolys + 1024; poly_hud = realloc(poly_hud, (size_t)cap_hud); poly_uvbox = realloc(poly_uvbox, (size_t)cap_hud * sizeof *poly_uvbox); poly_cap = realloc(poly_cap, (size_t)cap_hud); poly_edge = realloc(poly_edge, (size_t)cap_hud); }
