@@ -314,6 +314,43 @@ int main(void) {
         CHECK(peaks[1] > 7000 && peaks[1] < 9000);
         CHECK(peaks[0] < peaks[1] / 4);
     }
+    /* 10b3. DIPAN 0x18 turns the right side down 24 dB; 0x08 the left */
+    {
+        int lr[2][2];
+        for (int pass = 0; pass < 2; pass++) {
+            CH3(1, 0x0000); CH3(2, 0); CH3(3, 200); CH3(4, 31); CH3(5, 0x3C00); CH3(6, 0); CH3(8, 0);
+            CH3(9, (15 << 8) | (pass ? 0x08 : 0x18)); CH3(10, 0x20);
+            uint64_t t4 = c.cycles + 900000000ull + 300000000ull * (uint64_t)pass;
+            dc_aica_advance(t4);
+            { int16_t junk[2048]; while (dc_aica_audio_read(junk, 1024) > 0) {} }
+            CH3(0, 0xC000 | (1 << 9) | 0x01);
+            for (int k = 1; k <= 10; k++) dc_aica_advance(t4 + (uint64_t)k * 200000000ull / 44100 * 50);
+            got = dc_aica_audio_read(au, 4096);
+            lr[pass][0] = lr[pass][1] = 0;
+            for (int i = got / 2; i < got; i++) for (int s = 0; s < 2; s++) if (abs(au[i * 2 + s]) > lr[pass][s]) lr[pass][s] = abs(au[i * 2 + s]);
+            CH3(5, 0x3C00 | 31); CH3(0, 0x8000 | 0x01);
+            for (int k = 11; k <= 14; k++) dc_aica_advance(t4 + (uint64_t)k * 200000000ull / 44100 * 50);
+        }
+        CHECK(lr[0][0] > 7000 && lr[0][1] < lr[0][0] / 10);
+        CHECK(lr[1][1] > 7000 && lr[1][0] < lr[1][1] / 10);
+    }
+    /* 10b4. ADPCM long stream looping over a zero-mean pattern (+/- alternating nibbles): the nibble
+     * after the loop end (a loud one here) never gets into the decoder, so the output doesn't drift */
+    {
+        for (int i = 0; i < 32; i++) dc_wr8(0xA0830000u + i, 0x91);
+        dc_wr8(0xA0830000u + 32, 0x77); dc_wr8(0xA0830000u + 33, 0x77);
+        CH3(1, 0x0000); CH3(2, 0); CH3(3, 64); CH3(4, 31); CH3(5, 0x3C00); CH3(6, 0); CH3(8, 0); CH3(9, 15 << 8); CH3(10, 0x20);
+        uint64_t t5 = c.cycles + 1600000000ull;
+        dc_aica_advance(t5);
+        { int16_t junk[2048]; while (dc_aica_audio_read(junk, 1024) > 0) {} }
+        CH3(0, 0xC000 | (1 << 9) | (3 << 7) | 0x03);                          /* long stream at 0x30000 */
+        for (int k = 1; k <= 20; k++) dc_aica_advance(t5 + (uint64_t)k * 200000000ull / 44100 * 50);
+        got = dc_aica_audio_read(au, 4096);
+        long sum = 0; for (int i = got / 2; i < got; i++) sum += au[i * 2];
+        CHECK(labs(sum / (got - got / 2)) < 200);
+        CH3(5, 0x3C00 | 31); CH3(0, 0x8000 | 0x03);
+        for (int k = 21; k <= 24; k++) dc_aica_advance(t5 + (uint64_t)k * 200000000ull / 44100 * 50);
+    }
     /* 10c. hblank interrupt (SPG_HBLANK_INT modes): count ISTNRM bit 5 over one field */
     {
         int counts[3];

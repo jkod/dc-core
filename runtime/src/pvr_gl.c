@@ -546,7 +546,8 @@ static int overhang_backdrop(const pvr_poly *p, const pvr_vtx *v, float rw, floa
     if (p->n < 3 || p->n > 8) return 0;
     float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f;
     for (int k = 0; k < p->n; k++) {
-        if (v[k].x < -0.15f * rw || v[k].x > 1.15f * rw) return 0;   /* far past the picture: 3D */
+        if (v[k].x < -0.5f * rw || v[k].x > 1.5f * rw) return 0;   /* far past the picture: 3D (the opening's sky
+                                                                       * card pans out to x -100..695) */
         if (fabsf(v[k].z - v[0].z) > 1e-6f * fabsf(v[0].z) + 1e-9f) return 0;   /* not flat: perspective */
         if (v[k].x < x0) x0 = v[k].x; if (v[k].x > x1) x1 = v[k].x;
         if (v[k].y < y0) y0 = v[k].y; if (v[k].y > y1) y1 = v[k].y;

@@ -173,6 +173,7 @@ static float filter(int c, float x) {
 static const int adpcm_scale[8] = { 0x0E6, 0x0E6, 0x0E6, 0x0E6, 0x133, 0x199, 0x200, 0x266 };
 static void adpcm_one(chan_t *h, int nib) {
     int delta = (h->adpcm_step * ((nib & 7) * 2 + 1)) >> 3;
+    if (delta > 32767) delta = 32767;
     if (nib & 8) delta = -delta;
     h->adpcm_sig += delta;
     if (h->adpcm_sig > 32767) h->adpcm_sig = 32767; if (h->adpcm_sig < -32768) h->adpcm_sig = -32768;
@@ -219,8 +220,13 @@ static int16_t fetch(int c) {
     } else if (fmt == 1) {
         s0 = (int8_t)dc_aram[(sa + i) & 0x1FFFFF] << 8; s1 = (int8_t)dc_aram[(sa + i + 1) & 0x1FFFFF] << 8;
     } else {
-        adpcm_to(h, sa, creg(c, 2), i + 1, fmt == 3);
-        s0 = h->adpcm_prev; s1 = h->adpcm_sig;
+        /* the last sample before the loop end: its successor is the loop start, not the nibble past
+         * the end, so decode only up to it (decoding past the end put a stray nibble into a long
+         * stream's state at every wrap: a DC offset that drifted the music up and down) */
+        uint32_t lea = creg(c, 3); if (fmt == 3) lea = (lea + 3) & ~3u;
+        int last = lea && i + 1 >= lea;
+        adpcm_to(h, sa, creg(c, 2), last ? i : i + 1, fmt == 3);
+        s0 = last ? h->adpcm_sig : h->adpcm_prev; s1 = h->adpcm_sig;
     }
     return (int16_t)(s0 + (int32_t)((double)(s1 - s0) * fr));
 }
@@ -233,7 +239,10 @@ static void advance_channels(void) {
         double step = (1.0 + (pitch & 0x3FF) / 1024.0) * (oct >= 0 ? (double)(1 << oct) : 1.0 / (1 << -oct));
         ch[c].pos += step;
         uint32_t lsa = creg(c, 2), lea = creg(c, 3);
+        if (((creg(c, 0) >> 7) & 3) == 3) lea = (lea + 3) & ~3u;   /* an ADPCM long stream ends on a 4-sample boundary */
         int loop = (creg(c, 0) >> 9) & 1;
+        /* LPSLNK: the attack ends when playback reaches the loop start */
+        if (((creg(c, 5) >> 14) & 1) && ch[c].eg_state == EG_ATTACK && ch[c].pos >= lsa) ch[c].eg_state = EG_DECAY1;
         if (lea && ch[c].pos >= lea) {
             ch[c].looped = 1;
             if (loop && lea > lsa) ch[c].pos = lsa + (ch[c].pos - lea);
@@ -375,8 +384,8 @@ static void mix_sample(void) {
         int units = (int)h->att + 4 * (int)tl + 32 * (int)(15 - disdl);
         float g = gain(units) * (h->cur / 32768.f), gl = g, gr = g;
         int pan = (int)(dipan & 15);
-        if (pan == 15) { if (dipan & 16) gr = 0; else gl = 0; }
-        else if (dipan & 16) gl *= gain(32 * pan); else gr *= gain(32 * pan);
+        /* DIPAN/EFPAN: 0x1n turns the right side down by 3 dB per n, 0x0n the left; n = 15 mutes it */
+        if (dipan & 16) gr *= pan == 15 ? 0.f : gain(32 * pan); else gl *= pan == 15 ? 0.f : gain(32 * pan);
         l += gl; r += gr;
     }
     dsp_step();
@@ -386,8 +395,8 @@ static void mix_sample(void) {
         if (!efsdl) continue;
         float g = gain(32 * (int)(15 - efsdl)) * (float)(int16_t)dsp.efreg[i] / 32768.f, gl = g, gr = g;
         int pan = (int)(efpan & 15);
-        if (pan == 15) { if (efpan & 16) gr = 0; else gl = 0; }
-        else if (efpan & 16) gl *= gain(32 * pan); else gr *= gain(32 * pan);
+        /* DIPAN/EFPAN: 0x1n turns the right side down by 3 dB per n, 0x0n the left; n = 15 mutes it */
+        if (efpan & 16) gr *= pan == 15 ? 0.f : gain(32 * pan); else gl *= pan == 15 ? 0.f : gain(32 * pan);
         l += gl; r += gr;
     }
     {                                                                /* CD audio: external inputs 16 (L), 17 (R) */
@@ -398,8 +407,8 @@ static void mix_sample(void) {
                 if (!efsdl) continue;
                 float g = gain(32 * (int)(15 - efsdl)) * (float)(i ? cr : cl) / 32768.f, gl = g, gr = g;
                 int pan = (int)(efpan & 15);
-                if (pan == 15) { if (efpan & 16) gr = 0; else gl = 0; }
-                else if (efpan & 16) gl *= gain(32 * pan); else gr *= gain(32 * pan);
+                /* DIPAN/EFPAN: 0x1n turns the right side down by 3 dB per n, 0x0n the left; n = 15 mutes it */
+                if (efpan & 16) gr *= pan == 15 ? 0.f : gain(32 * pan); else gl *= pan == 15 ? 0.f : gain(32 * pan);
                 l += gl; r += gr;
             }
     }
