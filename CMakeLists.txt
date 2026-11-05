@@ -122,12 +122,20 @@ function(dccore_add_player target)
     if(NOT A_VERSION)
       set(A_VERSION "0.1")
     endif()
-    nx_generate_nacp(${target}.nacp NAME "${A_TITLE}" AUTHOR "${A_AUTHOR}" VERSION "${A_VERSION}")
+    # the .nro with devkitPro's own tools (nacptool, elf2nro), as the Quake III port does, rather than
+    # the toolchain's nx_create_nro helper
+    find_program(DCCORE_NACPTOOL nacptool HINTS $ENV{DEVKITPRO}/tools/bin /opt/devkitpro/tools/bin REQUIRED)
+    find_program(DCCORE_ELF2NRO elf2nro HINTS $ENV{DEVKITPRO}/tools/bin /opt/devkitpro/tools/bin REQUIRED)
+    set(nacp ${CMAKE_CURRENT_BINARY_DIR}/${target}.nacp)
+    set(icon_arg)
     if(icon_dir)
-      nx_create_nro(${target} NACP ${target}.nacp ICON ${icon_dir}/icon.jpg)
-    else()
-      nx_create_nro(${target} NACP ${target}.nacp)
+      set(icon_arg --icon=${icon_dir}/icon.jpg)
     endif()
+    add_custom_command(TARGET ${target} POST_BUILD
+      COMMAND ${DCCORE_NACPTOOL} --create "${A_TITLE}" "${A_AUTHOR}" "${A_VERSION}" ${nacp}
+      COMMAND ${DCCORE_ELF2NRO} $<TARGET_FILE:${target}> ${CMAKE_CURRENT_BINARY_DIR}/${target}.nro ${icon_arg} --nacp=${nacp}
+      COMMENT "Building ${target}.nro"
+      VERBATIM)
   endif()
 endfunction()
 
