@@ -291,7 +291,7 @@ static int shot_window(void) { static int v = -1; if (v < 0) { const char *e = g
 static void screenshot_to(const char *path) {
     int w = 0, h = 0;
     static uint8_t *rgb; rgb = realloc(rgb, 1920 * 4 * 1440 * 4 * 3);
-    if (shot_window() && win_rgb_w) { w = win_rgb_w; h = win_rgb_h; memcpy(rgb, win_rgb, (size_t)w * h * 3); }
+    if (shot_window() && win_rgb_w) { w = win_rgb_w; h = win_rgb_h; size_t n = (size_t)w * (size_t)h * 3; memcpy(rgb, win_rgb, n < sizeof win_rgb ? n : sizeof win_rgb); }
     else dc_pvr_gl_read(rgb, &w, &h);
     if (w <= 0) return;
     SDL_Surface *s = SDL_CreateRGBSurfaceWithFormatFrom(rgb, w, h, 24, w * 3, SDL_PIXELFORMAT_RGB24);
