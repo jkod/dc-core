@@ -157,7 +157,15 @@ endif()
 # library. The generated C is derived from the game and stays in the build directory.
 # FOUND: function starts a run found by interpreting (dc_found_funcs_path); when the file changes,
 # the next build recompiles with them. Missing is fine.
-option(DCCORE_FAST_CODE "faster generated code: registers as locals, labels only at real entries" ON)
+# DCCORE_FAST_CODEGEN: on by default only on the Switch -- it about doubles the generated C (each
+# function also gets a fallback copy) and so the build time, for ~8% on a PC that runs these games at
+# full speed anyway. (It replaces DCCORE_FAST_CODE, which build directories configured before kept on.)
+if(NINTENDO_SWITCH OR CMAKE_SYSTEM_NAME STREQUAL "NintendoSwitch")
+  set(dccore_fast_default ON)
+else()
+  set(dccore_fast_default OFF)
+endif()
+option(DCCORE_FAST_CODEGEN "faster generated code: registers as locals, labels only at real entries (slower build)" ${dccore_fast_default})
 function(dccore_add_recomp target)
   cmake_parse_arguments(A "NO_DISCOVER" "BIN;FUNCS;BASE;MAX_FUNC_BYTES;PREFIX;FOUND" "SETJMP" ${ARGN})
   if(NOT A_BASE)
@@ -191,10 +199,10 @@ function(dccore_add_recomp target)
       set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${A_FOUND})
     endif()
   endif()
-  # DCCORE_FAST_CODE (on): registers as locals in each function, and labels only where control can
+  # DCCORE_FAST_CODEGEN (on): registers as locals in each function, and labels only where control can
   # arrive (each function also gets a full fallback version for any other entry), so the C compiler
   # can optimise across instructions. Off: every register access is c->r[n], every instruction a label.
-  if(DCCORE_FAST_CODE)
+  if(DCCORE_FAST_CODEGEN)
     set(fast --sparse-labels)
   else()
     set(fast --no-local-regs)
