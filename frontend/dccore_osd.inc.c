@@ -145,8 +145,8 @@ static volatile int prof_state;                    /* 0 idle, 1 waiting / sampli
 static volatile int prof_sampling;                 /* set once the samples start */
 static int prof_main(void *arg) {
     (void)arg;
-    enum { MAX = 12000 };
-    static int64_t off[MAX];
+    enum { MAX = 12000, DEPTH = 6 };                /* pc, lr and up to four frames of the stack */
+    static int64_t off[MAX][DEPTH];
     static uint64_t ctx[0x320 / 8] __attribute__((aligned(16)));    /* libnx ThreadContext; pc at 0x100 */
     /* it never exits: a detached SDL thread that ends crashed the Switch (SDL's thread clean-up);
      * it waits for the next PROFILE instead */
@@ -168,7 +168,16 @@ static int prof_main(void *arg) {
         for (int t = 0; t < 50 && r; t++) r = svcGetThreadContext3(ctx, h);
         svcSetThreadActivity(h, 0);
         if (r) { if (!err_ctx) err_ctx = r; fails++; continue; }
-        off[n++] = (int64_t)(ctx[0x100 / 8] - anchor);
+        /* the frame-pointer chain, read only inside the thread's stack (sp .. sp + 1 MB) */
+        uint64_t pc = ctx[0x100 / 8], lr = ctx[0xF0 / 8], fp = ctx[0xE8 / 8], sp = ctx[0xF8 / 8];
+        off[n][0] = (int64_t)(pc - anchor); off[n][1] = (int64_t)(lr - anchor);
+        for (int d = 2; d < DEPTH; d++) {
+            if (fp < sp || fp >= sp + 0x100000 || (fp & 7)) { off[n][d] = 0; continue; }
+            const uint64_t *fr = (const uint64_t *)(uintptr_t)fp;
+            off[n][d] = (int64_t)(fr[1] - anchor);
+            fp = fr[0] > fp ? fr[0] : 0;
+        }
+        n++;
     }
     char path[1100]; snprintf(path, sizeof path, "%s", osd_cfg_path[0] ? osd_cfg_path : "osd.cfg");
     char *slash = strrchr(path, '/'); snprintf(slash ? slash + 1 : path, 64, "profile.txt");
@@ -178,8 +187,11 @@ static int prof_main(void *arg) {
         if (f) { fprintf(f, "# no samples: %d errors, svcSetThreadActivity %x, svcGetThreadContext3 %x\n", fails, err_pause, err_ctx); fclose(f); }
         prof_state = 3; continue;
     }
-    fprintf(f, "# dc-core profile: %d samples, %d errors; offsets from dc_prof_anchor\n", n, fails);
-    for (int i = 0; i < n; i++) fprintf(f, "%llx\n", (unsigned long long)off[i]);
+    fprintf(f, "# dc-core profile: %d samples, %d errors; offsets from dc_prof_anchor: pc lr and 4 frames\n", n, fails);
+    for (int i = 0; i < n; i++) {
+        for (int d = 0; d < DEPTH; d++) fprintf(f, d ? " %llx" : "%llx", (unsigned long long)off[i][d]);
+        fputc('\n', f);
+    }
     fclose(f);
     fprintf(stderr, "dc-core: profile: %d samples in %s\n", n, path);
     prof_state = 2;

@@ -1020,6 +1020,7 @@ typedef struct { uint32_t isp, tsp, tcw; int list, set, mark, blend, uclip, ux0,
 /* HUD polygons (flat, at or above dc_pvr_gl_hud_z) get the sharper texture filter */
 int dc_pvr_gl_hud_sharp = 1;
 int dc_pvr_gl_hud_move = 1;
+int (*dc_pvr_gl_hud_pin)(float x0, float y0, float x1, float y1);
 int dc_pvr_gl_hud_split_wide;
 static int is_hud(const pvr_poly *p) { return poly_hud && poly_base ? poly_hud[p - poly_base] : 0; }
 static float (*poly_uvbox)[4];          /* per polygon: its UV range (2D overlay pieces that sample clamped to it) */
@@ -1912,6 +1913,17 @@ void dc_pvr_gl_render(int scale) {
             else if (flat && v[0].z >= ovl_z) { push_dx = 0; if (v[0].z == ovl_z) { push_wide = WW; push_rw = (float)RW; } }   /* pause shade and menu */
             else if (mnx >= panel_x + 2.f) push_dx = panel_dx;      /* map, timer (the views' coin icons start just left of it) */
             else if (flat && v[0].z >= dc_pvr_gl_hud_z && dc_pvr_gl_hud_z > 0) push_dx = view_dx + out * side_dx;   /* the views' HUD (drawn unclipped) */
+        }
+        /* a port's pinned pieces (dc_pvr_gl_hud_pin): to a screen edge on every widescreen frame */
+        if (dc_pvr_gl_hud_pin && dc_pvr_gl_widescreen && !lbox && WW > (float)RW + 1.f && p->n >= 3 && v[0].z >= dc_pvr_gl_hud_z) {
+            float x0 = v[0].x, x1 = v[0].x, y0 = v[0].y, y1 = v[0].y; int flat = 1;
+            for (int k = 1; k < p->n; k++) {
+                if (v[k].x < x0) x0 = v[k].x; if (v[k].x > x1) x1 = v[k].x; if (v[k].y < y0) y0 = v[k].y; if (v[k].y > y1) y1 = v[k].y;
+                if (v[k].z != v[0].z) flat = 0;
+            }
+            float k640 = 640.f / (float)RW, k480 = 480.f / (float)f.height;
+            int side = flat ? dc_pvr_gl_hud_pin(x0 * k640, y0 * k480, x1 * k640, y1 * k480) : 0;
+            if (side) push_dx = (float)side * (WW - (float)RW) * 0.5f;
         }
         if (nscr && shade_poly(p, v) && p->n >= 3 && !split_wide && !grid_member(p, v)) {   /* a pattern wall's tiles are repeated instead */
             int flat = 1; for (int k = 1; k < p->n; k++) if (v[k].z != v[0].z) flat = 0;

@@ -119,6 +119,10 @@ extern int dc_pvr_gl_hud_sprites;       /* widescreen: only sprite polygons are 
 typedef struct { float x0, y0, x1, y1; int side; } dc_hud_zone;
 extern const dc_hud_zone *dc_pvr_gl_hud_zones;
 extern int dc_pvr_gl_hud_nzones;
+/* widescreen: a port's callback naming flat HUD pieces (at or above dc_pvr_gl_hud_z) that go to a screen edge
+ * on every frame, menus and shaded screens included (not in 4:3 letterboxed frames): given the piece's box in
+ * 640 x 480 picture units, it returns -1 (left edge), 1 (right edge) or 0 (as usual). Sega Rally 2: its logo. */
+extern int (*dc_pvr_gl_hud_pin)(float x0, float y0, float x1, float y1);
 extern int dc_pvr_gl_hud_move;        /* widescreen: HUD pieces move out to the screen edges (default 1) */
 /* widescreen HUD: a group of touching pieces that spans most of the width moves piece by piece instead of
  * staying centred: a fighting game's health bars joined by the timer between them (Dead or Alive 2) (default 0) */

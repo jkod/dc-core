@@ -627,7 +627,7 @@ static volatile uint64_t aica_target, aica_slept_at;
 static SDL_atomic_t aica_sleeping;
 static SDL_atomic_t aica_want;                           /* the game is waiting for aica_mx */
 static int aica_game_waits;                                 /* under aica_mx */
-static volatile int aica_stop;
+static volatile int aica_stop, aica_parked;
 static const uint64_t aica_chunk = 64ull * 200000000ull / 44100ull;   /* 64 samples a turn, then the game may get in */
 #ifdef __SWITCH__
 extern unsigned int svcSetThreadCoreMask(unsigned int handle, int preferred_core, unsigned int affinity_mask);
@@ -657,6 +657,12 @@ static int aica_thread(void *u) {
         SDL_LockMutex(aica_mx);
     }
     SDL_UnlockMutex(aica_mx);
+#ifdef __SWITCH__
+    /* a thread that ends crashes in SDL's Switch thread clean-up (Quit crashed this way, as the profiler's
+     * thread did): it parks instead, and the process's exit takes it */
+    aica_parked = 1;
+    for (;;) SDL_Delay(1000);
+#endif
     return 0;
 }
 static void aica_async_advance(uint64_t now) {
@@ -701,7 +707,12 @@ static void aica_thread_start(void) {
 static void aica_thread_stop(void) {
     if (!aica_thr) return;
     SDL_LockMutex(aica_mx); aica_stop = 1; SDL_CondBroadcast(aica_cv); SDL_CondBroadcast(aica_done_cv); SDL_UnlockMutex(aica_mx);
+#ifdef __SWITCH__
+    while (!aica_parked) SDL_Delay(1);                      /* it parks rather than ends (aica_thread) */
+    aica_parked = 0; aica_thr = NULL;
+#else
     SDL_WaitThread(aica_thr, NULL); aica_thr = NULL;
+#endif
     memset(&dc_aica_async, 0, sizeof dc_aica_async); dc_disc_lock = NULL;
 }
 static int aica_audio_read(int16_t *dst, int frames) {

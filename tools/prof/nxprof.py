@@ -44,30 +44,62 @@ def main():
     if not anchor:
         sys.exit("dc_prof_anchor isn't in %s: is it the build that made the profile?" % a.elf)
     hits, groups, n = collections.Counter(), collections.Counter(), 0
+    chains = collections.Counter()
+
+    def name_of(off):
+        pc = anchor[0] + off
+        i = bisect.bisect_right(addrs, pc) - 1
+        if i >= 0 and pc < funcs[i][0] + max(funcs[i][1], 1) + 0x1000:
+            return funcs[i][2]
+        return "(outside the program: system / kernel)"
+
+    def num(t):
+        v = int(t[1:], 16) if t.startswith("-") else int(t, 16)
+        if t.startswith("-"):
+            v = -v
+        return v - (1 << 64) if v >= 1 << 63 else v
+
+    # waiting / system-call leaves: what called them (newer profiles carry lr and 4 stack frames)
+    plumbing = ("svc", "mutex", "rmutex", "condvar", "__libnx", "_lock", "__retarget_lock", "__lock", "barrier", "semaphore")
     for line in open(a.profile):
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        pc = anchor[0] + int(line, 16) if not line.startswith("-") else anchor[0] - int(line[1:], 16)
-        i = bisect.bisect_right(addrs, pc) - 1
-        name = "(outside the program: system / kernel)"
-        if i >= 0 and pc < funcs[i][0] + max(funcs[i][1], 1) + 0x1000:
-            name = funcs[i][2]
+        cols = line.split()
+        name = name_of(num(cols[0]))
         n += 1
         hits[name] += 1
+        if name.startswith("svc") and len(cols) > 1:
+            path = []
+            for t in cols[1:]:
+                v = num(t)
+                if v == 0:
+                    continue
+                c = name_of(v)
+                if c.startswith(plumbing) or (path and path[-1] == c):
+                    continue
+                path.append(c)
+                if len(path) == 3:
+                    break
+            chains[name + "  <-  " + "  <-  ".join(path or ["?"])] += 1
+    for name, v in hits.items():
         if name.startswith(("f_", "fs_")):
-            groups["game code (f_ / fs_)"] += 1
+            groups["game code (f_ / fs_)"] += v
         elif name.startswith(("arm7_", "dsp_", "aica", "dc_aica", "sample_")):
-            groups["sound chip"] += 1
+            groups["sound chip"] += v
         elif name.startswith(("dc_", "sh4_", "ta_", "pvr", "new_", "gd")):
-            groups["dc-core runtime"] += 1
+            groups["dc-core runtime"] += v
         elif name.startswith("("):
-            groups[name] += 1
+            groups[name] += v
         else:
-            groups["libraries (libc, SDL, Mesa, libnx)"] += 1
+            groups["libraries (libc, SDL, Mesa, libnx)"] += v
     print("%d samples\n" % n)
     for g, v in groups.most_common():
         print("%5.1f%%  %s" % (100.0 * v / n, g))
+    if chains:
+        print("\nsystem calls and who made them (leaf <- callers):")
+        for c, v in chains.most_common(15):
+            print("%5.1f%%  %s" % (100.0 * v / n, c))
     print("\ntop functions:")
     for name, v in hits.most_common(a.top):
         print("%5.1f%%  %s" % (100.0 * v / n, name))
