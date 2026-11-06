@@ -912,11 +912,16 @@ static void extend_backdrop(const pvr_poly *p, const pvr_vtx *v, float rw, float
 }
 
 /* triangle with the PVR's culling (sign of the screen area; odd strip triangles are flipped) */
+/* dc_pvr_gl_camera_plane (a port opts in; Soulcalibur): pieces with corners on the camera plane are
+ * held over from the last frame (small ones) or drop out (their triangles). Off, they are drawn as
+ * they come, as before: Sega Rally 2's widened view has ground pieces beside the camera like that,
+ * and dropping them left holes of background colour at the widescreen edges. */
+int dc_pvr_gl_camera_plane;
 static void tri(const pvr_poly *p, const pvr_vtx *a, const pvr_vtx *b, const pvr_vtx *c, int flip, float cull_small) {
     /* a corner on the camera plane (1/w clamped to 1e30, or at infinity) next to ordinary ones: the
      * triangle would be drawn as a flat smear of one texel in front of everything (the opening's sand
      * floor under the camera), so it drops out */
-    {
+    if (dc_pvr_gl_camera_plane) {
         int on = (a->z >= 1e29f || !isfinite(a->x + a->y + a->z)) + (b->z >= 1e29f || !isfinite(b->x + b->y + b->z)) + (c->z >= 1e29f || !isfinite(c->x + c->y + c->z));
         if (on && on < 3) return;
     }
@@ -1511,7 +1516,7 @@ void dc_pvr_gl_render(int scale) {
      * flashed to the plain background for that frame. Such a polygon is drawn as it was in the last
      * frame when that frame had the same piece (texture, mode, corner count) at the same place in its
      * list; the camera moves little in one frame. */
-    if (!capturing) {
+    if (!capturing && dc_pvr_gl_camera_plane) {
         #define KEEP_POLYS 64
         #define KEEP_VERTS 128
         static struct { uint32_t tcw, isp; int n; pvr_vtx v[KEEP_VERTS]; } *keep_p;
