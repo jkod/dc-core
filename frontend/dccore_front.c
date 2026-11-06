@@ -535,6 +535,9 @@ static void on_vblank(uint64_t f) {
         Uint32 now = SDL_GetTicks();
         if ((burst_on || (shot_held_since && now - shot_held_since > 300)) && now - last >= 100) { last = now; screenshot(); }
     }
+#ifdef __SWITCH__
+    prof_poll();
+#endif
     if (toast_live()) need_present = 1;
     if (need_present && (!dc_front_fast || presented % 8 == 0) && presented % (unsigned long)frame_skip() == 0) present_window();   /* only when the picture changed (or the window) */
     presented++;

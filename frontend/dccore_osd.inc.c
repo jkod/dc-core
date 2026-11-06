@@ -142,6 +142,7 @@ extern uint32_t svcSetThreadActivity(uint32_t thread, int paused);
 extern uint32_t svcGetThreadContext3(void *ctx, uint32_t thread);
 __attribute__((noinline, used)) void dc_prof_anchor(void) { __asm__ volatile(""); }
 static volatile int prof_state;                    /* 0 idle, 1 waiting / sampling, 2 saved, 3 failed */
+static volatile int prof_sampling;                 /* set once the samples start */
 static int prof_main(void *arg) {
     (void)arg;
     enum { MAX = 12000 };
@@ -153,6 +154,7 @@ static int prof_main(void *arg) {
     fprintf(stderr, "dc-core: profile: main thread handle %x\n", h);
     while (osd_open) SDL_Delay(50);                 /* the menu that started it */
     SDL_Delay(500);
+    prof_sampling = 1;
     Uint32 end = SDL_GetTicks() + 10000;
     while (SDL_GetTicks() < end && n < MAX) {
         SDL_Delay(1);
@@ -181,7 +183,7 @@ static int prof_main(void *arg) {
 }
 static void prof_start(void) {
     if (prof_state == 1) return;
-    prof_state = 1;
+    prof_sampling = 0; prof_state = 1;
     SDL_Thread *t = SDL_CreateThread(prof_main, "dc-prof", NULL);
     if (t) SDL_DetachThread(t); else prof_state = 3;
 }
@@ -238,6 +240,19 @@ static void osd_paint(int sel) {
 /* a short message at the top right (screenshot saved, new speed), for 1.5 s */
 static char toast_msg[40]; static Uint32 toast_until;
 static void toast(const char *msg) { snprintf(toast_msg, sizeof toast_msg, "%s", msg); toast_until = SDL_GetTicks() + 1500; need_present = 1; }
+#ifdef __SWITCH__
+/* the profiler's progress as messages on screen (from the game's thread: the sampler only sets flags) */
+static void prof_poll(void) {
+    static int shown_start, shown_state;
+    if (prof_state == 1 && prof_sampling && !shown_start) { shown_start = 1; shown_state = 1; toast("PROFILING 10 S..."); }
+    if (prof_state >= 2 && shown_state != prof_state) {
+        shown_state = prof_state; shown_start = 0;
+        toast(prof_state == 2 ? "PROFILE SAVED" : "PROFILE FAILED - SEE LOG");
+        toast_until = SDL_GetTicks() + 4000;
+    }
+    if (prof_state == 1 && !prof_sampling) shown_start = 0;
+}
+#endif
 static int toast_live(void) {
     static int was;
     int live = toast_until && SDL_GetTicks() < toast_until;
