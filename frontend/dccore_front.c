@@ -617,9 +617,17 @@ static void on_vblank(uint64_t f) {
  * chip it did inline. On by default on the Switch (its own core), DC_AICA_THREAD=1 / 0 elsewhere / to
  * turn it off. */
 static SDL_mutex *aica_mx, *disc_mx;
-static SDL_cond *aica_cv;
-static volatile uint64_t aica_target;
+/* Two wake-ups, each only sent when someone waits for it: on the Switch every signal is a system
+ * call (libnx's condvarWakeOne doesn't check for waiters) and the game used to send one each time it
+ * moved time on -- 37% of the game thread in a profile. The sound thread is woken when the game is a
+ * chunk (64 samples) ahead of where it went to sleep, or when the game needs it (enter); it sleeps at
+ * most 2 ms, so a wake-up lost between the two threads' unlocked checks only delays it that long. */
+static SDL_cond *aica_cv, *aica_done_cv;
+static volatile uint64_t aica_target, aica_slept_at;
+static SDL_atomic_t aica_sleeping;
+static int aica_game_waits;                                 /* under aica_mx */
 static volatile int aica_stop;
+static const uint64_t aica_chunk = 64ull * 200000000ull / 44100ull;   /* 64 samples a turn, then the game may get in */
 #ifdef __SWITCH__
 extern unsigned int svcSetThreadCoreMask(unsigned int handle, int preferred_core, unsigned int affinity_mask);
 #endif
@@ -628,13 +636,18 @@ static int aica_thread(void *u) {
 #ifdef __SWITCH__
     svcSetThreadCoreMask(0xFFFF8000u, 1, 1u << 1);         /* core 1; the game's thread is on core 0 */
 #endif
-    const uint64_t chunk = 64ull * 200000000ull / 44100ull; /* 64 samples a turn, then the game may get in */
     SDL_LockMutex(aica_mx);
     while (!aica_stop) {
         uint64_t t = aica_target, at = dc_aica_clock();
-        if (at > t) { SDL_CondWait(aica_cv, aica_mx); continue; }
-        dc_aica_advance(t - at > chunk ? at + chunk : t);
-        SDL_CondBroadcast(aica_cv);
+        if (at > t) {
+            aica_slept_at = at;
+            SDL_AtomicSet(&aica_sleeping, 1);
+            if (aica_target <= at && !aica_stop) SDL_CondWaitTimeout(aica_cv, aica_mx, 2);
+            SDL_AtomicSet(&aica_sleeping, 0);
+            continue;
+        }
+        dc_aica_advance(t - at > aica_chunk ? at + aica_chunk : t);
+        if (aica_game_waits) SDL_CondSignal(aica_done_cv);
         SDL_UnlockMutex(aica_mx);
         SDL_LockMutex(aica_mx);
     }
@@ -642,13 +655,22 @@ static int aica_thread(void *u) {
     return 0;
 }
 static void aica_async_advance(uint64_t now) {
-    if (now > aica_target) { aica_target = now; SDL_CondSignal(aica_cv); }
+    if (now <= aica_target) return;
+    aica_target = now;
+    if (SDL_AtomicGet(&aica_sleeping) && now - aica_slept_at >= aica_chunk) {
+        SDL_AtomicSet(&aica_sleeping, 0);                   /* one signal per sleep */
+        SDL_CondSignal(aica_cv);
+    }
 }
 static void aica_async_enter(uint64_t now) {
     Uint64 t = SDL_GetPerformanceCounter();
     SDL_LockMutex(aica_mx);
     if (now > aica_target) aica_target = now;
-    while (dc_aica_clock() <= now) { SDL_CondSignal(aica_cv); SDL_CondWait(aica_cv, aica_mx); }
+    if (dc_aica_clock() <= now) {
+        aica_game_waits = 1;
+        while (dc_aica_clock() <= now) { SDL_CondSignal(aica_cv); SDL_CondWait(aica_done_cv, aica_mx); }
+        aica_game_waits = 0;
+    }
     prof_wait += SDL_GetPerformanceCounter() - t;
 }
 static void aica_async_leave(void) { dc_aica_apply_irq(); SDL_UnlockMutex(aica_mx); }
@@ -661,8 +683,8 @@ static void aica_thread_start(void) {
     int on = e && *e == '1';
 #endif
     if (!on || aica_thr) return;
-    aica_mx = SDL_CreateMutex(); disc_mx = SDL_CreateMutex(); aica_cv = SDL_CreateCond();
-    if (!aica_mx || !disc_mx || !aica_cv) return;
+    aica_mx = SDL_CreateMutex(); disc_mx = SDL_CreateMutex(); aica_cv = SDL_CreateCond(); aica_done_cv = SDL_CreateCond();
+    if (!aica_mx || !disc_mx || !aica_cv || !aica_done_cv) return;
     dc_disc_lock = disc_lock;
     dc_aica_async.advance = aica_async_advance; dc_aica_async.enter = aica_async_enter; dc_aica_async.leave = aica_async_leave;
     aica_thr = SDL_CreateThread(aica_thread, "aica", NULL);
@@ -671,7 +693,7 @@ static void aica_thread_start(void) {
 }
 static void aica_thread_stop(void) {
     if (!aica_thr) return;
-    SDL_LockMutex(aica_mx); aica_stop = 1; SDL_CondBroadcast(aica_cv); SDL_UnlockMutex(aica_mx);
+    SDL_LockMutex(aica_mx); aica_stop = 1; SDL_CondBroadcast(aica_cv); SDL_CondBroadcast(aica_done_cv); SDL_UnlockMutex(aica_mx);
     SDL_WaitThread(aica_thr, NULL); aica_thr = NULL;
     memset(&dc_aica_async, 0, sizeof dc_aica_async); dc_disc_lock = NULL;
 }
