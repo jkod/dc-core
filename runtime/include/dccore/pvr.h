@@ -82,12 +82,16 @@ extern int dc_pvr_gl_hud_exact;
  * picture, so the side bars replace what the game draws beyond its edges (default 0) */
 extern int dc_pvr_gl_clip_2d;
 /* widescreen: 2D backdrops drawn exactly across the 4:3 picture (menu gradients and bands, sky cards)
- * continue to the screen edges by repeating their edge column; flat cards a little wider than the
- * picture continue with their texture mirrored at their edges (default 0) */
+ * continue to the screen edges by repeating their edge column; flat cards wider than the picture (to
+ * half a picture past each edge) continue with their texture mirrored at their edges; a backdrop made
+ * of a mesh of small flat untextured quads at one depth (a glow) continues in its edge colours
+ * (default 0) */
 extern int dc_pvr_gl_extend_backdrops;
 /* with it: a picture made of opaque, flat, screen-aligned tiles continues past the 4:3 edges as its
  * mirror image (each tile within a side width of an edge is drawn again reflected about it; default 0,
- * menus whose tiles should keep side bars leave it off) */
+ * menus whose tiles should keep side bars leave it off); a wall of pattern tiles (24+ quads at one
+ * depth across the picture, each showing the same whole texture, turning or not) has its outer
+ * columns repeated outwards a cell at a time */
 extern int dc_pvr_gl_extend_tiles;
 /* with it: only tiles at least this many pixels wide (default 0: all); a port can set it per field, e.g.
  * to mirror a picture of small tiles on one screen but not on menus built the same way */

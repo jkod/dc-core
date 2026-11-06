@@ -640,6 +640,147 @@ static void mirror_tile(const pvr_poly *p, const pvr_vtx *v, float rw, float ext
         push(&q[0]); push(&q[1]); push(&q[2]); push(&q[0]); push(&q[2]); push(&q[3]);
     }
 }
+/* dc_pvr_gl_extend_backdrops: a backdrop drawn as a mesh of small, flat, untextured, opaque rectangles
+ * at one depth (Soulcalibur's logo screen: a 58 x 58 grid of shaded quads making a glow, x -23..651,
+ * zooming) continues past its edges in its edge colours: each rectangle on the mesh's outer edge gets
+ * a strip out to the widescreen edge (and to the top / bottom of the picture when the mesh stops short
+ * of them), corners filled with the corner colour. mesh_z: the depths of this frame's meshes. */
+enum { MESH_MAX = 4 };
+static struct { float z, x0, x1, y0, y1; int n; } mesh[MESH_MAX]; static int nmesh;
+static int mesh_rect(const pvr_poly *p, const pvr_vtx *v, float *x0, float *x1, float *y0, float *y1) {
+    if (p->list != 0 || p->n != 4 || ((p->isp >> 25) & 1)) return 0;   /* opaque, untextured quads */
+    *x0 = *x1 = v[0].x; *y0 = *y1 = v[0].y;
+    for (int k = 1; k < 4; k++) {
+        if (v[k].z != v[0].z) return 0;
+        if (v[k].x < *x0) *x0 = v[k].x; if (v[k].x > *x1) *x1 = v[k].x;
+        if (v[k].y < *y0) *y0 = v[k].y; if (v[k].y > *y1) *y1 = v[k].y;
+    }
+    for (int k = 0; k < 4; k++)
+        if ((fabsf(v[k].x - *x0) > .5f && fabsf(v[k].x - *x1) > .5f) || (fabsf(v[k].y - *y0) > .5f && fabsf(v[k].y - *y1) > .5f)) return 0;
+    return *x1 - *x0 > 0.01f && *y1 - *y0 > 0.01f;
+}
+static void find_meshes(const pvr_frame *f, float rw, float rh) {
+    enum { NC = 8 };
+    struct { float z, x0, x1, y0, y1, big; int n; } c[NC]; int nc = 0;
+    nmesh = 0;
+    for (int i = 0; i < f->npolys; i++) {
+        const pvr_poly *p = &f->polys[i]; const pvr_vtx *v = f->verts + p->first;
+        float x0, x1, y0, y1;
+        if (!mesh_rect(p, v, &x0, &x1, &y0, &y1)) continue;
+        int j = 0; while (j < nc && c[j].z != v[0].z) j++;
+        if (j == nc) { if (nc == NC) continue; nc++; c[j].z = v[0].z; c[j].x0 = x0; c[j].x1 = x1; c[j].y0 = y0; c[j].y1 = y1; c[j].n = 0; c[j].big = 0; }
+        if (x0 < c[j].x0) c[j].x0 = x0; if (x1 > c[j].x1) c[j].x1 = x1;
+        if (y0 < c[j].y0) c[j].y0 = y0; if (y1 > c[j].y1) c[j].y1 = y1;
+        if (x1 - x0 > rw / 8.f || y1 - y0 > rh / 8.f) c[j].big = 1;
+        c[j].n++;
+    }
+    for (int j = 0; j < nc && nmesh < MESH_MAX; j++)
+        if (c[j].n >= 100 && !c[j].big && c[j].x1 - c[j].x0 > rw * 0.5f && c[j].y1 - c[j].y0 > rh * 0.5f &&
+            c[j].x0 > -0.5f * rw && c[j].x1 < 1.5f * rw && c[j].x0 < rw * 0.25f && c[j].x1 > rw * 0.75f) {
+            mesh[nmesh].z = c[j].z; mesh[nmesh].x0 = c[j].x0; mesh[nmesh].x1 = c[j].x1;
+            mesh[nmesh].y0 = c[j].y0; mesh[nmesh].y1 = c[j].y1; mesh[nmesh].n = c[j].n; nmesh++;
+        }
+}
+static void mesh_strip(const pvr_vtx *src, float x0, float y0, float x1, float y1, const float *c00, const float *c10, const float *c11, const float *c01) {
+    pvr_vtx q[4];
+    const float qx[4] = { x0, x1, x1, x0 }, qy[4] = { y0, y0, y1, y1 };
+    const float *qc[4] = { c00, c10, c11, c01 };
+    for (int k = 0; k < 4; k++) { q[k] = *src; q[k].x = qx[k]; q[k].y = qy[k]; memcpy(q[k].c, qc[k], 16); memcpy(q[k].o, src->o, 16); }
+    push(&q[0]); push(&q[1]); push(&q[2]); push(&q[0]); push(&q[2]); push(&q[3]);
+}
+static int mesh_edge(const pvr_poly *p, const pvr_vtx *v, float rw, float rh, float ext) {
+    if (!nmesh) return 0;
+    float x0, x1, y0, y1;
+    if (!mesh_rect(p, v, &x0, &x1, &y0, &y1)) return 0;
+    int j = 0; while (j < nmesh && mesh[j].z != v[0].z) j++;
+    if (j == nmesh) return 0;
+    /* the corners' colours */
+    const float *cTL = v[0].c, *cTR = v[0].c, *cBR = v[0].c, *cBL = v[0].c;
+    for (int k = 0; k < 4; k++) {
+        int r = fabsf(v[k].x - x1) <= .5f, b = fabsf(v[k].y - y1) <= .5f;
+        if (!r && !b) cTL = v[k].c; else if (r && !b) cTR = v[k].c; else if (r && b) cBR = v[k].c; else cBL = v[k].c;
+    }
+    int L = fabsf(x0 - mesh[j].x0) < .5f, R = fabsf(x1 - mesh[j].x1) < .5f;
+    int T = fabsf(y0 - mesh[j].y0) < .5f && mesh[j].y0 > 0.5f, B = fabsf(y1 - mesh[j].y1) < .5f && mesh[j].y1 < rh - 0.5f;
+    float lx = -ext, rx = rw + ext, ty = -1.f, by = rh + 1.f;
+    if (L && mesh[j].x0 > lx) mesh_strip(&v[0], lx, y0, x0, y1, cTL, cTL, cBL, cBL);
+    if (R && mesh[j].x1 < rx) mesh_strip(&v[0], x1, y0, rx, y1, cTR, cTR, cBR, cBR);
+    if (T) mesh_strip(&v[0], x0, ty, x1, y0, cTL, cTR, cTR, cTL);
+    if (B) mesh_strip(&v[0], x0, y1, x1, by, cBL, cBR, cBR, cBL);
+    if (T && L) mesh_strip(&v[0], lx, ty, x0, y0, cTL, cTL, cTL, cTL);
+    if (T && R) mesh_strip(&v[0], x1, ty, rx, y0, cTR, cTR, cTR, cTR);
+    if (B && L) mesh_strip(&v[0], lx, y1, x0, by, cBL, cBL, cBL, cBL);
+    if (B && R) mesh_strip(&v[0], x1, y1, rx, by, cBR, cBR, cBR, cBR);
+    return 1;
+}
+/* dc_pvr_gl_extend_tiles: a wall of pattern tiles (Soulcalibur's opening, Xianghua's scenes: 10 x 8
+ * tiles of 64 pixels at one depth, each showing the same whole texture and flipping over in a ripple)
+ * continues past the 4:3 edges: each tile in the outer column on a side is repeated outwards a cell
+ * at a time, so the pattern fills the screen (also while the tiles turn over from one pattern to the
+ * next: tiles of both textures at the depth). Grids: this frame's walls (depth, extent, cell). */
+enum { GRID_MAX = 4 };
+static struct { float z, x0, x1, cell, u0, u1, w0, w1; } grid[GRID_MAX]; static int ngrid;
+static int grid_quad(const pvr_poly *p, const pvr_vtx *v, float *x0, float *x1, float *u0, float *u1, float *w0, float *w1) {
+    if (p->list != 0 || p->n != 4 || !((p->isp >> 25) & 1)) return 0;
+    *x0 = *x1 = v[0].x; *u0 = *u1 = v[0].u; *w0 = *w1 = v[0].v;
+    for (int k = 1; k < 4; k++) {
+        if (v[k].z != v[0].z) return 0;
+        if (v[k].x < *x0) *x0 = v[k].x; if (v[k].x > *x1) *x1 = v[k].x;
+        if (v[k].u < *u0) *u0 = v[k].u; if (v[k].u > *u1) *u1 = v[k].u;
+        if (v[k].v < *w0) *w0 = v[k].v; if (v[k].v > *w1) *w1 = v[k].v;
+    }
+    return 1;
+}
+static void find_grids(const pvr_frame *f, float rw) {
+    enum { NC = 8 };
+    struct { float z, x0, x1, cell, u0, u1, w0, w1; int n, odd; } c[NC]; int nc = 0;
+    ngrid = 0;
+    for (int i = 0; i < f->npolys; i++) {
+        const pvr_poly *p = &f->polys[i]; const pvr_vtx *v = f->verts + p->first;
+        float x0, x1, u0, u1, w0, w1;
+        if (!grid_quad(p, v, &x0, &x1, &u0, &u1, &w0, &w1)) continue;
+        int j = 0; while (j < nc && c[j].z != v[0].z) j++;
+        if (j == nc) { if (nc == NC) continue; nc++; c[j].z = v[0].z; c[j].x0 = x0; c[j].x1 = x1; c[j].cell = 0;
+                       c[j].u0 = u0; c[j].u1 = u1; c[j].w0 = w0; c[j].w1 = w1; c[j].n = 0; c[j].odd = 0; }
+        c[j].n++;
+        /* only the tiles showing the whole texture count (a stray piece at the depth doesn't) */
+        if (fabsf(u0 - c[j].u0) > 1e-3f || fabsf(u1 - c[j].u1) > 1e-3f || fabsf(w0 - c[j].w0) > 1e-3f || fabsf(w1 - c[j].w1) > 1e-3f) { c[j].odd++; continue; }
+        if (x0 < c[j].x0) c[j].x0 = x0; if (x1 > c[j].x1) c[j].x1 = x1;
+        if (x1 - x0 > c[j].cell) c[j].cell = x1 - x0;
+    }
+    for (int j = 0; j < nc && ngrid < GRID_MAX; j++)
+        if (c[j].odd * 10 <= c[j].n && c[j].n >= 24 && c[j].cell >= 16.f && c[j].cell <= rw / 4.f && c[j].u1 - c[j].u0 > 0.5f && c[j].w1 - c[j].w0 > 0.5f &&
+            c[j].x0 >= -1.f && c[j].x0 <= c[j].cell * 0.5f && c[j].x1 <= rw + 1.f && c[j].x1 >= rw - 1.f - c[j].cell * 0.5f) {
+            grid[ngrid].z = c[j].z; grid[ngrid].x0 = c[j].x0; grid[ngrid].x1 = c[j].x1; grid[ngrid].cell = c[j].cell;
+            grid[ngrid].u0 = c[j].u0; grid[ngrid].u1 = c[j].u1; grid[ngrid].w0 = c[j].w0; grid[ngrid].w1 = c[j].w1; ngrid++;
+        }
+}
+static int grid_member(const pvr_poly *p, const pvr_vtx *v) {
+    if (!ngrid) return 0;
+    float x0, x1, u0, u1, w0, w1;
+    if (!grid_quad(p, v, &x0, &x1, &u0, &u1, &w0, &w1)) return 0;
+    for (int j = 0; j < ngrid; j++) if (grid[j].z == v[0].z) return 1;   /* a stray piece at the depth isn't stretched either */
+    return 0;
+}
+static int grid_repeat(const pvr_poly *p, const pvr_vtx *v, float rw, float ext) {
+    if (!ngrid) return 0;
+    float x0, x1, u0, u1, w0, w1;
+    if (!grid_quad(p, v, &x0, &x1, &u0, &u1, &w0, &w1)) return 0;
+    int j = 0; while (j < ngrid && grid[j].z != v[0].z) j++;
+    if (j == ngrid) return 0;
+    if (fabsf(u0 - grid[j].u0) > 1e-3f || fabsf(u1 - grid[j].u1) > 1e-3f || fabsf(w0 - grid[j].w0) > 1e-3f || fabsf(w1 - grid[j].w1) > 1e-3f) return 1;
+    float cx = (x0 + x1) * 0.5f, cell = grid[j].cell;
+    int sd = cx < grid[j].x0 + cell ? -1 : cx > grid[j].x1 - cell ? 1 : 0;
+    if (!sd) return 1;
+    for (int k = 1; k <= 8; k++) {
+        float dx = (float)(sd * k) * cell;
+        if (sd < 0 ? x1 + dx <= -ext : x0 + dx >= rw + ext) break;
+        pvr_vtx q[4];
+        for (int m = 0; m < 4; m++) { q[m] = v[m]; q[m].x += dx; }
+        push(&q[0]); push(&q[1]); push(&q[2]); push(&q[0]); push(&q[2]); push(&q[3]);
+    }
+    return 1;
+}
 static void extend_backdrop(const pvr_poly *p, const pvr_vtx *v, float rw, float ext) {
     if (p->n < 3 || p->n > 64) return;
     const pvr_vtx *e[2][64]; int ne[2] = { 0, 0 };
@@ -1613,6 +1754,12 @@ void dc_pvr_gl_render(int scale) {
                 && t[j].area > box * 0.98f && t[j].area < box * 1.02f) scr_z[nscr++] = t[j].z;
         }
     }
+    nmesh = 0;
+    ngrid = 0;
+    if (dc_pvr_gl_extend_backdrops && dc_pvr_gl_widescreen && WW > (float)RW + 1.f) {
+        find_meshes(&f, (float)RW, (float)f.height);
+        if (dc_pvr_gl_extend_tiles) find_grids(&f, (float)RW);
+    }
     for (int i = 0; i < f.npolys; i++) {
         const pvr_poly *p = &f.polys[i];
         const pvr_vtx *v = f.verts + p->first;
@@ -1624,7 +1771,9 @@ void dc_pvr_gl_render(int scale) {
                 /* at the shade's depth only what reaches the picture's edges widens (the shade, or its tiles):
                  * a menu box drawn at that depth stays as it is (Daytona USA 2001's pause menu) */
                 float mnx = v[0].x, mxx = v[0].x; for (int k = 1; k < p->n; k++) { if (v[k].x < mnx) mnx = v[k].x; if (v[k].x > mxx) mxx = v[k].x; }
-                if (flat) { push_dx = 0; if (v[0].z == ovl_z && (mnx <= 1.f || mxx >= RW - 1.f)) { push_wide = WW; push_rw = (float)RW; } }
+                /* ... and ends there: a tile already reaching past the picture (Soulcalibur's opening scrolls
+                 * translucent paper panes past the 4:3 edges at the shade's depth) is not stretched */
+                if (flat) { push_dx = 0; if (v[0].z == ovl_z && (mnx <= 1.f || mxx >= RW - 1.f) && mnx >= -1.f && mxx <= RW + 1.f) { push_wide = WW; push_rw = (float)RW; } }
             }
         }
         if (split_wide) {
@@ -1642,7 +1791,7 @@ void dc_pvr_gl_render(int scale) {
             else if (mnx >= panel_x + 2.f) push_dx = panel_dx;      /* map, timer (the views' coin icons start just left of it) */
             else if (flat && v[0].z >= dc_pvr_gl_hud_z && dc_pvr_gl_hud_z > 0) push_dx = view_dx + out * side_dx;   /* the views' HUD (drawn unclipped) */
         }
-        if (nscr && shade_poly(p, v) && p->n >= 3 && !split_wide) {
+        if (nscr && shade_poly(p, v) && p->n >= 3 && !split_wide && !grid_member(p, v)) {   /* a pattern wall's tiles are repeated instead */
             int flat = 1; for (int k = 1; k < p->n; k++) if (v[k].z != v[0].z) flat = 0;
             for (int j = 0; j < nscr && flat; j++) if (scr_z[j] == v[0].z) { push_dx = 0; push_wide = WW; push_rw = (float)RW; break; }
         }
@@ -1676,7 +1825,9 @@ void dc_pvr_gl_render(int scale) {
         spans[i].first = nverts;
         if (p->sprite) { tri(p, &v[0], &v[1], &v[2], 0, cull_small); tri(p, &v[0], &v[2], &v[3], 0, cull_small); }
         else for (int k = 0; k + 2 < p->n; k++) tri(p, &v[k], &v[k + 1], &v[k + 2], k & 1, cull_small);
-        if (dc_pvr_gl_extend_backdrops && dc_pvr_gl_widescreen && WW > (float)RW + 1.f && push_dx == 0 && push_wide == 0 && cap_uv < 0)
+        if (dc_pvr_gl_extend_backdrops && dc_pvr_gl_widescreen && WW > (float)RW + 1.f && push_dx == 0 && push_wide == 0 && cap_uv < 0
+            && !mesh_edge(p, v, (float)RW, (float)f.height, (WW - (float)RW) * 0.5f + 2.f)
+            && !(dc_pvr_gl_extend_tiles && grid_repeat(p, v, (float)RW, (WW - (float)RW) * 0.5f + 2.f)))
             extend_backdrop(p, v, (float)RW, (WW - (float)RW) * 0.5f + 2.f);
         spans[i].count = nverts - spans[i].first;
         push_wide = 0; cap_uv = -1; push_zk = 1.f;
@@ -1928,7 +2079,9 @@ void dc_pvr_gl_render(int scale) {
             p_glDisable(GL_SCISSOR_TEST);
         }
     }
-    if (dc_pvr_gl_widescreen && dc_pvr_gl_side_fill && hud_dx == 0 && !lbox) {   /* not in races (their HUD is out there) */
+    /* not in races (their HUD is out there), nor over a pattern wall or a mesh backdrop carried on past the
+     * picture (black where its tiles turn edge-on is the wall's own) */
+    if (dc_pvr_gl_widescreen && dc_pvr_gl_side_fill && hud_dx == 0 && !lbox && !ngrid && !nmesh) {
         /* bars start where the picture's textured content ends when that is just short of the edge
          * (Rush's title image stops 3 pixels short of the right edge, which left a black line); content
          * that ends further in is a picture on an untextured background (Bomberman Online's logos on
