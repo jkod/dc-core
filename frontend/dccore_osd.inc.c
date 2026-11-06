@@ -148,6 +148,10 @@ static int prof_main(void *arg) {
     enum { MAX = 12000 };
     static int64_t off[MAX];
     static uint64_t ctx[0x320 / 8] __attribute__((aligned(16)));    /* libnx ThreadContext; pc at 0x100 */
+    /* it never exits: a detached SDL thread that ends crashed the Switch (SDL's thread clean-up);
+     * it waits for the next PROFILE instead */
+    for (;;) {
+    while (prof_state != 1) SDL_Delay(100);
     uint32_t h = envGetMainThreadHandle();
     const uint64_t anchor = (uint64_t)(uintptr_t)&dc_prof_anchor;
     int n = 0, fails = 0; uint32_t err_pause = 0, err_ctx = 0;
@@ -172,20 +176,22 @@ static int prof_main(void *arg) {
     fprintf(stderr, "dc-core: profile: %d samples, %d errors (pause %x, context %x), writing %s\n", n, fails, err_pause, err_ctx, path);
     if (!f || !n) {
         if (f) { fprintf(f, "# no samples: %d errors, svcSetThreadActivity %x, svcGetThreadContext3 %x\n", fails, err_pause, err_ctx); fclose(f); }
-        prof_state = 3; return 0;
+        prof_state = 3; continue;
     }
     fprintf(f, "# dc-core profile: %d samples, %d errors; offsets from dc_prof_anchor\n", n, fails);
     for (int i = 0; i < n; i++) fprintf(f, "%llx\n", (unsigned long long)off[i]);
     fclose(f);
     fprintf(stderr, "dc-core: profile: %d samples in %s\n", n, path);
     prof_state = 2;
+    }
     return 0;
 }
 static void prof_start(void) {
+    static SDL_Thread *t;
     if (prof_state == 1) return;
     prof_sampling = 0; prof_state = 1;
-    SDL_Thread *t = SDL_CreateThread(prof_main, "dc-prof", NULL);
-    if (t) SDL_DetachThread(t); else prof_state = 3;
+    if (!t) t = SDL_CreateThread(prof_main, "dc-prof", NULL);
+    if (!t) prof_state = 3;
 }
 #endif
 
