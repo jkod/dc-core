@@ -1922,7 +1922,8 @@ void dc_pvr_gl_render(int scale) {
                 if (v[k].z != v[0].z) flat = 0;
             }
             float k640 = 640.f / (float)RW, k480 = 480.f / (float)f.height;
-            int side = flat ? dc_pvr_gl_hud_pin(x0 * k640, y0 * k480, x1 * k640, y1 * k480) : 0;
+            (void)flat;                                       /* flat or a small 3D model (a spinning logo) */
+            int side = dc_pvr_gl_hud_pin(x0 * k640, y0 * k480, x1 * k640, y1 * k480);
             if (side) push_dx = (float)side * (WW - (float)RW) * 0.5f;
         }
         if (nscr && shade_poly(p, v) && p->n >= 3 && !split_wide && !grid_member(p, v)) {   /* a pattern wall's tiles are repeated instead */
