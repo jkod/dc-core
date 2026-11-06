@@ -279,7 +279,14 @@ void dc_events(sh4ctx *c) {
     if (hb_next < nx) nx = hb_next;
     for (int ch = 0; ch < 3; ch++) { uint64_t t = tmu_next_underflow(ch, now); if (t < nx) nx = t; }
     for (int i = 0; i < evn; i++) if (evq[i].at < nx) nx = evq[i].at;
-    if (dc_aica_arm_running() || (SBR(ISTEXT) & 2)) { uint64_t t = dc_aica_next(); if (t < nx) nx = t; }
+    if (dc_aica_arm_running() || (SBR(ISTEXT) & 2)) {
+        uint64_t t = dc_aica_next();
+        /* on its own thread the chip's clock lags the game's, so "64 samples after the chip" is
+         * usually already past: dc_events then ran after nearly every block (a quarter of the
+         * Switch's game thread). Hand it time 64 samples after the game instead. */
+        if (dc_aica_async.advance) { uint64_t turn = now + 64ull * 200000000ull / 44100ull; if (t < turn) t = turn; }
+        if (t < nx) nx = t;
+    }
     /* while an interrupt is still pending (masked), look again soon */
     if (holly_level() || ((*tmu_reg(0, 2) | *tmu_reg(1, 2) | *tmu_reg(2, 2)) & 0x100)) { uint64_t t = now + 2000; if (t < nx) nx = t; }
     dc_next_event = nx;
