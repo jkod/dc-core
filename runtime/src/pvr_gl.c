@@ -781,6 +781,110 @@ static int grid_repeat(const pvr_poly *p, const pvr_vtx *v, float rw, float ext)
     }
     return 1;
 }
+/* dc_pvr_gl_extend_backdrops: a far, tilted sky card (Soulcalibur's second opening: the sunset sky over
+ * the sand flight, a perspective quad that ends just past the 4:3 edge as the camera rolls) continues
+ * past its edges as its own mirror image, in its own plane: 1/w, u/w and v/w are linear in screen
+ * space, and a texture coordinate reflected about the edge's (u' = 2 u_edge - u) stays linear once
+ * multiplied by 1/w, so the strip beyond each edge of constant u or v is drawn with reflected UVs and
+ * the card's perspective. Only far cards (1/w under 0.005) among the frame's first pieces that cover a
+ * quarter of the picture; the strip stops where 1/w falls to 60% of the card's nearest value. */
+typedef struct { float x, y; } sk_pt;
+static int sk_clip(const sk_pt *in, int n, sk_pt *out, float A, float B, float C) {   /* keeps A x + B y + C >= 0 */
+    int m = 0;
+    for (int i = 0; i < n; i++) {
+        const sk_pt *a = &in[i], *b = &in[(i + 1) % n];
+        float da = A * a->x + B * a->y + C, db = A * b->x + B * b->y + C;
+        if (da >= 0) out[m++] = *a;
+        if ((da >= 0) != (db >= 0) && m < 15) { float t = da / (da - db); out[m].x = a->x + (b->x - a->x) * t; out[m].y = a->y + (b->y - a->y) * t; m++; }
+    }
+    return m;
+}
+static int sky_card(const pvr_poly *p, const pvr_vtx *v, float rw, float rh) {
+    if (p->list != 0 || p->n != 4 || p->sprite || !((p->isp >> 25) & 1)) return 0;
+    float zmin = 1e30f, zmax = 0;
+    for (int k = 0; k < 4; k++) {
+        if (!isfinite(v[k].x) || !isfinite(v[k].y) || !(v[k].z > 0) || v[k].z >= 0.005f) return 0;
+        if (v[k].z < zmin) zmin = v[k].z; if (v[k].z > zmax) zmax = v[k].z;
+    }
+    if (zmax - zmin < 1e-6f * zmax) return 0;                    /* flat: overhang_backdrop's */
+    const pvr_vtx *o[4] = { &v[0], &v[1], &v[3], &v[2] };       /* the outline of a strip: 0 1 3 2 */
+    float area = 0;
+    for (int k = 0; k < 4; k++) area += o[k]->x * o[(k + 1) & 3]->y - o[(k + 1) & 3]->x * o[k]->y;
+    return fabsf(area) * 0.5f >= rw * rh * 0.25f;
+}
+static int sky_cards;                                            /* such cards among the frame's first pieces */
+static void sky_mirror(const pvr_poly *p, const pvr_vtx *v, int index, float rw, float rh, float ext) {
+    /* one card alone (a sky made of several adjacent cards would get mirrored strips over its neighbours) */
+    if (index > 16 || sky_cards != 1 || !sky_card(p, v, rw, rh)) return;
+    float zmin = 1e30f;
+    for (int k = 0; k < 4; k++) if (v[k].z < zmin) zmin = v[k].z;
+    const pvr_vtx *o[4] = { &v[0], &v[1], &v[3], &v[2] };
+    /* z, u z, v z = a + b x + c y per triangle of the strip (0 1 2 and 1 2 3: the game's UVs follow
+     * each triangle, not one projective map of the quad); the corners must lie in one plane */
+    float fit[2][3][3], cfit[2][8][3];                           /* and the colours, base and offset */
+    for (int t = 0; t < 2; t++) {
+        const pvr_vtx *A = &v[t], *B = &v[t + 1], *C = &v[t + 2];
+        float d = (B->x - A->x) * (C->y - A->y) - (B->y - A->y) * (C->x - A->x);
+        if (fabsf(d) < 1.f) return;
+        float qa[3] = { A->z, A->u * A->z, A->v * A->z }, qb[3] = { B->z, B->u * B->z, B->v * B->z }, qc[3] = { C->z, C->u * C->z, C->v * C->z };
+        for (int j = 0; j < 3; j++) {
+            float gx = ((qb[j] - qa[j]) * (C->y - A->y) - (qc[j] - qa[j]) * (B->y - A->y)) / d;
+            float gy = ((qc[j] - qa[j]) * (B->x - A->x) - (qb[j] - qa[j]) * (C->x - A->x)) / d;
+            fit[t][j][1] = gx; fit[t][j][2] = gy; fit[t][j][0] = qa[j] - gx * A->x - gy * A->y;
+        }
+        for (int j = 0; j < 8; j++) {
+            float ca = j < 4 ? A->c[j] : A->o[j - 4], cb = j < 4 ? B->c[j] : B->o[j - 4], cc = j < 4 ? C->c[j] : C->o[j - 4];
+            float gx = ((cb - ca) * (C->y - A->y) - (cc - ca) * (B->y - A->y)) / d;
+            float gy = ((cc - ca) * (B->x - A->x) - (cb - ca) * (C->x - A->x)) / d;
+            cfit[t][j][1] = gx; cfit[t][j][2] = gy; cfit[t][j][0] = ca - gx * A->x - gy * A->y;
+        }
+    }
+    {   const pvr_vtx *D = &v[3];
+        float zd = fit[0][0][0] + fit[0][0][1] * D->x + fit[0][0][2] * D->y;
+        if (fabsf(zd - D->z) > 0.02f * D->z) return;             /* not one plane */
+    }
+    float cx = 0, cy = 0; for (int k = 0; k < 4; k++) { cx += o[k]->x * .25f; cy += o[k]->y * .25f; }
+    static const int edge_tri[4] = { 0, 1, 1, 0 };               /* outline edges 0-1, 1-3, 3-2, 2-0 */
+    for (int e = 0; e < 4; e++) {
+        const pvr_vtx *a = o[e], *b = o[(e + 1) & 3];
+        const float *fz = fit[edge_tri[e]][0], *fu = fit[edge_tri[e]][1], *fv = fit[edge_tri[e]][2];
+        int byu = fabsf(a->u - b->u) < 1e-3f, byv = fabsf(a->v - b->v) < 1e-3f;
+        if (byu == byv) continue;                                /* reflect about u = const or v = const */
+        float ev = byu ? a->u : a->v;
+        /* the side of the edge away from the card */
+        float LA = -(b->y - a->y), LB = b->x - a->x, LC = -(LA * a->x + LB * a->y);
+        if (LA * cx + LB * cy + LC > 0) { LA = -LA; LB = -LB; LC = -LC; }
+        sk_pt r0[16] = { { -ext, -1.f }, { rw + ext, -1.f }, { rw + ext, rh + 1.f }, { -ext, rh + 1.f } }, r1[16], r2[16];
+        int n = sk_clip(r0, 4, r1, LA, LB, LC);
+        if (n < 3) continue;
+        n = sk_clip(r1, n, r2, fz[1], fz[2], fz[0] - 0.6f * zmin);    /* stay in front of the horizon */
+        if (n < 3) continue;
+        pvr_vtx q[16];
+        for (int k = 0; k < n; k++) {
+            q[k] = v[0];
+            q[k].x = r2[k].x; q[k].y = r2[k].y;
+            float z = fz[0] + fz[1] * q[k].x + fz[2] * q[k].y;
+            q[k].z = z;
+            float u = (fu[0] + fu[1] * q[k].x + fu[2] * q[k].y) / z, w = (fv[0] + fv[1] * q[k].x + fv[2] * q[k].y) / z;
+            if (byu) u = 2.f * ev - u; else w = 2.f * ev - w;
+            q[k].u = u; q[k].v = w;
+            {   /* colours at the mirrored point: the edge's foot plus the distance back into the card */
+                float t2 = LA * q[k].x + LB * q[k].y + LC, nn = LA * LA + LB * LB;
+                float mx = q[k].x - 2.f * LA * t2 / nn, my = q[k].y - 2.f * LB * t2 / nn;
+                const float (*cf)[3] = cfit[edge_tri[e]];
+                for (int j = 0; j < 8; j++) {
+                    float c = cf[j][0] + cf[j][1] * mx + cf[j][2] * my;
+                    c = c < 0 ? 0 : c > 1 ? 1 : c;
+                    if (j < 4) q[k].c[j] = c; else q[k].o[j - 4] = c;
+                }
+            }
+            /* no deeper than the edge: the card's fog (by depth) would darken the far strip */
+            float ze = a->z < b->z ? a->z : b->z;
+            if (q[k].z < ze) q[k].z = ze;
+        }
+        for (int k = 1; k + 1 < n; k++) { push(&q[0]); push(&q[k]); push(&q[k + 1]); }
+    }
+}
 static void extend_backdrop(const pvr_poly *p, const pvr_vtx *v, float rw, float ext) {
     if (p->n < 3 || p->n > 64) return;
     const pvr_vtx *e[2][64]; int ne[2] = { 0, 0 };
@@ -1769,6 +1873,8 @@ void dc_pvr_gl_render(int scale) {
     ngrid = 0;
     if (dc_pvr_gl_extend_backdrops && dc_pvr_gl_widescreen && WW > (float)RW + 1.f) {
         find_meshes(&f, (float)RW, (float)f.height);
+        sky_cards = 0;
+        for (int i = 0; i < f.npolys && i <= 16; i++) sky_cards += sky_card(&f.polys[i], f.verts + f.polys[i].first, (float)RW, (float)f.height);
         if (dc_pvr_gl_extend_tiles) find_grids(&f, (float)RW);
     }
     for (int i = 0; i < f.npolys; i++) {
@@ -1839,7 +1945,10 @@ void dc_pvr_gl_render(int scale) {
         if (dc_pvr_gl_extend_backdrops && dc_pvr_gl_widescreen && WW > (float)RW + 1.f && push_dx == 0 && push_wide == 0 && cap_uv < 0
             && !mesh_edge(p, v, (float)RW, (float)f.height, (WW - (float)RW) * 0.5f + 2.f)
             && !(dc_pvr_gl_extend_tiles && grid_repeat(p, v, (float)RW, (WW - (float)RW) * 0.5f + 2.f)))
+        {
             extend_backdrop(p, v, (float)RW, (WW - (float)RW) * 0.5f + 2.f);
+            sky_mirror(p, v, i, (float)RW, (float)f.height, (WW - (float)RW) * 0.5f + 2.f);
+        }
         spans[i].count = nverts - spans[i].first;
         push_wide = 0; cap_uv = -1; push_zk = 1.f;
         if ((p->isp >> 25) & 1) for (int k = 0; k < p->n; k++) { if (v[k].x < cx0) cx0 = v[k].x; if (v[k].x > cx1) cx1 = v[k].x; }
