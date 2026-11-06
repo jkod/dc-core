@@ -75,7 +75,8 @@ static float osd_rumble_scale(int port) {
     return port >= 0 && port < 4 ? k[osd_rumble[port] & 3] : 1.0f;
 }
 static char osd_cfg_path[1024];
-static uint8_t osd_px[OSD_W * 192 * 4];
+#define OSD_H_MAX (22 + OSD_ITEMS * 12 + 22)     /* osd_paint: top + items + footer */
+static uint8_t osd_px[OSD_W * OSD_H_MAX * 4];
 static int osd_h;
 static float fps_now;
 static char fps_detail[48], fps_sound[48];
