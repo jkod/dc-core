@@ -157,6 +157,7 @@ endif()
 # library. The generated C is derived from the game and stays in the build directory.
 # FOUND: function starts a run found by interpreting (dc_found_funcs_path); when the file changes,
 # the next build recompiles with them. Missing is fine.
+option(DCCORE_FAST_CODE "faster generated code: registers as locals, labels only at real entries" ON)
 function(dccore_add_recomp target)
   cmake_parse_arguments(A "NO_DISCOVER" "BIN;FUNCS;BASE;MAX_FUNC_BYTES;PREFIX;FOUND" "SETJMP" ${ARGN})
   if(NOT A_BASE)
@@ -190,9 +191,17 @@ function(dccore_add_recomp target)
       set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${A_FOUND})
     endif()
   endif()
+  # DCCORE_FAST_CODE (on): registers as locals in each function, and labels only where control can
+  # arrive (each function also gets a full fallback version for any other entry), so the C compiler
+  # can optimise across instructions. Off: every register access is c->r[n], every instruction a label.
+  if(DCCORE_FAST_CODE)
+    set(fast --sparse-labels)
+  else()
+    set(fast --no-local-regs)
+  endif()
   execute_process(
     COMMAND ${DCCORE_PYTHON} ${DCCORE_DIR}/tools/recomp/sh4recomp.py ${A_BIN}
-            --base ${A_BASE} --funcs ${A_FUNCS} --out ${out} ${sj}
+            --base ${A_BASE} --funcs ${A_FUNCS} --out ${out} ${sj} ${fast}
     RESULT_VARIABLE rc ERROR_VARIABLE err)
   if(NOT rc EQUAL 0)
     message(FATAL_ERROR "sh4recomp failed (${rc}): ${err}")

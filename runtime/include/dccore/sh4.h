@@ -106,6 +106,7 @@ int  dc_site_resolve(dc_site *s, uint32_t addr);
 void dc_call_ticked(sh4ctx *c, uint32_t addr);      /* dc_call with the first call's time already charged */
 /* Called for things the recompiler cannot do statically (trapa, sleep, rte, unknown opcodes). */
 void dc_trap(sh4ctx *c, uint32_t pc, const char *what);
+uint32_t dc_mid_entry(sh4ctx *c, uint32_t pc);   /* entered where sparse labels left no label */
 
 /* Calls to a game's setjmp (recompiler --setjmp, runtime in coro.c): after the guest routine
  * has saved its registers, a host setjmp in this frame lets the guest longjmp come back here. */

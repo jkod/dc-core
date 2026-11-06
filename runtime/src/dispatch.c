@@ -218,6 +218,24 @@ static void call_loop(sh4ctx *c, uint32_t addr, int ticked) {
     }
 }
 
+/* a recompiled function was entered at an address that has no label (sh4recomp --sparse-labels): run
+ * it with the interpreter until it reaches translated code again. Each such address is reported once
+ * (and appended to DC_ENTRIES_OUT if set, for the recompiler's --entries list next build). */
+uint32_t dc_mid_entry(sh4ctx *c, uint32_t pc) {
+    static uint32_t seen[256]; static int n_seen;
+    int known = 0;
+    for (int i = 0; i < n_seen; i++) if (seen[i] == pc) { known = 1; break; }
+    if (!known) {
+        if (n_seen < 256) seen[n_seen++] = pc;
+        fprintf(stderr, "dc-core: entry at %08X inside a function (no label): interpreted\n", pc);
+        const char *e = getenv("DC_ENTRIES_OUT");
+        FILE *f = e && *e ? fopen(e, "a") : NULL;
+        if (f) { fprintf(f, "%08X\n", pc); fclose(f); }
+    }
+    if (!dc_interp_enabled) { fprintf(stderr, "dc-core: interpreter off (DC_INTERP=0)\n"); abort(); }
+    return dc_interp(c, pc);
+}
+
 void dc_trap(sh4ctx *c, uint32_t pc, const char *what) {
     if (trap_handler) { trap_handler(c, pc, what); return; }
     fprintf(stderr, "dc-core: trap '%s' at %08X\n", what, pc);

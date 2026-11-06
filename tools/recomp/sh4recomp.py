@@ -16,7 +16,7 @@ become tail calls through dc_call(). Generated code never contains game data exc
 literal-pool constants folded into instructions, and it is meant to be produced on the
 player's machine from their own disc, not distributed.
 """
-import argparse, bisect, os, re, struct, sys
+import re, argparse, bisect, os, re, struct, sys
 
 def s8(v): return v - 0x100 if v & 0x80 else v
 def s12(v): return v - 0x1000 if v & 0x800 else v
@@ -27,6 +27,75 @@ FR = lambda n: "c->fr.f[%d]" % n
 FU = lambda n: "c->fr.u[%d]" % n
 
 DELAYED = set()  # filled by decode: mnemonics that have a delay slot
+
+
+# ---------------------------------------------------------------------------------------------------
+# Registers as local variables (--local-regs, on by default). In the emitted C every SH-4 register
+# was c->r[n]: with aliasing off, the compiler must assume any guest store may change it, so it
+# reloads registers around every memory access. Here each function copies the registers it uses into
+# locals at entry and works on those; they go back to the context only where something else may look
+# at or change them: calls (dc_call, dc_call_site, setjmp), helpers that work on c->r (div1, mac,
+# set_sr's bank switch, traps), returns, and the slow path of DC_TICK (interrupts, task switches).
+SYNC_CALLS = ("dc_call", "dc_call_site", "DC_CALL_SETJMP", "DC_IDLE", "sh4_div1", "sh4_macl", "sh4_macw",
+              "sh4_set_sr", "dc_trap")
+_reg_re = re.compile(r"c->r\[(\d+)\]")
+
+def _call_spans(text, name):
+    """(start, end) of each `name(c...)` call in text, end just past its closing parenthesis"""
+    spans, i = [], 0
+    pat = re.compile(r"\b%s\(c\b" % re.escape(name))
+    while True:
+        m = pat.search(text, i)
+        if not m:
+            return spans
+        depth, j = 0, m.start() + len(name)               # at the opening parenthesis
+        while j < len(text):
+            if text[j] == "(": depth += 1
+            elif text[j] == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        spans.append((m.start(), j + 1))
+        i = j + 1
+
+def localize_regs(lines):
+    body = "\n".join(lines)
+    used = sorted({int(n) for n in _reg_re.findall(body)})
+    if not used:
+        return lines
+    written = sorted({int(n) for n in re.findall(r"c->r\[(\d+)\]\s*(?:[-+*/&|^]|<<|>>)?=(?!=)", body)}
+                     | {int(n) for n in re.findall(r"(?:\+\+|--)c->r\[(\d+)\]|c->r\[(\d+)\](?:\+\+|--)", body) for n in n if n})
+    flush = " ".join("c->r[%d] = r_%d;" % (n, n) for n in written)
+    reload = " ".join("r_%d = c->r[%d];" % (n, n) for n in used)
+    body = _reg_re.sub(lambda m: "r_%s" % m.group(1), body)
+    # calls and helpers that see c->r: flush before, reload after (as statements)
+    for name in SYNC_CALLS:
+        out, last = [], 0
+        for a, b in _call_spans(body, name):
+            if b < len(body) and body[b] == ";":
+                out.append(body[last:a]); out.append("{ %s %s; %s }" % (flush, body[a:b], reload)); last = b + 1
+        out.append(body[last:])
+        body = "".join(out)
+    # DC_TICK: only its rare slow path (interrupts, events) needs the context
+    out, last = [], 0
+    for a, b in _call_spans(body, "DC_TICK"):
+        arg = body[a + len("DC_TICK(c,"):b - 1].strip()
+        out.append(body[last:a])
+        out.append("do { c->cycles += (%s); if (c->cycles >= dc_next_event) { %s dc_events(c); %s } } while (0)" % (arg, flush, reload))
+        last = b
+    out.append(body[last:])
+    body = "".join(out)
+    # returns
+    if flush:
+        body = re.sub(r"\breturn ([^;]*);", lambda m: "{ %s return %s; }" % (flush, m.group(1)), body)
+    lines = body.split("\n")
+    decl = "  uint32_t %s;" % ", ".join("r_%d = c->r[%d]" % (n, n) for n in used)
+    for k, l in enumerate(lines):                       # after the header and jt, before the entry check
+        if l.startswith("  if (c->entry != "):
+            lines.insert(k, decl)
+            break
+    return lines
 
 
 class Insn:
@@ -49,6 +118,9 @@ class Translator:
         self.volatile = self._volatile_literals()
         self.setjmp = set()          # the game's setjmp routine(s): calls get DC_CALL_SETJMP
         self.idle_loops = True       # poll loops get DC_IDLE (--no-idle-loops: plain DC_TICK)
+        self.local_regs = True       # registers as locals (localize_regs; --no-local-regs: c->r everywhere)
+        self.sparse_labels = False   # labels only at real entries (--sparse-labels; others: dc_mid_entry)
+        self.extra_entries = set()   # mid-function entries seen at run time (--entries FILE)
         self.prefix = ""             # symbol prefix (a second executable: PREFIX_dc_fn_table, f_PREFIX_...)
 
     def _volatile_literals(self):
@@ -359,7 +431,23 @@ class Translator:
     # ------------------------------------------------------------------ emit
     def emit_function(self, start, end, known, out):
         """known: sorted list of function starts (for direct calls)."""
+        if self.sparse_labels:
+            # the full version, every instruction a label, for entries the fast one has no label for
+            # (an address it doesn't know about: copied code, a jump into a jump table's target...)
+            first = len(out)
+            sp, lr = self.sparse_labels, self.local_regs
+            self.sparse_labels = self.local_regs = False
+            self._emit_function(start, end, known, out)
+            self.sparse_labels, self.local_regs = sp, lr
+            out[first] = out[first].replace("uint32_t f_", "static uint32_t fs_", 1)
+        first = len(out)
+        self._emit_function(start, end, known, out)
+        if self.local_regs:
+            out[first:] = localize_regs(out[first:])
+
+    def _emit_function(self, start, end, known, out):
         name = "f_%s%08X" % (self.prefix, start)
+        first_line = len(out)
         out.append("uint32_t %s(sh4ctx *c) {" % name)
         out.append("  if (c->entry != %s) { jt = c->entry; goto local_jump; }" % h(start))
         insns = {}
@@ -373,13 +461,29 @@ class Translator:
             out.append("  " + self.emit_insn(i, insns, start, end) )
         # falling off the end continues in the next function
         out.append("  return %s;" % h(end))
+        keep = None
+        if self.sparse_labels:
+            # labels only where control can arrive from elsewhere: the start, branch targets, the
+            # instruction after each call (a coroutine / setjmp resumes there) and entries listed in
+            # the entries file. Every label is a place where the C compiler must assume the state
+            # can come from the entry switch, so with fewer of them it can optimise across
+            # instructions. Anything else entering here goes to the full version (fs_), which has
+            # every label, as all functions had before.
+            body = "\n".join(out[first_line:])
+            keep = {start} | {int(x, 16) for x in re.findall(r"goto L_([0-9A-F]{8})", body)} \
+                | {a + 4 for a, i in insns.items() if i.kind in ("bsr", "jsr", "bsrf")} \
+                | {e for e in self.extra_entries if start <= e < end}
+            out[first_line:] = [l for l in out[first_line:]
+                                if not (l.startswith("L_") and l.endswith(":") and int(l[2:10], 16) not in keep)]
         if needs_local_jump:
             out.append("local_jump:")
             out.append("  switch (jt) {")
             for a in range(start, end, 2):
-                out.append("    case %s: goto L_%08X;" % (h(a), a))
+                if keep is None or a in keep:
+                    out.append("    case %s: goto L_%08X;" % (h(a), a))
             out.append("  }")
-            out.append("  return jt;")
+            out.append("  %s" % ("return jt;" if keep is None else
+                       "c->entry = jt; return fs_%s%08X(c);" % (self.prefix, start)))
         out.append("}")
         # declare jt at top if needed
         if needs_local_jump:
@@ -714,6 +818,9 @@ def main():
     ap.add_argument("--max-func-bytes", type=lambda x: int(x, 0), default=0x40000,
                     help="cap a function's range (protects against huge data gaps)")
     ap.add_argument("--no-discover", action="store_true")
+    ap.add_argument("--no-local-regs", action="store_true", help="keep every register access as c->r[n]")
+    ap.add_argument("--sparse-labels", action="store_true", help="labels only at real entries (others run interpreted)")
+    ap.add_argument("--entries", help="file of mid-function entry addresses (hex, one a line) that keep their label")
     ap.add_argument("--no-idle-loops", action="store_true", help="no DC_IDLE in poll loops (time doesn't jump ahead there)")
     ap.add_argument("--setjmp", action="append", default=[], type=lambda x: int(x, 0),
                     help="address of the game's setjmp (cooperative threads; see dccore/coro.h)")
@@ -725,6 +832,14 @@ def main():
     tr = Translator(data, base)
     tr.setjmp = {(a & 0x1FFFFFFF) | 0x80000000 for a in args.setjmp}
     tr.idle_loops = not args.no_idle_loops
+    tr.local_regs = not args.no_local_regs and os.environ.get("DCCORE_LOCAL_REGS", "1") != "0"
+    tr.sparse_labels = args.sparse_labels or os.environ.get("DCCORE_SPARSE_LABELS", "0") == "1"
+    entries = args.entries or os.environ.get("DCCORE_ENTRIES")
+    if entries and os.path.exists(entries):
+        for l in open(entries):
+            l = l.split("#")[0].strip()
+            if l:
+                tr.extra_entries.add((int(l, 16) & 0x1FFFFFFF) | 0x80000000)
     tr.prefix = args.prefix + "_" if args.prefix else ""
     funcs = read_funcs(args.funcs, base, base + len(data)) if args.funcs else scan_functions(tr)
     if not args.funcs:
