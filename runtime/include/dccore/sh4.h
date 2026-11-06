@@ -77,7 +77,9 @@ void dc_rwatch_hit(uint32_t a, int size);
  * its game-code time. Everything else (hardware registers, a Windows CE game's user space) goes
  * through one out-of-line function per size. */
 #if defined(_MSC_VER)
-#define DC_FORCE_INLINE static __forceinline
+/* not forced with Visual C++: its optimiser slows down sharply on large functions, and forcing every
+ * access inline made Windows builds (Sega Rally 2 most) take much longer, for speed a PC doesn't need */
+#define DC_FORCE_INLINE static __inline
 #define DC_LIKELY(x) (x)
 #else
 #define DC_FORCE_INLINE static inline __attribute__((always_inline))
