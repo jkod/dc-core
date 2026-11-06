@@ -72,17 +72,15 @@ void dc_rwatch_hit(uint32_t a, int size);
 #else
 #define DC_RWATCHED(a, n) ((void)0)
 #endif
-/* The RAM test is inlined into every access, whatever the compiler thinks of the (huge) recompiled
- * functions -- left to itself it calls an out-of-line copy instead, which cost Re-Volt a third of
- * its game-code time. Everything else (hardware registers, a Windows CE game's user space) goes
- * through one out-of-line function per size. */
+/* Memory accesses: the RAM test inline, everything else (hardware registers, a Windows CE game's user
+ * space unless DC_RAM_32MB) through one out-of-line dc_mem_rd* / dc_mem_wr* per size. Inlining is the
+ * compiler's choice: forcing it (always_inline) made GCC need more than 7 GB for one of Sega Rally 2's
+ * generated files and Visual C++ builds much slower, and gained nothing on the Switch (-O2 inlines
+ * these anyway); only -O1 PC builds ran faster, which don't need it. */
+#define DC_FORCE_INLINE static inline
 #if defined(_MSC_VER)
-/* not forced with Visual C++: its optimiser slows down sharply on large functions, and forcing every
- * access inline made Windows builds (Sega Rally 2 most) take much longer, for speed a PC doesn't need */
-#define DC_FORCE_INLINE static __inline
 #define DC_LIKELY(x) (x)
 #else
-#define DC_FORCE_INLINE static inline __attribute__((always_inline))
 #define DC_LIKELY(x) __builtin_expect(!!(x), 1)
 #endif
 uint8_t  dc_mem_rd8 (uint32_t a); uint16_t dc_mem_rd16(uint32_t a); uint32_t dc_mem_rd32(uint32_t a);
