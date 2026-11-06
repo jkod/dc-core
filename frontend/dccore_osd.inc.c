@@ -3,8 +3,11 @@
  * open. Up / down pick, A (or left / right) changes, B, Start or Esc closes. Resume, Reset game,
  * Resolution (the render scale) and Aspect (widescreen / 4:3) for this session, Scanlines, Show FPS,
  * Rumble (for the controller that opened the menu: off, low, normal, strong; a short buzz shows the
- * new strength), Fullscreen, Quit. Scanlines, Show FPS and each port's rumble are kept in osd.cfg
- * next to the VMU. */
+ * new strength), Fullscreen, Speed (0.25x to 4x), Controls bar, Quit. Scanlines, Show FPS, the controls
+ * bar and each port's rumble are kept in osd.cfg next to the VMU.
+ *
+ * Keys: F12 screenshot (held: one every 100 ms), F5 / F6 slower / faster, F7 normal speed, F9 the
+ * controls bar (clickable buttons at the bottom: slower, speed, faster, screenshot, burst on / off). */
 
 /* an original 5x7 font */
 static const struct { char c; uint8_t r[7]; } osd_font[] = {
@@ -17,6 +20,7 @@ static const struct { char c; uint8_t r[7]; } osd_font[] = {
     { '+', { 0x00, 0x04, 0x04, 0x1F, 0x04, 0x04, 0x00 } },
     { ',', { 0x00, 0x00, 0x00, 0x00, 0x0C, 0x04, 0x08 } },
     { '-', { 0x00, 0x00, 0x00, 0x0E, 0x00, 0x00, 0x00 } },
+    { '*', { 0x00, 0x15, 0x0E, 0x1F, 0x0E, 0x15, 0x00 } },
     { '.', { 0x00, 0x00, 0x00, 0x00, 0x00, 0x0C, 0x0C } },
     { '/', { 0x01, 0x01, 0x02, 0x04, 0x08, 0x10, 0x10 } },
     { '0', { 0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E } },
@@ -61,8 +65,9 @@ static const struct { char c; uint8_t r[7]; } osd_font[] = {
     { 'Z', { 0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F } },
 };
 #define OSD_W 200
-#define OSD_ITEMS 10
+#define OSD_ITEMS 12
 static int osd_scan, osd_fps, osd_boost;
+int osd_bar;                                 /* the controls bar */
 static int osd_rumble[4] = { 2, 2, 2, 2 };   /* per port: 0 off, 1 low, 2 normal, 3 strong */
 static int osd_port;                         /* the port whose controller opened the menu (keyboard: A) */
 static float osd_rumble_scale(int port) {
@@ -87,6 +92,7 @@ static void osd_load(void) {
         if (!strncmp(line, "scanlines=", 10)) osd_scan = atoi(line + 10) & 3;
         if (!strncmp(line, "fps=", 4)) osd_fps = atoi(line + 4) != 0;
         if (!strncmp(line, "boost=", 6)) osd_boost = atoi(line + 6) != 0;
+        if (!strncmp(line, "bar=", 4)) osd_bar = atoi(line + 4) != 0;
         if (!strncmp(line, "framerate=", 10) && dc_front_fps60 >= 0) dc_front_fps60 = atoi(line + 10) >= 60;
         if (!strncmp(line, "rumble_", 7) && line[7] >= 'a' && line[7] <= 'd' && line[8] == '=') osd_rumble[line[7] - 'a'] = atoi(line + 9) & 3;
     }
@@ -100,7 +106,7 @@ static void osd_save(void) {
     if (!osd_cfg_path[0]) return;
     FILE *f = fopen(osd_cfg_path, "w");
     if (!f) return;
-    fprintf(f, "scanlines=%d\nfps=%d\nboost=%d\n", osd_scan, osd_fps, osd_boost);
+    fprintf(f, "scanlines=%d\nfps=%d\nboost=%d\nbar=%d\n", osd_scan, osd_fps, osd_boost, osd_bar);
     if (dc_front_fps60 >= 0) fprintf(f, "framerate=%d\n", dc_front_fps60 ? 60 : 30);
     for (int p = 0; p < 4; p++) fprintf(f, "rumble_%c=%d\n", 'a' + p, osd_rumble[p]);
     fclose(f);
@@ -145,6 +151,8 @@ static const char *osd_label(int i, char *buf, size_t n) {
     case 8:                                               /* only for a port that offers both */
         if (dc_front_fps60 < 0) return "";
         snprintf(buf, n, "FRAME RATE    < %s >", dc_front_fps60 ? "60" : "30"); return buf;
+    case 9: snprintf(buf, n, "SPEED         < %gX >", (double)game_speed()); return buf;
+    case 10: snprintf(buf, n, "CONTROLS BAR  < %s >", osd_bar ? "ON" : "OFF"); return buf;
     default: return "QUIT";
     }
 }
@@ -165,8 +173,79 @@ static void osd_paint(int sel) {
     }
     osd_text(osd_px, OSD_W, osd_h, 14, osd_h - 13, "A SELECT   B BACK", 0x7884A0FFu);
 }
+/* a short message at the top right (screenshot saved, new speed), for 1.5 s */
+static char toast_msg[40]; static Uint32 toast_until;
+static void toast(const char *msg) { snprintf(toast_msg, sizeof toast_msg, "%s", msg); toast_until = SDL_GetTicks() + 1500; need_present = 1; }
+static int toast_live(void) {
+    static int was;
+    int live = toast_until && SDL_GetTicks() < toast_until;
+    int r = live || was; was = live;                       /* one more present to take it away */
+    return r;
+}
+/* the controls bar: buttons at the bottom centre, clicked with the mouse */
+enum { BAR_SLOWER, BAR_SPEED, BAR_FASTER, BAR_SHOT, BAR_BURST, BAR_N };
+static int bar_x0[BAR_N], bar_x1[BAR_N], bar_y0, bar_y1;   /* in drawable pixels */
+static const char *bar_label(int i, char *buf, size_t n) {
+    switch (i) {
+    case BAR_SLOWER: return "<<";
+    case BAR_SPEED: snprintf(buf, n, "%gX", (double)game_speed()); return buf;
+    case BAR_FASTER: return ">>";
+    case BAR_SHOT: return "SHOT";
+    default: return burst_on ? "*BURST*" : "BURST";
+    }
+}
+static void bar_draw(int ww, int wh) {
+    enum { BW = 160, BH = 13 };
+    static uint8_t px[BW * BH * 4];
+    memset(px, 0, sizeof px);
+    int x = 2, xs[BAR_N + 1];
+    for (int i = 0; i < BAR_N; i++) {
+        char b[16]; const char *l = bar_label(i, b, sizeof b);
+        int w = (int)strlen(l) * 6 + 7;
+        if (i == BAR_SPEED && w < 31) w = 31;
+        xs[i] = x;
+        osd_fill(px, BW, x, 0, x + w, BH, i == BAR_BURST && burst_on ? 0xB43C3CE0u : 0x141A24E0u);
+        osd_fill(px, BW, x, 0, x + w, 1, 0x5A9CFFFFu); osd_fill(px, BW, x, BH - 1, x + w, BH, 0x5A9CFFFFu);
+        osd_fill(px, BW, x, 0, x + 1, BH, 0x5A9CFFFFu); osd_fill(px, BW, x + w - 1, 0, x + w, BH, 0x5A9CFFFFu);
+        osd_text(px, BW, BH, x + (w - (int)strlen(l) * 6) / 2 + 1, 3, l, 0xFFFFFFFFu);
+        x += w + 3;
+    }
+    xs[BAR_N] = x;
+    int k = wh / 360; if (k < 2) k = 2;
+    int ox = (ww - x * k) / 2, oy = wh - (BH + 6) * k;
+    dc_pvr_gl_overlay(px, BW, BH, ox, oy, BW * k, BH * k, ww, wh);
+    for (int i = 0; i < BAR_N; i++) { bar_x0[i] = ox + xs[i] * k; bar_x1[i] = ox + (xs[i + 1] - 3) * k; }
+    bar_y0 = oy; bar_y1 = oy + BH * k;
+}
+static int bar_click(int x, int y) {
+    if (!osd_bar || osd_open) return 0;
+    int w, h, dw, dh; SDL_GetWindowSize(win, &w, &h); SDL_GL_GetDrawableSize(win, &dw, &dh);
+    if (w > 0 && h > 0) { x = x * dw / w; y = y * dh / h; }  /* window points to drawable pixels (high-DPI) */
+    if (y < bar_y0 || y >= bar_y1) return 0;
+    for (int i = 0; i < BAR_N; i++) if (x >= bar_x0[i] && x < bar_x1[i]) {
+        if (i == BAR_SLOWER) set_speed(speed_i - 1);
+        if (i == BAR_SPEED) set_speed(SPEED_1X);
+        if (i == BAR_FASTER) set_speed(speed_i + 1);
+        if (i == BAR_SHOT) screenshot();
+        if (i == BAR_BURST) { burst_on = !burst_on; toast(burst_on ? "BURST ON" : "BURST OFF"); }
+        need_present = 1;
+        return 1;
+    }
+    return 0;
+}
 /* drawn over the presented picture, before the swap */
 static void osd_overlays(int ww, int wh) {
+    if (osd_bar && !osd_open) bar_draw(ww, wh);
+    if (toast_until && SDL_GetTicks() < toast_until) {
+        enum { TW = 140, TH = 11 };
+        static uint8_t px[TW * TH * 4];
+        memset(px, 0, sizeof px);
+        int w = (int)strlen(toast_msg) * 6 + 5; if (w > TW) w = TW;
+        osd_fill(px, TW, TW - w, 0, TW, TH, 0x000000B0u);
+        osd_text(px, TW, TH, TW - w + 3, 2, toast_msg, 0xFFE07CFFu);
+        int k = wh / 360; if (k < 2) k = 2;
+        dc_pvr_gl_overlay(px, TW, TH, ww - (TW + 4) * k, 4 * k, TW * k, TH * k, ww, wh);
+    }
     if (osd_open) {
         static const uint8_t dim[4] = { 0, 0, 0, 120 };
         dc_pvr_gl_overlay(dim, 1, 1, 0, 0, ww, wh, ww, wh);
@@ -342,7 +421,9 @@ static void osd_run(int port) {
             if (sel == 7) { cfg.fullscreen = !cfg.fullscreen; SDL_SetWindowFullscreen(win, cfg.fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0); }
 #endif
             if (sel == 8 && dc_front_fps60 >= 0) { dc_front_fps60 = !dc_front_fps60; osd_save(); }
-            if (sel == 9 && (down & DC_BTN_A)) { dc_front_close(); exit(0); }
+            if (sel == 9) { speed_i += step; if (speed_i < 0) speed_i = SPEED_N - 1; if (speed_i >= SPEED_N) speed_i = 0; }
+            if (sel == 10) { osd_bar = !osd_bar; osd_save(); }
+            if (sel == 11 && (down & DC_BTN_A)) { dc_front_close(); exit(0); }
         }
         osd_paint(sel);
     }

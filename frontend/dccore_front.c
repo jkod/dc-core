@@ -18,8 +18,21 @@
 #if !defined(_WIN32) && !defined(__SWITCH__)
 #include <unistd.h>
 #endif
+#ifndef _WIN32
+#include <sys/stat.h>
+#endif
+#include <time.h>
 
 extern sh4ctx *dc_current_ctx;         /* dispatch.c */
+
+/* game speed (F5 slower, F6 faster, F7 normal, or the controls bar / menu): emulated time runs at this
+ * rate against the wall clock. Sound is muted away from 1x (it would only stutter or skip). */
+static const float speed_steps[] = { 0.25f, 0.5f, 0.75f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f };
+#define SPEED_N ((int)(sizeof speed_steps / sizeof speed_steps[0]))
+#define SPEED_1X 3
+static int speed_i = SPEED_1X;
+static float game_speed(void) { return speed_steps[speed_i]; }
+static int frame_skip(void) { float v = game_speed(); return v > 1.f ? (int)(v + 0.99f) : 1; }   /* draw every nth frame when faster */
 
 static SDL_Window *win;
 static SDL_GLContext glc;
@@ -156,6 +169,7 @@ static void on_render(void) {
     static long from = -2;                                 /* DC_RENDER_FROM=field: draw every frame from then on */
     if (from == -2) { const char *e = getenv("DC_RENDER_FROM"); from = e ? atol(e) : -1; }
     if (skip > 1 && (from < 0 || (long)presented < from) && renders % (unsigned long)skip) { renders++; last_render_frame = (unsigned long)vblanks; return; }
+    if (frame_skip() > 1 && renders % (unsigned long)frame_skip()) { renders++; last_render_frame = (unsigned long)vblanks; return; }
     if (dc_front_fast && renders % 8) { renders++; last_render_frame = (unsigned long)vblanks; return; }   /* fast-forward: draw every 8th frame */
     static int sw = -1;                                    /* DC_SW_RENDER=1: software renderer (diagnosing GPU issues) */
     if (sw < 0) { const char *e = getenv("DC_SW_RENDER"); sw = e && *e == '1'; }
@@ -303,18 +317,48 @@ static void print_stats(void) {
 /* debugging: DC_SHOTS_WINDOW=1 makes screenshots show the window as presented, not the rendered picture */
 static uint8_t win_rgb[1920 * 1080 * 3 * 4]; static int win_rgb_w, win_rgb_h;
 static int shot_window(void) { static int v = -1; if (v < 0) { const char *e = getenv("DC_SHOTS_WINDOW"); v = e && *e == '1'; } return v; }
-static void screenshot_to(const char *path) {
+static void toast(const char *msg);
+static int screenshot_to(const char *path) {
     int w = 0, h = 0;
     static uint8_t *rgb; rgb = realloc(rgb, 1920 * 4 * 1440 * 4 * 3);
     if (shot_window() && win_rgb_w) { w = win_rgb_w; h = win_rgb_h; size_t n = (size_t)w * (size_t)h * 3; memcpy(rgb, win_rgb, n < sizeof win_rgb ? n : sizeof win_rgb); }
     else dc_pvr_gl_read(rgb, &w, &h);
-    if (w <= 0) return;
+    if (w <= 0) return 0;
     SDL_Surface *s = SDL_CreateRGBSurfaceWithFormatFrom(rgb, w, h, 24, w * 3, SDL_PIXELFORMAT_RGB24);
-    char name[64]; snprintf(name, sizeof name, "screenshot_%04lu.bmp", presented);
-    if (!path) path = name;
-    if (s) { SDL_SaveBMP(s, path); SDL_FreeSurface(s); fprintf(stderr, "saved %s\n", path); }
+    int ok = s && SDL_SaveBMP(s, path) == 0;
+    if (s) SDL_FreeSurface(s);
+    fprintf(stderr, ok ? "saved %s\n" : "could not save %s\n", path);
+    return ok;
 }
-static void screenshot(void) { screenshot_to(NULL); }
+/* F12 (or SHOT on the controls bar): the picture as rendered, to a "screenshots" folder next to the
+ * game, named <game>_<date>_<time>_<n>.bmp. Held (or BURST on the bar), one every 100 ms. */
+static int burst_on;                                       /* BURST on the controls bar */
+static Uint32 shot_held_since;                             /* F12 held since (0: not held) */
+static void screenshot(void) {
+    static char dir[1024];
+    if (!dir[0]) {
+        char *base = SDL_GetBasePath();
+        snprintf(dir, sizeof dir, "%sscreenshots", base ? base : "");
+        if (base) SDL_free(base);
+#ifdef _WIN32
+        CreateDirectoryA(dir, NULL);
+#else
+        mkdir(dir, 0755);
+#endif
+    }
+    static int n; time_t t = time(NULL); struct tm *tm = localtime(&t);
+    char path[1200];
+    snprintf(path, sizeof path, "%s/%s_%04d%02d%02d_%02d%02d%02d_%03d.bmp", dir, cfg.save_name ? cfg.save_name : "dc-core",
+             tm ? tm->tm_year + 1900 : 0, tm ? tm->tm_mon + 1 : 0, tm ? tm->tm_mday : 0, tm ? tm->tm_hour : 0, tm ? tm->tm_min : 0, tm ? tm->tm_sec : 0, n++ % 1000);
+    toast(screenshot_to(path) ? (burst_on || shot_held_since ? "BURST CAPTURE" : "SCREENSHOT SAVED") : "SCREENSHOT FAILED");
+}
+static void set_speed(int i) {
+    if (i < 0) i = 0;
+    if (i >= SPEED_N) i = SPEED_N - 1;
+    speed_i = i;
+    char m[32]; snprintf(m, sizeof m, "SPEED %gX", (double)game_speed()); toast(m);
+}
+static int bar_click(int x, int y);
 
 int dc_front_fps60 = -1;
 static SDL_Thread *aica_thr;                               /* the sound chip's thread (below) */
@@ -340,8 +384,14 @@ static void events(void) {
                 cfg.fullscreen = !cfg.fullscreen;
                 SDL_SetWindowFullscreen(win, cfg.fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
             }
-            if (e.key.keysym.sym == SDLK_F12) screenshot();
+            if (e.key.keysym.sym == SDLK_F12) { screenshot(); shot_held_since = SDL_GetTicks() | 1; }
+            if (e.key.keysym.sym == SDLK_F5) set_speed(speed_i - 1);
+            if (e.key.keysym.sym == SDLK_F6) set_speed(speed_i + 1);
+            if (e.key.keysym.sym == SDLK_F7) set_speed(SPEED_1X);
+            if (e.key.keysym.sym == SDLK_F9) { extern int osd_bar; osd_bar = !osd_bar; need_present = 1; }
         }
+        if (e.type == SDL_KEYUP && e.key.keysym.sym == SDLK_F12) shot_held_since = 0;
+        if (e.type == SDL_MOUSEBUTTONDOWN && e.button.button == SDL_BUTTON_LEFT) bar_click(e.button.x, e.button.y);
 #ifndef __SWITCH__
         if (e.type == SDL_JOYDEVICEADDED) {
             fprintf(stderr, "joystick added: %s%s\n", SDL_JoystickNameForIndex(e.jdevice.which),
@@ -480,7 +530,13 @@ static void on_vblank(uint64_t f) {
             dc_pvr_gl_load_rgb(rgb, w, h); need_present = 1;
         }
     }
-    if (need_present && (!dc_front_fast || presented % 8 == 0)) present_window();   /* only when the picture changed (or the window) */
+    {   /* burst capture: F12 held for more than 0.3 s, or BURST on the controls bar: a picture every 100 ms */
+        static Uint32 last;
+        Uint32 now = SDL_GetTicks();
+        if ((burst_on || (shot_held_since && now - shot_held_since > 300)) && now - last >= 100) { last = now; screenshot(); }
+    }
+    if (toast_live()) need_present = 1;
+    if (need_present && (!dc_front_fast || presented % 8 == 0) && presented % (unsigned long)frame_skip() == 0) present_window();   /* only when the picture changed (or the window) */
     presented++;
     { static long dbg = -2; if (dbg == -2) { const char *e = getenv("DC_PVRDBG"); dbg = e ? atol(e) : -1; }
       if (dbg >= 0 && presented == (unsigned long)dbg) dc_pvr_sw_debug = 1; }   /* debugging: describe that frame's polygons (with DC_SW_RENDER=1) */
@@ -507,7 +563,7 @@ static void on_vblank(uint64_t f) {
         int n;
         while ((n = aica_audio_read(buf, 4096)) > 0) {
             if (wav) { fwrite(buf, 4, (size_t)n, wav); wav_frames += (uint32_t)n; }
-            if (audio && SDL_GetQueuedAudioSize(audio) < 44100 * 4 / 5) SDL_QueueAudio(audio, buf, (Uint32)n * 4);   /* keep < 0.2 s queued */
+            if (audio && speed_i == SPEED_1X && SDL_GetQueuedAudioSize(audio) < 44100 * 4 / 5) SDL_QueueAudio(audio, buf, (Uint32)n * 4);   /* keep < 0.2 s queued */
         }
     }
     events();
@@ -519,7 +575,9 @@ static void on_vblank(uint64_t f) {
     if (!cfg.no_pacing && dc_current_ctx) {
         Uint64 freq = SDL_GetPerformanceFrequency(), now = SDL_GetPerformanceCounter(), idle0 = now;
         if (!paced) { t0_count = now; t0_cycles = dc_current_ctx->cycles; paced = 1; return; }
-        double emu = (double)(dc_current_ctx->cycles - t0_cycles) / 200e6, real = (double)(now - t0_count) / (double)freq;
+        static int last_speed = SPEED_1X;
+        if (speed_i != last_speed) { last_speed = speed_i; t0_count = now; t0_cycles = dc_current_ctx->cycles; return; }   /* a new speed: pacing starts over */
+        double emu = (double)(dc_current_ctx->cycles - t0_cycles) / 200e6 / (double)game_speed(), real = (double)(now - t0_count) / (double)freq;
         /* with vsync the swap already waits for the display; sleep only when more than a field ahead
          * (a display faster than 60 Hz), so a 60 Hz display isn't made to skip a refresh now and then */
         double ahead = cfg.vsync ? 0.017 : 0.0;
@@ -529,7 +587,8 @@ static void on_vblank(uint64_t f) {
          * than 50 ms ahead of real time. DC_PACE=clock: wall clock only (as before). */
         static int by_clock = -1;
         if (by_clock < 0) { const char *e = getenv("DC_PACE"); by_clock = e && !strcmp(e, "clock"); }
-        if (audio && !cfg.vsync && !by_clock) {
+        if (speed_i != SPEED_1X) ahead = 0.0;             /* away from 1x the wall clock paces (sound is muted) */
+        if (audio && !cfg.vsync && !by_clock && speed_i == SPEED_1X) {
             /* the queue swings between the target and the target plus a field (a field's samples arrive
              * at once) and drains while the next field is emulated; 30 ms above a 512-frame device buffer
              * keeps sound about 50 ms behind the picture instead of 100. DC_AUDIO_MS sets the target. */
