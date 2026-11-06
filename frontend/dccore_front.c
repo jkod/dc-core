@@ -625,6 +625,7 @@ static SDL_mutex *aica_mx, *disc_mx;
 static SDL_cond *aica_cv, *aica_done_cv;
 static volatile uint64_t aica_target, aica_slept_at;
 static SDL_atomic_t aica_sleeping;
+static SDL_atomic_t aica_want;                           /* the game is waiting for aica_mx */
 static int aica_game_waits;                                 /* under aica_mx */
 static volatile int aica_stop;
 static const uint64_t aica_chunk = 64ull * 200000000ull / 44100ull;   /* 64 samples a turn, then the game may get in */
@@ -648,7 +649,11 @@ static int aica_thread(void *u) {
         }
         dc_aica_advance(t - at > aica_chunk ? at + aica_chunk : t);
         if (aica_game_waits) SDL_CondSignal(aica_done_cv);
+        /* the game wants in (aica_async_enter): step aside until it has the lock. Unlocking and
+         * locking again at once kept it out -- the Switch's mutex isn't fair, and the game thread sat
+         * in svcArbitrateLock for 42% of a profile */
         SDL_UnlockMutex(aica_mx);
+        while (SDL_AtomicGet(&aica_want) && !aica_stop) SDL_Delay(0);
         SDL_LockMutex(aica_mx);
     }
     SDL_UnlockMutex(aica_mx);
@@ -664,7 +669,9 @@ static void aica_async_advance(uint64_t now) {
 }
 static void aica_async_enter(uint64_t now) {
     Uint64 t = SDL_GetPerformanceCounter();
+    SDL_AtomicIncRef(&aica_want);
     SDL_LockMutex(aica_mx);
+    SDL_AtomicDecRef(&aica_want);
     if (now > aica_target) aica_target = now;
     if (dc_aica_clock() <= now) {
         aica_game_waits = 1;
