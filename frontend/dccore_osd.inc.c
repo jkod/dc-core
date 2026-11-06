@@ -149,24 +149,29 @@ static int prof_main(void *arg) {
     static uint64_t ctx[0x320 / 8] __attribute__((aligned(16)));    /* libnx ThreadContext; pc at 0x100 */
     uint32_t h = envGetMainThreadHandle();
     const uint64_t anchor = (uint64_t)(uintptr_t)&dc_prof_anchor;
-    int n = 0, fails = 0;
+    int n = 0, fails = 0; uint32_t err_pause = 0, err_ctx = 0;
+    fprintf(stderr, "dc-core: profile: main thread handle %x\n", h);
     while (osd_open) SDL_Delay(50);                 /* the menu that started it */
     SDL_Delay(500);
     Uint32 end = SDL_GetTicks() + 10000;
     while (SDL_GetTicks() < end && n < MAX) {
         SDL_Delay(1);
         if (osd_open) continue;
-        if (svcSetThreadActivity(h, 1)) { fails++; continue; }
+        { uint32_t e = svcSetThreadActivity(h, 1); if (e) { if (!err_pause) err_pause = e; fails++; continue; } }
         uint32_t r = 1;
         for (int t = 0; t < 50 && r; t++) r = svcGetThreadContext3(ctx, h);
         svcSetThreadActivity(h, 0);
-        if (r) { fails++; continue; }
+        if (r) { if (!err_ctx) err_ctx = r; fails++; continue; }
         off[n++] = (int64_t)(ctx[0x100 / 8] - anchor);
     }
     char path[1100]; snprintf(path, sizeof path, "%s", osd_cfg_path[0] ? osd_cfg_path : "osd.cfg");
     char *slash = strrchr(path, '/'); snprintf(slash ? slash + 1 : path, 64, "profile.txt");
     FILE *f = fopen(path, "w");
-    if (!f || !n) { if (f) fclose(f); fprintf(stderr, "dc-core: profile failed (%d samples, %d errors)\n", n, fails); prof_state = 3; return 0; }
+    fprintf(stderr, "dc-core: profile: %d samples, %d errors (pause %x, context %x), writing %s\n", n, fails, err_pause, err_ctx, path);
+    if (!f || !n) {
+        if (f) { fprintf(f, "# no samples: %d errors, svcSetThreadActivity %x, svcGetThreadContext3 %x\n", fails, err_pause, err_ctx); fclose(f); }
+        prof_state = 3; return 0;
+    }
     fprintf(f, "# dc-core profile: %d samples, %d errors; offsets from dc_prof_anchor\n", n, fails);
     for (int i = 0; i < n; i++) fprintf(f, "%llx\n", (unsigned long long)off[i]);
     fclose(f);
