@@ -184,6 +184,9 @@ void dc_call(sh4ctx *c, uint32_t addr) { call_loop(c, addr, 0); }
 void dc_call_ticked(sh4ctx *c, uint32_t addr) { call_loop(c, addr, 1); }
 int dc_site_resolve(dc_site *s, uint32_t addr) {
     if (call_hook || dc_interp_all) return 0;                /* every call must go through dc_call */
+    static int off = -1;                                      /* DC_CALL_SITES=0: every call through dc_call, as before */
+    if (off < 0) { const char *v = getenv("DC_CALL_SITES"); off = v && *v == '0'; }
+    if (off) return 0;
     sh4fn f = dc_lookup(addr);
     if (!f) return 0;
     uint32_t e = (addr & 0x1FFFFFFFu) | 0x80000000u;
