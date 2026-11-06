@@ -72,9 +72,30 @@ void dc_rwatch_hit(uint32_t a, int size);
 #else
 #define DC_RWATCHED(a, n) ((void)0)
 #endif
-static inline uint8_t  dc_rd8 (uint32_t a) { if (DC_IS_RAM(a)) { DC_RWATCHED(a, 1); return dc_ram[DC_RAM_OFS(a)]; } if (DC_IS_URAM(a)) return dc_uram[DC_URAM_OFS(a)]; return dc_hw_rd8(a); }
-static inline uint16_t dc_rd16(uint32_t a) { if (DC_IS_RAM(a)) { uint16_t v; DC_RWATCHED(a, 2); memcpy(&v, dc_ram + DC_RAM_OFS(a), 2); return v; } if (DC_IS_URAM(a)) { uint16_t v; memcpy(&v, dc_uram + DC_URAM_OFS(a), 2); return v; } return dc_hw_rd16(a); }
-static inline uint32_t dc_rd32(uint32_t a) { if (DC_IS_RAM(a)) { uint32_t v; DC_RWATCHED(a, 4); memcpy(&v, dc_ram + DC_RAM_OFS(a), 4); return v; } if (DC_IS_URAM(a)) { uint32_t v; memcpy(&v, dc_uram + DC_URAM_OFS(a), 4); return v; } return dc_hw_rd32(a); }
+/* The RAM test is inlined into every access, whatever the compiler thinks of the (huge) recompiled
+ * functions -- left to itself it calls an out-of-line copy instead, which cost Re-Volt a third of
+ * its game-code time. Everything else (hardware registers, a Windows CE game's user space) goes
+ * through one out-of-line function per size. */
+#if defined(_MSC_VER)
+#define DC_FORCE_INLINE static __forceinline
+#define DC_LIKELY(x) (x)
+#else
+#define DC_FORCE_INLINE static inline __attribute__((always_inline))
+#define DC_LIKELY(x) __builtin_expect(!!(x), 1)
+#endif
+uint8_t  dc_mem_rd8 (uint32_t a); uint16_t dc_mem_rd16(uint32_t a); uint32_t dc_mem_rd32(uint32_t a);
+void dc_mem_wr8(uint32_t a, uint8_t v); void dc_mem_wr16(uint32_t a, uint16_t v); void dc_mem_wr32(uint32_t a, uint32_t v);
+#ifdef DC_RAM_32MB
+/* Windows CE games live in the user space: keep that test inline too */
+#define DC_URAM_INLINE_RD(a, T) if (DC_IS_URAM(a)) { T v; memcpy(&v, dc_uram + DC_URAM_OFS(a), sizeof(T)); return v; }
+#define DC_URAM_INLINE_WR(a, v) if (DC_IS_URAM(a)) { memcpy(dc_uram + DC_URAM_OFS(a), &v, sizeof(v)); return; }
+#else
+#define DC_URAM_INLINE_RD(a, T)
+#define DC_URAM_INLINE_WR(a, v)
+#endif
+DC_FORCE_INLINE uint8_t  dc_rd8 (uint32_t a) { if (DC_LIKELY(DC_IS_RAM(a))) { DC_RWATCHED(a, 1); return dc_ram[DC_RAM_OFS(a)]; } DC_URAM_INLINE_RD(a, uint8_t) return dc_mem_rd8(a); }
+DC_FORCE_INLINE uint16_t dc_rd16(uint32_t a) { if (DC_LIKELY(DC_IS_RAM(a))) { uint16_t v; DC_RWATCHED(a, 2); memcpy(&v, dc_ram + DC_RAM_OFS(a), 2); return v; } DC_URAM_INLINE_RD(a, uint16_t) return dc_mem_rd16(a); }
+DC_FORCE_INLINE uint32_t dc_rd32(uint32_t a) { if (DC_LIKELY(DC_IS_RAM(a))) { uint32_t v; DC_RWATCHED(a, 4); memcpy(&v, dc_ram + DC_RAM_OFS(a), 4); return v; } DC_URAM_INLINE_RD(a, uint32_t) return dc_mem_rd32(a); }
 #ifdef DC_WATCH
 /* debug builds (-DDC_WATCH): every RAM write inside [dc_watch_lo, dc_watch_hi) is reported */
 extern uint32_t dc_watch_lo, dc_watch_hi;
@@ -83,12 +104,12 @@ void dc_watch_hit(uint32_t a, uint32_t v, int size);
 #else
 #define DC_WATCHED(a, v, n) ((void)0)
 #endif
-static inline void dc_wr8 (uint32_t a, uint8_t v)  { if (DC_IS_RAM(a)) { DC_WATCHED(a, v, 1); dc_ram[DC_RAM_OFS(a)] = v; return; } if (DC_IS_URAM(a)) { dc_uram[DC_URAM_OFS(a)] = v; return; } dc_hw_wr8(a, v); }
-static inline void dc_wr16(uint32_t a, uint16_t v) { if (DC_IS_RAM(a)) { DC_WATCHED(a, v, 2); memcpy(dc_ram + DC_RAM_OFS(a), &v, 2); return; } if (DC_IS_URAM(a)) { memcpy(dc_uram + DC_URAM_OFS(a), &v, 2); return; } dc_hw_wr16(a, v); }
-static inline void dc_wr32(uint32_t a, uint32_t v) { if (DC_IS_RAM(a)) { DC_WATCHED(a, v, 4); memcpy(dc_ram + DC_RAM_OFS(a), &v, 4); return; } if (DC_IS_URAM(a)) { memcpy(dc_uram + DC_URAM_OFS(a), &v, 4); return; } dc_hw_wr32(a, v); }
+DC_FORCE_INLINE void dc_wr8 (uint32_t a, uint8_t v)  { if (DC_LIKELY(DC_IS_RAM(a))) { DC_WATCHED(a, v, 1); dc_ram[DC_RAM_OFS(a)] = v; return; } DC_URAM_INLINE_WR(a, v) dc_mem_wr8(a, v); }
+DC_FORCE_INLINE void dc_wr16(uint32_t a, uint16_t v) { if (DC_LIKELY(DC_IS_RAM(a))) { DC_WATCHED(a, v, 2); memcpy(dc_ram + DC_RAM_OFS(a), &v, 2); return; } DC_URAM_INLINE_WR(a, v) dc_mem_wr16(a, v); }
+DC_FORCE_INLINE void dc_wr32(uint32_t a, uint32_t v) { if (DC_LIKELY(DC_IS_RAM(a))) { DC_WATCHED(a, v, 4); memcpy(dc_ram + DC_RAM_OFS(a), &v, 4); return; } DC_URAM_INLINE_WR(a, v) dc_mem_wr32(a, v); }
 
-static inline float dc_rdf(uint32_t a) { uint32_t u = dc_rd32(a); float f; memcpy(&f, &u, 4); return f; }
-static inline void  dc_wrf(uint32_t a, float f) { uint32_t u; memcpy(&u, &f, 4); dc_wr32(a, u); }
+DC_FORCE_INLINE float dc_rdf(uint32_t a) { uint32_t u = dc_rd32(a); float f; memcpy(&f, &u, 4); return f; }
+DC_FORCE_INLINE void  dc_wrf(uint32_t a, float f) { uint32_t u; memcpy(&u, &f, 4); dc_wr32(a, u); }
 
 /* ---------------- dispatch ---------------- */
 /* A recompiled (or HLE) function: returns 0 when the guest returns, or the next address to run
