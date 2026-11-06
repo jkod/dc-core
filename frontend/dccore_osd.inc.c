@@ -3,7 +3,7 @@
  * open. Up / down pick, A (or left / right) changes, B, Start or Esc closes. Resume, Reset game,
  * Resolution (the render scale) and Aspect (widescreen / 4:3) for this session, Scanlines, Show FPS,
  * Rumble (for the controller that opened the menu: off, low, normal, strong; a short buzz shows the
- * new strength), Fullscreen, Speed (0.25x to 4x), Controls bar, Quit. Scanlines, Show FPS, the controls
+ * new strength), Fullscreen, Speed (0.25x to 4x), Controls bar, Profile (Switch: 10 s of samples for tools/prof/nxprof.py), Quit. Scanlines, Show FPS, the controls
  * bar and each port's rumble are kept in osd.cfg next to the VMU.
  *
  * Keys: F12 screenshot (held: one every 100 ms), F5 / F6 slower / faster, F7 normal speed, F9 the
@@ -65,7 +65,7 @@ static const struct { char c; uint8_t r[7]; } osd_font[] = {
     { 'Z', { 0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F } },
 };
 #define OSD_W 200
-#define OSD_ITEMS 12
+#define OSD_ITEMS 13
 static int osd_scan, osd_fps, osd_boost;
 int osd_bar;                                 /* the controls bar */
 static int osd_rumble[4] = { 2, 2, 2, 2 };   /* per port: 0 off, 1 low, 2 normal, 3 strong */
@@ -130,6 +130,57 @@ static int osd_text(uint8_t *px, int w, int h, int x, int y, const char *s, uint
     return x;
 }
 
+
+#ifdef __SWITCH__
+/* PROFILE (Switch): once the menu is closed, samples where the game thread is 1000 times a second for
+ * 10 s (it is paused for a moment each time and its PC read: svcSetThreadActivity +
+ * svcGetThreadContext3) and writes profile.txt next to osd.cfg. tools/prof/nxprof.py turns it into
+ * function names with the build's .elf. Offsets are from dc_prof_anchor, wherever the .nro was loaded. */
+extern uint32_t envGetMainThreadHandle(void);
+extern uint32_t svcSetThreadActivity(uint32_t thread, int paused);
+extern uint32_t svcGetThreadContext3(void *ctx, uint32_t thread);
+__attribute__((noinline, used)) void dc_prof_anchor(void) { __asm__ volatile(""); }
+static volatile int prof_state;                    /* 0 idle, 1 waiting / sampling, 2 saved, 3 failed */
+static int prof_main(void *arg) {
+    (void)arg;
+    enum { MAX = 12000 };
+    static int64_t off[MAX];
+    static uint64_t ctx[0x320 / 8] __attribute__((aligned(16)));    /* libnx ThreadContext; pc at 0x100 */
+    uint32_t h = envGetMainThreadHandle();
+    const uint64_t anchor = (uint64_t)(uintptr_t)&dc_prof_anchor;
+    int n = 0, fails = 0;
+    while (osd_open) SDL_Delay(50);                 /* the menu that started it */
+    SDL_Delay(500);
+    Uint32 end = SDL_GetTicks() + 10000;
+    while (SDL_GetTicks() < end && n < MAX) {
+        SDL_Delay(1);
+        if (osd_open) continue;
+        if (svcSetThreadActivity(h, 1)) { fails++; continue; }
+        uint32_t r = 1;
+        for (int t = 0; t < 50 && r; t++) r = svcGetThreadContext3(ctx, h);
+        svcSetThreadActivity(h, 0);
+        if (r) { fails++; continue; }
+        off[n++] = (int64_t)(ctx[0x100 / 8] - anchor);
+    }
+    char path[1100]; snprintf(path, sizeof path, "%s", osd_cfg_path[0] ? osd_cfg_path : "osd.cfg");
+    char *slash = strrchr(path, '/'); snprintf(slash ? slash + 1 : path, 64, "profile.txt");
+    FILE *f = fopen(path, "w");
+    if (!f || !n) { if (f) fclose(f); fprintf(stderr, "dc-core: profile failed (%d samples, %d errors)\n", n, fails); prof_state = 3; return 0; }
+    fprintf(f, "# dc-core profile: %d samples, %d errors; offsets from dc_prof_anchor\n", n, fails);
+    for (int i = 0; i < n; i++) fprintf(f, "%llx\n", (unsigned long long)off[i]);
+    fclose(f);
+    fprintf(stderr, "dc-core: profile: %d samples in %s\n", n, path);
+    prof_state = 2;
+    return 0;
+}
+static void prof_start(void) {
+    if (prof_state == 1) return;
+    prof_state = 1;
+    SDL_Thread *t = SDL_CreateThread(prof_main, "dc-prof", NULL);
+    if (t) SDL_DetachThread(t); else prof_state = 3;
+}
+#endif
+
 static const char *osd_label(int i, char *buf, size_t n) {
     static const char *scan[4] = { "OFF", "LIGHT", "MEDIUM", "STRONG" };
     static const char *rum[4] = { "OFF", "LOW", "NORMAL", "STRONG" };
@@ -153,6 +204,11 @@ static const char *osd_label(int i, char *buf, size_t n) {
         snprintf(buf, n, "FRAME RATE    < %s >", dc_front_fps60 ? "60" : "30"); return buf;
     case 9: snprintf(buf, n, "SPEED         < %gX >", (double)game_speed()); return buf;
     case 10: snprintf(buf, n, "CONTROLS BAR  < %s >", osd_bar ? "ON" : "OFF"); return buf;
+#ifdef __SWITCH__
+    case 11: { static const char *ps[4] = { "PROFILE 10 S", "PROFILING...", "PROFILE SAVED", "PROFILE FAILED" }; return ps[prof_state & 3]; }
+#else
+    case 11: return "";
+#endif
     default: return "QUIT";
     }
 }
@@ -423,7 +479,10 @@ static void osd_run(int port) {
             if (sel == 8 && dc_front_fps60 >= 0) { dc_front_fps60 = !dc_front_fps60; osd_save(); }
             if (sel == 9) { speed_i += step; if (speed_i < 0) speed_i = SPEED_N - 1; if (speed_i >= SPEED_N) speed_i = 0; }
             if (sel == 10) { osd_bar = !osd_bar; osd_save(); }
-            if (sel == 11 && (down & DC_BTN_A)) { dc_front_close(); exit(0); }
+#ifdef __SWITCH__
+            if (sel == 11 && (down & DC_BTN_A)) { prof_start(); break; }    /* it samples once the menu is closed */
+#endif
+            if (sel == OSD_ITEMS - 1 && (down & DC_BTN_A)) { dc_front_close(); exit(0); }
         }
         osd_paint(sel);
     }
