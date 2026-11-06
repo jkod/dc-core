@@ -809,6 +809,13 @@ static void extend_backdrop(const pvr_poly *p, const pvr_vtx *v, float rw, float
 
 /* triangle with the PVR's culling (sign of the screen area; odd strip triangles are flipped) */
 static void tri(const pvr_poly *p, const pvr_vtx *a, const pvr_vtx *b, const pvr_vtx *c, int flip, float cull_small) {
+    /* a corner on the camera plane (1/w clamped to 1e30, or at infinity) next to ordinary ones: the
+     * triangle would be drawn as a flat smear of one texel in front of everything (the opening's sand
+     * floor under the camera), so it drops out */
+    {
+        int on = (a->z >= 1e29f || !isfinite(a->x + a->y + a->z)) + (b->z >= 1e29f || !isfinite(b->x + b->y + b->z)) + (c->z >= 1e29f || !isfinite(c->x + c->y + c->z));
+        if (on && on < 3) return;
+    }
     float area = (b->x - a->x) * (c->y - a->y) - (b->y - a->y) * (c->x - a->x);
     if (area == 0) return;
     int cull = (p->isp >> 27) & 3;
@@ -1409,7 +1416,11 @@ void dc_pvr_gl_render(int scale) {
         int np = f.npolys < KEEP_POLYS ? f.npolys : KEEP_POLYS;
         for (int i = 0; keep_p && i < np; i++) {
             const pvr_poly *p = &f.polys[i]; pvr_vtx *v = (pvr_vtx *)(f.verts + p->first);
-            if (p->n > KEEP_VERTS) continue;
+            /* only small pieces (a quad, a ring segment): a long strip (the sand floor of the opening's
+             * sunset flight, 80 corners running from the horizon to under the camera) moves too much
+             * between frames for its last shape to stand in; its triangles with a corner at infinity
+             * just drop out */
+            if (p->n > 8) continue;
             int bad = 0;
             for (int k = 0; k < p->n && !bad; k++)
                 if (!isfinite(v[k].x) || !isfinite(v[k].y) || !isfinite(v[k].z) || v[k].z >= 1e30f) bad = 1;
