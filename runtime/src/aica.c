@@ -269,6 +269,12 @@ static struct {
     int last_step;                                  /* -1 = program changed, recount */
 } dsp = { .last_step = -1 };
 
+/* the program decoded once when it changes (dsp.last_step = -1), not per step per sample */
+typedef struct {
+    uint8_t empty, TRA, TWT, TWA, XSEL, YSEL, IRA, IWT, IWA, TABLE, MWT, MRD, EWT, EWA;
+    uint8_t ADRL, FRCL, SHIFT, YRL, NEGB, ZERO, BSEL, MASA, ADREB, NXADR;
+} dsp_op;
+static dsp_op dsp_prog[128];
 static uint16_t dsp_pack(int32_t val) {
     uint32_t sign = (val >> 23) & 1, temp = (uint32_t)(val ^ (val << 1)) & 0xFFFFFF;
     int e = 0;
@@ -294,25 +300,33 @@ static void dsp_step(void) {
         dsp.last_step = 0;
         for (int st = 127; st >= 0; st--)
             if (MPRO(st, 0) | MPRO(st, 1) | MPRO(st, 2) | MPRO(st, 3)) { dsp.last_step = st + 1; break; }
+        for (int st = 0; st < 128; st++) {
+            uint32_t i0 = MPRO(st, 0), i1 = MPRO(st, 1), i2 = MPRO(st, 2), i3 = MPRO(st, 3);
+            dsp_op *o = &dsp_prog[st];
+            o->empty = !(i0 | i1 | i2 | i3);
+            o->TRA = (i0 >> 9) & 0x7F; o->TWT = (i0 >> 8) & 1; o->TWA = (i0 >> 1) & 0x7F;
+            o->XSEL = (i1 >> 15) & 1; o->YSEL = (i1 >> 13) & 3; o->IRA = (i1 >> 7) & 0x3F; o->IWT = (i1 >> 6) & 1; o->IWA = (i1 >> 1) & 0x1F;
+            o->TABLE = (i2 >> 15) & 1; o->MWT = (i2 >> 14) & 1; o->MRD = (i2 >> 13) & 1; o->EWT = (i2 >> 12) & 1; o->EWA = (i2 >> 8) & 15;
+            o->ADRL = (i2 >> 7) & 1; o->FRCL = (i2 >> 6) & 1; o->SHIFT = (i2 >> 4) & 3; o->YRL = (i2 >> 3) & 1;
+            o->NEGB = (i2 >> 2) & 1; o->ZERO = (i2 >> 1) & 1; o->BSEL = i2 & 1;
+            o->MASA = (i3 >> 9) & 0x3F; o->ADREB = (i3 >> 8) & 1; o->NXADR = (i3 >> 7) & 1;
+        }
     }
     memset(dsp.efreg, 0, sizeof dsp.efreg);
     if (!dsp.last_step) { memset(dsp.mixs, 0, sizeof dsp.mixs); return; }
     uint32_t common = R(0x2804) & 0xFFFF, rbp = common & 0xFFF, rbl = 0x2000u << ((common >> 13) & 3);
     uint16_t *ram = (uint16_t *)dc_aram;
     for (int st = 0; st < dsp.last_step; st++) {
-        uint32_t i0 = MPRO(st, 0), i1 = MPRO(st, 1), i2 = MPRO(st, 2), i3 = MPRO(st, 3);
-        if (!(i0 | i1 | i2 | i3)) {                         /* empty step: the multiplier keeps running */
+        const dsp_op *o = &dsp_prog[st];
+        if (o->empty) {                                     /* empty step: the multiplier keeps running */
             dsp.x = sx24(dsp.temp[dsp.dec & 0x7F]); dsp.y = dsp.frc;
             int32_t y13 = (int32_t)((uint32_t)dsp.y << 19) >> 19;
             dsp.acc = (int32_t)(((int64_t)dsp.x * y13) >> 12) + dsp.x;
             continue;
         }
-        uint32_t TRA = (i0 >> 9) & 0x7F, TWT = (i0 >> 8) & 1, TWA = (i0 >> 1) & 0x7F;
-        uint32_t XSEL = (i1 >> 15) & 1, YSEL = (i1 >> 13) & 3, IRA = (i1 >> 7) & 0x3F, IWT = (i1 >> 6) & 1, IWA = (i1 >> 1) & 0x1F;
-        uint32_t TABLE = (i2 >> 15) & 1, MWT = (i2 >> 14) & 1, MRD = (i2 >> 13) & 1, EWT = (i2 >> 12) & 1, EWA = (i2 >> 8) & 15;
-        uint32_t ADRL = (i2 >> 7) & 1, FRCL = (i2 >> 6) & 1, SHIFT = (i2 >> 4) & 3, YRL = (i2 >> 3) & 1;
-        uint32_t NEGB = (i2 >> 2) & 1, ZERO = (i2 >> 1) & 1, BSEL = i2 & 1;
-        uint32_t MASA = (i3 >> 9) & 0x3F, ADREB = (i3 >> 8) & 1, NXADR = (i3 >> 7) & 1;
+        uint32_t TRA = o->TRA, TWT = o->TWT, TWA = o->TWA, XSEL = o->XSEL, YSEL = o->YSEL, IRA = o->IRA, IWT = o->IWT, IWA = o->IWA;
+        uint32_t TABLE = o->TABLE, MWT = o->MWT, MRD = o->MRD, EWT = o->EWT, EWA = o->EWA, ADRL = o->ADRL, FRCL = o->FRCL;
+        uint32_t SHIFT = o->SHIFT, YRL = o->YRL, NEGB = o->NEGB, ZERO = o->ZERO, BSEL = o->BSEL, MASA = o->MASA, ADREB = o->ADREB, NXADR = o->NXADR;
 
         if (IRA <= 0x1F) dsp.inputs = dsp.mems[IRA];
         else if (IRA <= 0x2F) dsp.inputs = dsp.mixs[IRA - 0x20] << 4;          /* 20 -> 24 bit */
@@ -574,5 +588,6 @@ int dc_aica_arm_running(void) { return arm_running; }
 void dc_aica_state(dc_state_fn f) {
     f(dc_aram, sizeof dc_aram); f(regs, sizeof regs); f(&sample_clock, sizeof sample_clock);
     f(&arm_running, sizeof arm_running); f(tim_sub, sizeof tim_sub); f(ch, sizeof ch); f((void *)&irq_want, sizeof irq_want);
+    f(&dsp, sizeof dsp);                       /* the effects DSP's registers and temp ring */
 }
-void dc_aica_drop_output(void) { RING_STORE(ring_r, RING_LOAD(ring_w)); }
+void dc_aica_drop_output(void) { RING_STORE(ring_r, RING_LOAD(ring_w)); dsp.last_step = -1; }   /* after a restore: decode the program again */
