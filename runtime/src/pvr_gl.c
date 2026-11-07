@@ -1628,7 +1628,12 @@ void dc_pvr_gl_render(int scale) {
             if (v[k].y < y0) y0 = v[k].y; if (v[k].y > y1) y1 = v[k].y;
             if (fabsf(v[k].z - v[0].z) > fabsf(v[0].z) * 1e-4f) flat = 0;   /* flat, to rounding (a quad placed in 3D) */
         }
-        if (flat && x0 <= 1.f && x1 >= RW - 1.f && y0 <= 1.f && y1 >= RH - 1.f && x1 > x0 && y1 > y0 &&
+        /* the full picture: of a render to texture, its clipped area (Dead or Alive 2 draws its trails into the
+         * top 512 x 256 of a 512 x 478 pass, the last capture fed back over the new one) */
+        float fx1 = (float)RW, fy1 = (float)RH;
+        if (capturing && f.clip_x1 > f.clip_x0 && f.clip_x1 + 1 < f.width) fx1 = (float)(f.clip_x1 + 1) * (float)RW / (float)f.width;
+        if (capturing && f.clip_y1 > f.clip_y0 && f.clip_y1 + 1 < (int)RH) fy1 = (float)(f.clip_y1 + 1);
+        if (flat && x0 <= 1.f && x1 >= fx1 - 1.f && y0 <= 1.f && y1 >= fy1 - 1.f && x1 > x0 && y1 > y0 &&
             cap[c].rw >= RW * 0.5f && cap[c].rh >= RH * 0.5f)
             { poly_cap[i] = (unsigned char)(c + 1); poly_hud[i] = 0; }   /* plain bilinear over the whole capture */
     }
