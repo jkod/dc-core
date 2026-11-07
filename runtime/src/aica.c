@@ -568,3 +568,11 @@ void arm7_write8(uint32_t a, uint8_t v) {
 }
 
 int dc_aica_arm_running(void) { return arm_running; }
+
+/* ------------------------------------------------------------------ reset in place (reset.h) */
+#include "dccore/reset.h"
+void dc_aica_state(dc_state_fn f) {
+    f(dc_aram, sizeof dc_aram); f(regs, sizeof regs); f(&sample_clock, sizeof sample_clock);
+    f(&arm_running, sizeof arm_running); f(tim_sub, sizeof tim_sub); f(ch, sizeof ch); f((void *)&irq_want, sizeof irq_want);
+}
+void dc_aica_drop_output(void) { RING_STORE(ring_r, RING_LOAD(ring_w)); }

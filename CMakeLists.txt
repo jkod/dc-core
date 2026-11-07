@@ -4,7 +4,7 @@ project(dc_core C)
 set(CMAKE_C_STANDARD 11)
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
-add_library(dccore STATIC runtime/src/dispatch.c runtime/src/disc.c runtime/src/bios_hle.c runtime/src/hw.c runtime/src/ta.c runtime/src/arm7.c runtime/src/aica.c runtime/src/coro.c runtime/src/pvr_sw.c runtime/src/maple.c runtime/src/pvr_gl.c runtime/src/texpack.c runtime/src/interp.c runtime/src/crt.c)
+add_library(dccore STATIC runtime/src/dispatch.c runtime/src/disc.c runtime/src/bios_hle.c runtime/src/hw.c runtime/src/ta.c runtime/src/arm7.c runtime/src/aica.c runtime/src/coro.c runtime/src/pvr_sw.c runtime/src/maple.c runtime/src/pvr_gl.c runtime/src/texpack.c runtime/src/interp.c runtime/src/crt.c runtime/src/reset.c)
 target_include_directories(dccore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/runtime/include)
 # Windows CE games (dccore/wince.h): the loader and native COREDLL calls
 add_library(dccore_wince STATIC runtime/src/wince/ce_kernel.c runtime/src/wince/ce_loader.c runtime/src/wince/ce_api.c

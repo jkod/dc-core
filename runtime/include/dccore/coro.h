@@ -37,6 +37,7 @@ void dc_coro_add_stack_switch(uint32_t addr, int starts_task);
  * program's main stack before the guest code ran. The hooks of dc_coro_install / dc_coro_add_switch
  * are removed; install the next executable's afterwards. Does not return. */
 void dc_coro_reset(jmp_buf *jb);
+void dc_coro_leave(jmp_buf *jb);        /* reset in place: leave every coroutine for jb on the main stack, hooks kept */
 extern int dc_coro_trace;           /* non-zero: log switches to stderr */
 int dc_coro_count(void);            /* coroutines created so far (tests/diagnostics) */
 

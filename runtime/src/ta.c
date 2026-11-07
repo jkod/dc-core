@@ -84,3 +84,6 @@ void dc_ta_write(const uint8_t *p, uint32_t len) {
     uint32_t blk[8];
     for (uint32_t o = 0; o + 32 <= len; o += 32) { memcpy(blk, p + o, 32); dc_ta_write32(blk); }
 }
+
+#include "dccore/reset.h"
+void dc_ta_state(dc_state_fn f) { f(&ta, sizeof ta); }

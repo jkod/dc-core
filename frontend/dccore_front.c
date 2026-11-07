@@ -568,6 +568,9 @@ static void on_vblank(uint64_t f) {
         if (cfg.stats) print_stats();
         dc_front_close(); exit(0);
     }
+    { static long reset_at = -2;                           /* DC_RESET_AT=frame: Reset there (tests) */
+      if (reset_at == -2) { const char *e = getenv("DC_RESET_AT"); reset_at = e ? atol(e) : -1; }
+      if (reset_at >= 0 && (long)presented >= reset_at) { reset_at = -1; front_reset_now(); } }
     if (wav_file() || audio) {
         static int16_t buf[4096 * 2];
         int n;
@@ -691,8 +694,10 @@ static void aica_thread_start(void) {
     int on = e && *e == '1';
 #endif
     if (!on || aica_thr) return;
-    aica_mx = SDL_CreateMutex(); disc_mx = SDL_CreateMutex(); aica_cv = SDL_CreateCond(); aica_done_cv = SDL_CreateCond();
+    if (!aica_mx) { aica_mx = SDL_CreateMutex(); disc_mx = SDL_CreateMutex(); aica_cv = SDL_CreateCond(); aica_done_cv = SDL_CreateCond(); }
     if (!aica_mx || !disc_mx || !aica_cv || !aica_done_cv) return;
+    aica_stop = 0; aica_target = 0; aica_slept_at = 0; aica_game_waits = 0;   /* again after a reset */
+    SDL_AtomicSet(&aica_sleeping, 0); SDL_AtomicSet(&aica_want, 0);
     dc_disc_lock = disc_lock;
     dc_aica_async.advance = aica_async_advance; dc_aica_async.enter = aica_async_enter; dc_aica_async.leave = aica_async_leave;
 #ifdef __SWITCH__
@@ -721,6 +726,13 @@ int dc_front_open_icon(const dc_front_config *c, const unsigned char *icon_rgba)
 
 int dc_front_open(const dc_front_config *c) {
     cfg = *c;
+    {   /* started again by Reset (a port without dc_front_run): the window as it was (osd_restart) */
+        const char *e = getenv("DC_RESTART_STATE"); int fs, sc, ws, w, h;
+        if (e && sscanf(e, "%d,%d,%d,%d,%d", &fs, &sc, &ws, &w, &h) == 5) {
+            cfg.fullscreen = fs; if (sc > 0) cfg.scale = sc; cfg.widescreen = ws;
+            if (w > 0 && h > 0) { cfg.width = w; cfg.height = h; }
+        }
+    }
 #ifdef _WIN32
     /* messages go to <save_name>.log next to the exe (DC_LOG=console keeps them in the console) */
     { const char *lg = getenv("DC_LOG"); if (!(lg && !strcmp(lg, "console"))) {
@@ -849,3 +861,39 @@ void dc_front_close(void) {
 }
 
 unsigned long dc_front_frames(void) { return presented; }
+
+/* ------------------------------------------------------------------ reset in place (dc_front_run) */
+#include "dccore/reset.h"
+#include "dccore/coro.h"
+void (*dc_front_on_reset)(struct sh4ctx *c);
+static jmp_buf reset_jb;
+static int reset_ready;                                     /* dc_front_run took its copy */
+void dc_front_run(struct sh4ctx *c, uint32_t entry) {
+    { int thr = aica_thr != NULL;                          /* the copy is taken with the sound thread stopped */
+      if (thr) aica_thread_stop();
+      reset_ready = dc_reset_snapshot(c) == 0;
+      if (thr) aica_thread_start(); }
+    if (!reset_ready) fprintf(stderr, "dc-core: no memory for the reset copy: Reset starts the program again\n");
+    if (DC_SETJMP(reset_jb)) {                              /* front_reset_now: back here, on the main stack */
+        int thr = aica_thr != NULL;
+        if (thr) aica_thread_stop();
+        dc_reset_restore(c);
+        if (dc_front_on_reset) dc_front_on_reset(c);
+        if (audio) SDL_ClearQueuedAudio(audio);
+        if (thr) aica_thread_start();
+        paced = 0;
+        fprintf(stderr, "dc-core: reset (the game starts again)\n");
+    }
+    c->pr = 0;
+    dc_call(c, entry);
+}
+/* from the menu (on the game's thread, anywhere in its code): leave it for dc_front_run's jmp_buf */
+static int front_reset_now(void) {
+    if (!reset_ready) return 0;
+    osd_open = 0;
+    while (!osd_all_released()) osd_frame();               /* the game doesn't see the press */
+    need_present = 1;
+    if (audio) SDL_PauseAudioDevice(audio, 0);
+    dc_coro_leave(&reset_jb);
+    return 1;                                               /* not reached */
+}

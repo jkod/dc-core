@@ -342,3 +342,6 @@ int dc_bios_install(sh4ctx *c, char region) {
         return 0;
     return -1;
 }
+
+#include "dccore/reset.h"
+void dc_bios_state(dc_state_fn f) { f(req, sizeof req); f(&next_req, sizeof next_req); f(&last_lba, sizeof last_lba); f(&cdda, sizeof cdda); }

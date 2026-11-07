@@ -54,6 +54,7 @@ uint32_t dc_vram32_gen[0x800];       /* per 4 KB of the 32-bit area: bumped on w
 static uint32_t p4[32][64];          /* SH-4 on-chip registers, by module */
 static uint32_t sq[2][8];            /* store queues */
 static uint8_t  ocram[0x2000];
+static uint32_t ta_blk[8]; static int ta_nb;        /* a 32-byte TA FIFO block being written */
 
 #define SBR(o)  sb[((o) - 0x6800) >> 2]
 #define PVR(o)  pvr[(o) >> 2]
@@ -571,10 +572,11 @@ static void wr(uint32_t a, uint32_t v, int size) {
     if ((m >> 24) == 0x04 || (m >> 24) == 0x06) { memcpy(dc_vram + (m & 0x7FFFFF), &v, size); VRAM_TOUCH(m); return; }
     if ((m >> 24) == 0x05 || (m >> 24) == 0x07) { memcpy(dc_vram + (vram32(m) | (m & 3)), &v, size); VRAM_TOUCH(vram32(m)); VRAM32_TOUCH(m); return; }
     if ((m >> 26) == 0x04) {                                                                  /* 0x10000000.. TA FIFO */
-        static uint32_t blk[8]; static int nb;
+        uint32_t *blk = ta_blk; int nb = ta_nb;
         if (dc_hw.on_ta_write) dc_hw.on_ta_write(m, v);
         blk[nb++] = v;
         if (nb == 8) { nb = 0; ta_area_write(m & ~31u, (const uint8_t *)blk, 32); }
+        ta_nb = nb;
         return;
     }
     warn(size == 4 ? "write32" : size == 2 ? "write16" : "write8", a);
@@ -612,3 +614,22 @@ uint32_t dc_sb_reg(uint32_t addr) { return SBR(addr & 0xFFFC); }
 #define MEM_WR(T, n) void dc_mem_wr##n(uint32_t a, T v) { if (DC_IS_URAM(a)) { memcpy(dc_uram + DC_URAM_OFS(a), &v, sizeof v); return; } if (DC_IS_RAM(a)) { memcpy(dc_ram + DC_RAM_OFS(a), &v, sizeof v); return; } dc_hw_wr##n(a, v); }
 MEM_RD(uint8_t, 8) MEM_RD(uint16_t, 16) MEM_RD(uint32_t, 32)
 MEM_WR(uint8_t, 8) MEM_WR(uint16_t, 16) MEM_WR(uint32_t, 32)
+
+/* ------------------------------------------------------------------ reset in place (reset.h) */
+#include "dccore/reset.h"
+void dc_hw_state(dc_state_fn f) {
+    tmu_power_on();                        /* done once: its counters' power-on values go into the copy */
+    f(pvr, sizeof pvr); f(sb, sizeof sb); f(p4, sizeof p4); f(sq, sizeof sq); f(ocram, sizeof ocram);
+    f(ta_blk, sizeof ta_blk); f(&ta_nb, sizeof ta_nb);
+    f(&frame_count, sizeof frame_count); f(tmu, sizeof tmu); f(evq, sizeof evq); f(&evn, sizeof evn);
+    f(&irq_depth, sizeof irq_depth); f(&last_vbin_field, sizeof last_vbin_field); f(&last_vbout_field, sizeof last_vbout_field);
+    f(&hb_last_line, sizeof hb_last_line); f(&yuv, sizeof yuv); f(&dc_sq_base, sizeof dc_sq_base);
+    f(maps, sizeof maps); f(&nmaps, sizeof nmaps); f(&map_last, sizeof map_last);
+    f(&dc_next_event, sizeof dc_next_event); f(&dc_pvr_clip_written, sizeof dc_pvr_clip_written);
+    f(dc_vram, sizeof dc_vram);
+}
+void dc_hw_invalidate_caches(void) {
+    for (size_t i = 0; i < sizeof dc_vram_gen / sizeof *dc_vram_gen; i++) dc_vram_gen[i] += 0x10000u;
+    for (size_t i = 0; i < sizeof dc_vram32_gen / sizeof *dc_vram32_gen; i++) dc_vram32_gen[i] += 0x10000u;
+    dc_pal_gen += 0x10000u;
+}

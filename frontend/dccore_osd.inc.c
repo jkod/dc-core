@@ -393,8 +393,21 @@ static void osd_count_frame(void) {
     if (osd_fps) need_present = 1;
 }
 
+static int front_reset_now(void);
 static void osd_restart(void) {
+    if (front_reset_now()) return;                          /* in place (dc_front_run); otherwise the program starts again */
     fprintf(stderr, "dc-core: reset (starting the game again)\n");
+    {   /* the new copy opens its window as this one is now (dc_front_open reads it) */
+        int w = 0, h = 0;
+        if (win && !cfg.fullscreen) SDL_GetWindowSize(win, &w, &h);
+        static char st[96];
+        snprintf(st, sizeof st, "DC_RESTART_STATE=%d,%d,%d,%d,%d", cfg.fullscreen, cfg.scale, cfg.widescreen, w, h);
+#ifdef _WIN32
+        _putenv(st);
+#else
+        putenv(st);
+#endif
+    }
     fflush(NULL);
 #if defined(_WIN32)
     wchar_t exe[MAX_PATH]; GetModuleFileNameW(NULL, exe, MAX_PATH);

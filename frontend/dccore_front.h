@@ -1,5 +1,6 @@
 #ifndef DCCORE_FRONT_H
 #define DCCORE_FRONT_H
+#include <stdint.h>
 /* dc-core desktop frontend (SDL2 + OpenGL 3.3): window, rendering, audio, input, pacing.
  *
  * A port opens it once before starting the game's code; from then on the hardware model's hooks
@@ -52,6 +53,14 @@ extern const unsigned char dccore_icon_rgba[32 * 32 * 4];
 #define dc_front_open(cfg) dc_front_open_icon((cfg), dccore_icon_rgba)
 #endif
 void dc_front_close(void);
+/* Start the game's code at entry (after dc_front_open) and never return. The on-screen menu's Reset then
+ * starts the game again in place: the emulated machine goes back to how it was right here (RAM, video and
+ * sound memory, registers, timers, the GD-ROM drive; reset.h), while the window, fullscreen, resolution,
+ * sound device, settings and saves stay. Without it Reset starts the program again. dc_front_on_reset
+ * (optional) lets a port put its own state back as well. */
+struct sh4ctx;
+void dc_front_run(struct sh4ctx *c, uint32_t entry);
+extern void (*dc_front_on_reset)(struct sh4ctx *c);
 /* frames presented so far / whether the window was closed (for tests and headless runs) */
 unsigned long dc_front_frames(void);
 /* non-zero: fast-forward (no pacing to the wall clock, every 8th field shown). A port sets it while

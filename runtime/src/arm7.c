@@ -336,3 +336,6 @@ int arm7_run(int cycles) {
     }
     return done;
 }
+
+#include "dccore/reset.h"
+void dc_arm7_state(dc_state_fn f) { f(&arm7, sizeof arm7); f(idle, sizeof idle); }

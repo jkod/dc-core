@@ -355,6 +355,20 @@ void dc_coro_reset(jmp_buf *jb) {
     abort();                             /* not reached */
 }
 
+/* ---- resetting the game in place (dc_coro_leave): every coroutine is let go and the main stack
+ * continues at jb, from whichever stack this runs on; unlike dc_coro_reset the hooks stay installed */
+void dc_coro_leave(jmp_buf *jb) {
+    for (int i = 0; i < MAX_SLOTS; i++) slots[i].used = 0;
+    for (int i = 0; i < ncoros; i++) { coros[i].refs = 0; coros[i].sp_waiting = 0; coros[i].pending = NULL; }
+    main_coro.refs = 0; main_coro.sp_waiting = 0; main_coro.pending = NULL;
+    if (cur == &main_coro) DC_LONGJMP(*jb, 1);
+    leave_jb = jb;
+    coro *from = cur;
+    cur = &main_coro;
+    hctx_switch(&from->uc, &main_coro.uc);
+    abort();                             /* not reached */
+}
+
 /* ---- plain fibers (dc_fiber_*, coro.h): host stacks for an HLE operating system's threads */
 struct dc_fiber { hctx uc; void *stack; size_t bytes; void (*fn)(void *); void *arg; };
 static dc_fiber fiber_main;
