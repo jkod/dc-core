@@ -120,7 +120,11 @@ extern int dc_pvr_gl_hud_sprites;       /* widescreen: only sprite polygons are 
  * "TIME EXTENSION!!"), and a piece that zooms in moves the same way all the time (its position number).
  * Pieces outside every zone are grouped as before. A game sets dc_pvr_gl_hud_nzones to 0 on screens
  * where the zones do not apply. */
-typedef struct { float x0, y0, x1, y1; int side; } dc_hud_zone;
+typedef struct { float x0, y0, x1, y1; int side;
+    /* > 0: pieces in the zone stretch instead of moving: its outer end goes out to the screen edge, its
+     * inner end stays, x in between scales; pieces within this many pixels of either end move rigidly
+     * with it (a fighting game's health bar reaching from the edge to the timer, its caps kept) */
+    int stretch; } dc_hud_zone;
 extern const dc_hud_zone *dc_pvr_gl_hud_zones;
 extern int dc_pvr_gl_hud_nzones;
 /* widescreen: a port's callback naming HUD pieces (flat or 3D, at or above dc_pvr_gl_hud_z) that go to a screen edge

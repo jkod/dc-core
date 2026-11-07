@@ -482,10 +482,19 @@ static int tdepth_run(float z) {
     return 0;
 }
 static float push_zk = 1.f;            /* translucent polygons at one depth: a later one a hair nearer (see below) */
+/* a HUD zone that stretches (dc_hud_zone.stretch): x in [s_a, s_b] goes to [s_a2, s_b2], the ends
+ * (within the zone's margin) move rigidly with them */
+static int push_str; static float s_a, s_b, s_m, s_a2, s_b2;
+static float stretch_x(float x) {
+    if (x <= s_a + s_m) return x + (s_a2 - s_a);
+    if (x >= s_b - s_m) return x + (s_b2 - s_b);
+    float a = s_a + s_m, b = s_b - s_m, a2 = s_a2 + s_m, b2 = s_b2 - s_m;
+    return a2 + (x - a) * (b2 - a2) / (b - a);
+}
 static void push(const pvr_vtx *v) {
     if (nverts == cap_verts) { cap_verts = cap_verts ? cap_verts * 2 : 8192; verts = realloc(verts, cap_verts * sizeof *verts); }
     gv *g = &verts[nverts++];
-    g->x = v->x + push_dx;
+    g->x = push_str ? stretch_x(v->x) : v->x + push_dx;
     if (push_wide > 0) { if (v->x <= 1.f) g->x -= push_wide; else if (v->x >= push_rw - 1.f) g->x += push_wide; } g->y = v->y; g->z = v->z * push_zk; g->u = v->u; g->v = v->v; g->u1 = v->u1; g->v1 = v->v1;
     memcpy(g->c, v->c, 16); memcpy(g->o, v->o, 16); memcpy(g->c1, v->c1, 16); memcpy(g->o1, v->o1, 16);
     if (cap_uv >= 0) {                  /* the capture spans [-(ww - rw) / 2, rw + (ww - rw) / 2] x [0, rh], rows up */
@@ -1318,7 +1327,11 @@ static void hud_group(const pvr_frame *f, int RW, signed char *side) {
             const dc_hud_zone *hz = &dc_pvr_gl_hud_zones[z_];
             float zs = RW / 640.f;
             float cx = (x0 + x1) * .5f, cy = (y0 + y1) * .5f;
-            if (cx >= hz->x0 * zs && cx <= hz->x1 * zs && cy >= hz->y0 * zs && cy <= hz->y1 * zs) { side[i] = (signed char)hz->side; break; }
+            if (cx >= hz->x0 * zs && cx <= hz->x1 * zs && cy >= hz->y0 * zs && cy <= hz->y1 * zs) {
+                side[i] = (signed char)hz->side;
+                if (hz->stretch > 0 && hz->side && z_ < 100) side[i] = (signed char)(hz->side * (8 + z_));   /* |side| >= 8: stretches */
+                break;
+            }
         }
         if (z_ < dc_pvr_gl_hud_nzones) continue;
         /* small 3D HUD models (Rush's spinning coins) count; up to a fifth of the width: Space Race's
@@ -1915,8 +1928,15 @@ void dc_pvr_gl_render(int scale) {
     for (int i = 0; i < f.npolys; i++) {
         const pvr_poly *p = &f.polys[i];
         const pvr_vtx *v = f.verts + p->first;
-        push_dx = 0;
-        if (hud_dx > 0 && hud_side) {
+        push_dx = 0; push_str = 0;
+        if (hud_dx > 0 && hud_side && (hud_side[i] >= 8 || hud_side[i] <= -8)) {   /* a stretching zone: outer end out, inner end stays */
+            const dc_hud_zone *hz = &dc_pvr_gl_hud_zones[abs(hud_side[i]) - 8];
+            float zs = RW / 640.f;
+            s_a = hz->x0 * zs; s_b = hz->x1 * zs; s_m = hz->stretch * zs;
+            s_a2 = hz->side < 0 ? s_a - hud_dx : s_a; s_b2 = hz->side < 0 ? s_b : s_b + hud_dx;
+            push_str = 1;
+        }
+        else if (hud_dx > 0 && hud_side) {
             push_dx = hud_side[i] * hud_dx;
             if (ovl_z < 1e29f && v[0].z >= ovl_z && i >= ovl_i) {   /* pause shade and menu */
                 int flat = 1; for (int k = 1; k < p->n; k++) if (v[k].z != v[0].z) flat = 0;
@@ -1997,7 +2017,7 @@ void dc_pvr_gl_render(int scale) {
             sky_mirror(p, v, i, (float)RW, (float)f.height, (WW - (float)RW) * 0.5f + 2.f);
         }
         spans[i].count = nverts - spans[i].first;
-        push_wide = 0; cap_uv = -1; push_zk = 1.f;
+        push_wide = 0; cap_uv = -1; push_zk = 1.f; push_str = 0;
         if ((p->isp >> 25) & 1) for (int k = 0; k < p->n; k++) { if (v[k].x < cx0) cx0 = v[k].x; if (v[k].x > cx1) cx1 = v[k].x; }
     }
     push_dx = 0;
