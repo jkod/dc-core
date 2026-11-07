@@ -221,7 +221,7 @@ static const char *fs_src =
 "flat in vec4 f_c; flat in vec4 f_o;\n"
 "uniform sampler2D u_tex;\n"
 "uniform int u_quad; uniform vec4 u_quad_col;\n"
-"uniform int u_textured, u_shade, u_use_alpha, u_ign_ta, u_offset, u_gouraud, u_fog, u_pt;\n"
+"uniform int u_textured, u_shade, u_use_alpha, u_ign_ta, u_offset, u_gouraud, u_fog, u_pt, u_tpass;\n"
 "uniform float u_pt_ref; uniform vec3 u_fog_ram, u_fog_vert; uniform float u_fog_den; uniform vec2 u_fog_tab[128];\n"
 "uniform int u_hud; uniform vec4 u_uvbox;\n"
 "out vec4 o_col;\n"
@@ -279,7 +279,9 @@ static const char *fs_src =
 "    if (u_fog == 1) { fc = u_fog_vert; f = off.a; } else { fc = u_fog_ram; f = fog_alpha(iw); }\n"
 "    if (u_fog == 3) px = vec4(fc, f); else px.rgb = mix(px.rgb, fc, f);\n"
 "  }\n"
-"  if (u_pt != 0 && px.a * 255.0 + 0.5 < u_pt_ref * 255.0) discard;\n"   /* in 8-bit steps like the PVR: colours divided by the interpolated 1/w can land a hair below 1.0 (NVIDIA), which dropped whole letters of Rush's text */
+"  if (u_pt != 0 && px.a * 255.0 + 0.5 < u_pt_ref * 255.0) discard;\n"
+"  if (u_tpass == 1 && px.a < 0.996) discard;\n"
+"  if (u_tpass == 2 && px.a >= 0.996) discard;\n"   /* in 8-bit steps like the PVR: colours divided by the interpolated 1/w can land a hair below 1.0 (NVIDIA), which dropped whole letters of Rush's text */
 "  o_col = px;\n"
 "  gl_FragDepth = clamp((log2(iw) + 64.0) / 128.0, 0.0, 1.0);\n"
 
@@ -291,7 +293,7 @@ static float depth_of(float invw) { float d = (log2f(fmaxf(invw, 1e-30f)) + 64.f
 typedef struct { float x, y, z, u, v, u1, v1, c[4], o[4], c1[4], o1[4]; } gv;
 static GLuint prog, vao, vbo, fbo, color_tex, depth_rb;
 static int fb_w, fb_h, ready;
-static struct { GLint scale, offx, set, quad, quad_col, tex, textured, shade, use_alpha, ign_ta, offset, gouraud, fog, pt, pt_ref,
+static struct { GLint scale, offx, set, quad, quad_col, tex, textured, tpass, shade, use_alpha, ign_ta, offset, gouraud, fog, pt, pt_ref,
                 fog_ram, fog_vert, fog_den, fog_tab, hud, uvbox; } U;
 static gv *verts; static int nverts, cap_verts;
 typedef struct { int first, count; } span;
@@ -331,7 +333,7 @@ int dc_pvr_gl_init(void *(*getproc)(const char *)) {
     bars_init();
 #define UL(f, n) U.f = p_glGetUniformLocation(prog, n)
     UL(scale, "u_scale"); UL(offx, "u_offx"); UL(set, "u_set"); UL(quad, "u_quad"); UL(quad_col, "u_quad_col"); UL(tex, "u_tex");
-    UL(textured, "u_textured"); UL(shade, "u_shade"); UL(use_alpha, "u_use_alpha"); UL(ign_ta, "u_ign_ta"); UL(offset, "u_offset");
+    UL(textured, "u_textured"); UL(tpass, "u_tpass"); UL(shade, "u_shade"); UL(use_alpha, "u_use_alpha"); UL(ign_ta, "u_ign_ta"); UL(offset, "u_offset");
     UL(gouraud, "u_gouraud"); UL(fog, "u_fog"); UL(pt, "u_pt"); UL(pt_ref, "u_pt_ref"); UL(hud, "u_hud"); UL(uvbox, "u_uvbox"); UL(fog_ram, "u_fog_ram");
     UL(fog_vert, "u_fog_vert"); UL(fog_den, "u_fog_den"); UL(fog_tab, "u_fog_tab");
 #undef UL
@@ -954,6 +956,17 @@ static unsigned char *poly_hud; static const pvr_poly *poly_base;
  * texture (0..1): it samples clamped to the texture's edge, so bilinear filtering at a border doesn't
  * read the opposite side (a seam where two textures meet: Space Race's start banner) */
 static unsigned char *poly_edge;
+/* translucent polygons, opaque parts first (dc_pvr_gl_topaque, auto-sort only): the PVR sorts translucent
+ * fragments per pixel, the GL path per polygon. A car's decals and the coplanar layers over its paint
+ * (Daytona USA 2001) come out in pieces when whole polygons, or their triangles, are ordered by depth.
+ * Fragments a normal alpha blend draws fully opaque come out the same in any order, so pass 1 draws just
+ * those, writing depth; pass 2 draws the rest sorted, behind what pass 1 drew hidden. */
+int dc_pvr_gl_topaque;
+static int tpass;                         /* 0 off, 1 the opaque fragments, 2 the rest */
+static int two_pass_poly(const pvr_poly *p) {
+    int zmode = (p->isp >> 29) & 7;
+    return p->list == 2 && ((p->tsp >> 29) & 7) == 4 && ((p->tsp >> 26) & 7) == 5 && (zmode == 4 || zmode == 6);
+}
 static void set_poly_state(const pvr_poly *p, int set) {
     uint32_t tsp = set ? p->tsp1 : p->tsp, tcw = set ? p->tcw1 : p->tcw;
     int tex = (p->isp >> 25) & 1;
@@ -987,6 +1000,9 @@ static void set_poly_state(const pvr_poly *p, int set) {
     if (p->list == 4 && zmode == 0) zmode = 6;
     p_glDepthFunc(depth_fn[zmode]);
     p_glDepthMask(p->list != 2 && !((p->isp >> 26) & 1));
+    int tp = tpass && two_pass_poly(p) ? tpass : 0;
+    p_glUniform1i(U.tpass, tp);
+    if (tp == 1) p_glDepthMask(1);
 }
 static GLenum blend_src(int i) { static const GLenum t[8] = { GL_ZERO, GL_ONE, GL_DST_COLOR, GL_ONE_MINUS_DST_COLOR, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_DST_ALPHA, GL_ONE_MINUS_DST_ALPHA }; return t[i & 7]; }
 static GLenum blend_dst(int i) { static const GLenum t[8] = { GL_ZERO, GL_ONE, GL_SRC_COLOR, GL_ONE_MINUS_SRC_COLOR, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_DST_ALPHA, GL_ONE_MINUS_DST_ALPHA }; return t[i & 7]; }
@@ -2146,6 +2162,15 @@ void dc_pvr_gl_render(int scale) {
     }
     if (!presort) qsort(s, nt, sizeof *s, cmp_sort);
     p_glEnable(GL_BLEND);
+    if (!presort && dc_pvr_gl_topaque) {
+        tpass = 1;
+        for (int k = 0; k < nt; k++) {
+            const pvr_poly *p = &f.polys[s[k].idx];
+            if (two_pass_poly(p)) batch_add(p, 0, -1, 1, spans[s[k].idx].first, spans[s[k].idx].count);
+        }
+        batch_reset();
+        tpass = 2;
+    }
     if (!presort && dc_pvr_gl_tsort2) {
         /* the PVR sorts translucent fragments per pixel; sorting whole polygons (a strip can be a
          * fence along a whole side of the court) put a large one in front of smaller ones before it
@@ -2185,6 +2210,7 @@ void dc_pvr_gl_render(int scale) {
         batch_add(p, 0, -1, 1, spans[s[k].idx].first, spans[s[k].idx].count);
     }
     batch_reset();
+    tpass = 0; p_glUniform1i(U.tpass, 0);
     free(s);
     p_glDisable(GL_BLEND);
     p_glDisable(GL_SCISSOR_TEST);
