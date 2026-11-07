@@ -1306,6 +1306,8 @@ int dc_pvr_gl_shade_any_z;
 int dc_pvr_gl_hud_panel_rows;
 int dc_pvr_gl_hud_bars;
 #define HUD_BAR 127                     /* side[i]: a full-width HUD bar, stretched to the screen edges */
+#define HUD_MOVE0 64                    /* side[i] 64 + zone: a zone moving by a fraction (dc_hud_zone.move) */
+#define HUD_MOVE_N 60
 static void hud_group(const pvr_frame *f, int RW, signed char *side) {
     static hud_box *b; static int cap;
     int n = 0;
@@ -1331,6 +1333,7 @@ static void hud_group(const pvr_frame *f, int RW, signed char *side) {
             float cx = (x0 + x1) * .5f, cy = (y0 + y1) * .5f;
             if (cx >= hz->x0 * zs && cx <= hz->x1 * zs && cy >= hz->y0 * zs && cy <= hz->y1 * zs) {
                 side[i] = (signed char)hz->side;
+                if (hz->move != 0.f && z_ < HUD_MOVE_N) { side[i] = (signed char)(HUD_MOVE0 + z_); break; }   /* moves by a fraction */
                 if (hz->stretch > 0 && hz->side && z_ < 100) side[i] = (signed char)(hz->side * (8 + z_));   /* |side| >= 8: stretches */
                 break;
             }
@@ -1935,6 +1938,8 @@ void dc_pvr_gl_render(int scale) {
         const pvr_vtx *v = f.verts + p->first;
         push_dx = 0; push_str = 0;
         if (hud_dx > 0 && hud_side && hud_side[i] == HUD_BAR) { push_wide = hud_dx; push_rw = (float)RW; }
+        else if (hud_dx > 0 && hud_side && hud_side[i] >= HUD_MOVE0 && hud_side[i] < HUD_MOVE0 + HUD_MOVE_N)
+            push_dx = dc_pvr_gl_hud_zones[hud_side[i] - HUD_MOVE0].move * hud_dx;
         else if (hud_dx > 0 && hud_side && (hud_side[i] >= 8 || hud_side[i] <= -8)) {   /* a stretching zone: outer end out, inner end stays */
             const dc_hud_zone *hz = &dc_pvr_gl_hud_zones[abs(hud_side[i]) - 8];
             float zs = RW / 640.f;

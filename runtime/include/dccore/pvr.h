@@ -124,7 +124,11 @@ typedef struct { float x0, y0, x1, y1; int side;
     /* > 0: pieces in the zone stretch instead of moving: its outer end goes out to the screen edge, its
      * inner end stays, x in between scales; pieces within this many pixels of either end move rigidly
      * with it (a fighting game's health bar reaching from the edge to the timer, its caps kept) */
-    int stretch; } dc_hud_zone;
+    int stretch;
+    /* != 0: pieces in the zone move by this fraction of the extra width on each side instead of by side
+     * (-1 .. 1; a row of panels spreads evenly over the width: five panels at -0.8, -0.4, 0, 0.4, 0.8,
+     * Propeller Arena's teams) */
+    float move; } dc_hud_zone;
 extern const dc_hud_zone *dc_pvr_gl_hud_zones;
 extern int dc_pvr_gl_hud_nzones;
 /* widescreen: a port's callback naming HUD pieces (flat or 3D, at or above dc_pvr_gl_hud_z) that go to a screen edge
