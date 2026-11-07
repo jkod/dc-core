@@ -470,6 +470,34 @@ static void present_window(void) {
  * the window has had focus once, so a console window that keeps focus at start doesn't hold the game.
  * Off with run_in_background / background_input / DC_RUN_IN_BACKGROUND=1, and for scripted and
  * unpaced runs (--frames, --no-pacing, DC_PRESS, DC_SHOTS), which have no one to focus the window. */
+/* Sound to the device: the game's thread puts samples into this ring and SDL's audio thread takes them
+ * in its callback. Neither waits for the other: on the Switch, SDL_QueueAudio / SDL_GetQueuedAudioSize
+ * took the device's lock, which SDL's audio thread holds while it feeds the system's buffers, and the
+ * game's thread waited there for up to 40% of each frame. One writer, one reader, two indices. */
+#define OUT_RING 16384                                      /* stereo frames, 0.37 s */
+static int16_t out_ring[OUT_RING * 2];
+static SDL_atomic_t out_w, out_r;
+static uint32_t out_fill(void) { return (uint32_t)SDL_AtomicGet(&out_w) - (uint32_t)SDL_AtomicGet(&out_r); }
+static void out_push(const int16_t *src, int frames) {
+    uint32_t w = (uint32_t)SDL_AtomicGet(&out_w), r = (uint32_t)SDL_AtomicGet(&out_r);
+    for (int i = 0; i < frames && w - r < OUT_RING; i++, w++) { out_ring[(w % OUT_RING) * 2] = src[i * 2]; out_ring[(w % OUT_RING) * 2 + 1] = src[i * 2 + 1]; }
+    SDL_AtomicSet(&out_w, (int)w);
+}
+static void SDLCALL out_callback(void *u, Uint8 *stream, int len) {
+    (void)u;
+    int16_t *dst = (int16_t *)stream; int frames = len / 4, n = 0;
+    uint32_t r = (uint32_t)SDL_AtomicGet(&out_r), w = (uint32_t)SDL_AtomicGet(&out_w);
+    for (; n < frames && r != w; n++, r++) { dst[n * 2] = out_ring[(r % OUT_RING) * 2]; dst[n * 2 + 1] = out_ring[(r % OUT_RING) * 2 + 1]; }
+    if (n < frames) memset(dst + n * 2, 0, (size_t)(frames - n) * 4);
+    SDL_AtomicSet(&out_r, (int)r);
+}
+/* forget what's queued (pause, reset): the reader's index, so under the device's lock (rare) */
+static void out_clear(void) {
+    if (audio) SDL_LockAudioDevice(audio);
+    SDL_AtomicSet(&out_r, SDL_AtomicGet(&out_w));
+    if (audio) SDL_UnlockAudioDevice(audio);
+}
+
 static void pause_while_unfocused(void) {
 #ifndef __SWITCH__
     static int off = -1, had_focus;
@@ -482,7 +510,7 @@ static void pause_while_unfocused(void) {
     if (SDL_GetWindowFlags(win) & SDL_WINDOW_INPUT_FOCUS) { had_focus = 1; return; }
     if (!had_focus) return;
     fprintf(stderr, "dc-core: paused (window not focused)\n");
-    if (audio) { SDL_PauseAudioDevice(audio, 1); SDL_ClearQueuedAudio(audio); }
+    if (audio) { SDL_PauseAudioDevice(audio, 1); out_clear(); }
     while (!(SDL_GetWindowFlags(win) & SDL_WINDOW_INPUT_FOCUS)) {
         SDL_WaitEventTimeout(NULL, 100);
         events();                                           /* quit, F11, window moved / uncovered */
@@ -576,7 +604,7 @@ static void on_vblank(uint64_t f) {
         int n;
         while ((n = aica_audio_read(buf, 4096)) > 0) {
             if (wav) { fwrite(buf, 4, (size_t)n, wav); wav_frames += (uint32_t)n; }
-            if (audio && speed_i == SPEED_1X && SDL_GetQueuedAudioSize(audio) < 44100 * 4 / 5) SDL_QueueAudio(audio, buf, (Uint32)n * 4);   /* keep < 0.2 s queued */
+            if (audio && speed_i == SPEED_1X && out_fill() < 44100 / 5) out_push(buf, n);   /* keep < 0.2 s queued */
         }
     }
     events();
@@ -608,7 +636,7 @@ static void on_vblank(uint64_t f) {
             static Uint32 target;
             if (!target) { const char *e = getenv("DC_AUDIO_MS"); int ms = e ? atoi(e) : 30; if (ms < 10) ms = 10; if (ms > 200) ms = 200;
                            target = (Uint32)(44100 * 4 * ms / 1000); }
-            while (SDL_GetQueuedAudioSize(audio) > target && emu > real - 0.05) {
+            while (out_fill() * 4 > target && emu > real - 0.05) {
                 SDL_Delay(1);
                 now = SDL_GetPerformanceCounter(); real = (double)(now - t0_count) / (double)freq;
             }
@@ -811,7 +839,7 @@ int dc_front_open(const dc_front_config *c) {
     aica_thread_start();
     if (!cfg.no_audio) {
         SDL_AudioSpec want = {0}, have;
-        want.freq = 44100; want.format = AUDIO_S16SYS; want.channels = 2;
+        want.freq = 44100; want.format = AUDIO_S16SYS; want.channels = 2; want.callback = out_callback;
 #ifdef __SWITCH__
         want.samples = 1024;
 #else
@@ -853,7 +881,7 @@ void dc_front_close(void) {
 #ifdef __SWITCH__
     prof_stop();                                           /* the profiler's thread, if it ran */
 #endif
-    if (audio) { SDL_ClearQueuedAudio(audio); SDL_PauseAudioDevice(audio, 0); SDL_CloseAudioDevice(audio); audio = 0; }
+    if (audio) { out_clear(); SDL_PauseAudioDevice(audio, 0); SDL_CloseAudioDevice(audio); audio = 0; }
     if (glc) SDL_GL_DeleteContext(glc);
     if (win) SDL_DestroyWindow(win);
     memset(pads, 0, sizeof pads); audio = 0; glc = NULL; win = NULL;
@@ -879,7 +907,7 @@ void dc_front_run(struct sh4ctx *c, uint32_t entry) {
         if (thr) aica_thread_stop();
         dc_reset_restore(c);
         if (dc_front_on_reset) dc_front_on_reset(c);
-        if (audio) SDL_ClearQueuedAudio(audio);
+        out_clear();
         if (thr) aica_thread_start();
         paced = 0;
         fprintf(stderr, "dc-core: reset (the game starts again)\n");
