@@ -203,7 +203,7 @@ static void *prof_thr;                             /* a libnx thread (dccore_nxt
 static void prof_start(void) {
     if (prof_state == 1) return;
     prof_sampling = 0; prof_state = 1;
-    if (!prof_thr) prof_thr = dc_nx_thread_start(prof_main, NULL, -2);
+    if (!prof_thr) prof_thr = dc_nx_thread_start(prof_main, NULL, 2);   /* core 2: on the game's core it only caught it waiting */
     if (!prof_thr) prof_state = 3;
 }
 static void prof_stop(void) { if (prof_thr) { prof_quit = 1; dc_nx_thread_join(prof_thr); prof_thr = NULL; prof_quit = 0; } }

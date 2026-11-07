@@ -6,7 +6,10 @@
 
 typedef struct { Thread t; int (*fn)(void *); void *arg; } nx_thread;
 
-static void entry(void *p) { nx_thread *x = p; x->fn(x->arg); }
+/* The thread ends with svcExitThread right away: returning into libnx (threadExit and the C library's
+ * per-thread clean-up) crashed on a garbage pointer at Quit, with SDL's threads and libnx's alike. The
+ * handle still signals, so dc_nx_thread_join works; the thread's small C-library block is not freed. */
+static void entry(void *p) { nx_thread *x = p; x->fn(x->arg); svcExitThread(); }
 
 void *dc_nx_thread_start(int (*fn)(void *), void *arg, int core) {
     nx_thread *x = calloc(1, sizeof *x);
