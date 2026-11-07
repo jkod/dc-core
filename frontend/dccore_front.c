@@ -37,6 +37,20 @@ static int frame_skip(void) { float v = game_speed(); return v > 1.f ? (int)(v +
 static SDL_Window *win;
 static SDL_GLContext glc;
 static SDL_AudioDeviceID audio;
+#ifdef __SWITCH__
+#define DC_NX_AUDIO 1
+/* sound straight to audout from a thread of ours (dccore_nxthread.c): SDL's audio thread crashed when it ended */
+int dc_nx_audio_open(void (*cb)(void *, uint8_t *, int), void *user);
+void dc_nx_audio_pause(int on); void dc_nx_audio_lock(void); void dc_nx_audio_unlock(void); void dc_nx_audio_close(void);
+static void audio_pause(int on) { dc_nx_audio_pause(on); }
+static void audio_lock(int on) { if (on) dc_nx_audio_lock(); else dc_nx_audio_unlock(); }
+static void audio_close(void) { dc_nx_audio_close(); }
+#else
+#define DC_NX_AUDIO 0
+static void audio_pause(int on) { SDL_PauseAudioDevice(audio, on); }
+static void audio_lock(int on) { if (on) SDL_LockAudioDevice(audio); else SDL_UnlockAudioDevice(audio); }
+static void audio_close(void) { SDL_CloseAudioDevice(audio); }
+#endif
 static SDL_GameController *pads[4];     /* gamepad k drives Dreamcast port k (port A also has the keyboard) */
 static void pad_open(int device_index) {
     if (!SDL_IsGameController(device_index)) return;
@@ -365,6 +379,7 @@ int dc_front_fps60 = -1;
 /* libnx threads on the Switch (dccore_nxthread.c): an SDL thread crashed in SDL's clean-up when it ended */
 void *dc_nx_thread_start(int (*fn)(void *), void *arg, int core);
 void dc_nx_thread_join(void *t);
+uint32_t dc_nx_thread_handle(void *t);
 static void *aica_thr;
 #else
 static SDL_Thread *aica_thr;                               /* the sound chip's thread (below) */
@@ -493,9 +508,9 @@ static void SDLCALL out_callback(void *u, Uint8 *stream, int len) {
 }
 /* forget what's queued (pause, reset): the reader's index, so under the device's lock (rare) */
 static void out_clear(void) {
-    if (audio) SDL_LockAudioDevice(audio);
+    if (audio) audio_lock(1);
     SDL_AtomicSet(&out_r, SDL_AtomicGet(&out_w));
-    if (audio) SDL_UnlockAudioDevice(audio);
+    if (audio) audio_lock(0);
 }
 
 static void pause_while_unfocused(void) {
@@ -510,13 +525,13 @@ static void pause_while_unfocused(void) {
     if (SDL_GetWindowFlags(win) & SDL_WINDOW_INPUT_FOCUS) { had_focus = 1; return; }
     if (!had_focus) return;
     fprintf(stderr, "dc-core: paused (window not focused)\n");
-    if (audio) { SDL_PauseAudioDevice(audio, 1); out_clear(); }
+    if (audio) { audio_pause(1); out_clear(); }
     while (!(SDL_GetWindowFlags(win) & SDL_WINDOW_INPUT_FOCUS)) {
         SDL_WaitEventTimeout(NULL, 100);
         events();                                           /* quit, F11, window moved / uncovered */
         if (need_present) present_window();
     }
-    if (audio) SDL_PauseAudioDevice(audio, 0);
+    if (audio) audio_pause(0);
     paced = 0;                                              /* pacing starts over: no catching up on the pause */
     fprintf(stderr, "dc-core: resumed\n");
 #endif
@@ -782,7 +797,7 @@ int dc_front_open(const dc_front_config *c) {
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");   /* pads work while a console window has focus */
     { SDL_version v; SDL_GetVersion(&v); fprintf(stderr, "SDL %d.%d.%d\n", v.major, v.minor, v.patch); }
     { const char *ig = getenv("SDL_GAMECONTROLLER_IGNORE_DEVICES"); if (ig) fprintf(stderr, "note: SDL_GAMECONTROLLER_IGNORE_DEVICES=%s\n", ig); }
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER | (cfg.no_audio ? 0 : SDL_INIT_AUDIO)) != 0) {
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER | (cfg.no_audio || DC_NX_AUDIO ? 0 : SDL_INIT_AUDIO)) != 0) {
         fprintf(stderr, "SDL: %s\n", SDL_GetError()); return -1;
     }
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3); SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
@@ -845,9 +860,15 @@ int dc_front_open(const dc_front_config *c) {
 #else
         want.samples = 512;                                /* 11.6 ms: little latency on top of the queue */
 #endif
+#ifdef __SWITCH__
+        (void)have;
+        audio = dc_nx_audio_open((void (*)(void *, uint8_t *, int))out_callback, NULL) ? 1 : 0;
+        if (!audio) fprintf(stderr, "audio: audout didn't start (continuing without sound)\n");
+#else
         audio = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
-        if (audio) SDL_PauseAudioDevice(audio, 0);
-        else fprintf(stderr, "audio: %s (continuing without sound)\n", SDL_GetError());
+#endif
+        if (audio) audio_pause(0);
+        else if (!DC_NX_AUDIO) fprintf(stderr, "audio: %s (continuing without sound)\n", SDL_GetError());
     }
 #ifdef __SWITCH__
     if (SDL_NumJoysticks() > 0) joy = SDL_JoystickOpen(0);
@@ -881,7 +902,7 @@ void dc_front_close(void) {
 #ifdef __SWITCH__
     prof_stop();                                           /* the profiler's thread, if it ran */
 #endif
-    if (audio) { out_clear(); SDL_PauseAudioDevice(audio, 0); SDL_CloseAudioDevice(audio); audio = 0; }
+    if (audio) { out_clear(); audio_pause(0); audio_close(); audio = 0; }
     if (glc) SDL_GL_DeleteContext(glc);
     if (win) SDL_DestroyWindow(win);
     memset(pads, 0, sizeof pads); audio = 0; glc = NULL; win = NULL;
@@ -922,7 +943,7 @@ static int front_reset_now(void) {
     osd_open = 0;
     while (!osd_all_released()) osd_frame();               /* the game doesn't see the press */
     need_present = 1;
-    if (audio) SDL_PauseAudioDevice(audio, 0);
+    if (audio) audio_pause(0);
     dc_coro_leave(&reset_jb);
     return 1;                                               /* not reached */
 }

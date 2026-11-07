@@ -144,58 +144,65 @@ __attribute__((noinline, used)) void dc_prof_anchor(void) { __asm__ volatile("")
 static volatile int prof_state;                    /* 0 idle, 1 waiting / sampling, 2 saved, 3 failed */
 static volatile int prof_sampling;                 /* set once the samples start */
 static volatile int prof_quit;                     /* dc_front_close: the thread ends */
+/* one sample of a paused thread: pc, lr and the frame-pointer chain read only inside its stack */
+enum { PROF_MAX = 12000, PROF_DEPTH = 6 };
+static int prof_sample(uint32_t h, int64_t *out, uint64_t anchor, uint32_t *err_pause, uint32_t *err_ctx) {
+    static uint64_t ctx[0x320 / 8] __attribute__((aligned(16)));    /* libnx ThreadContext; pc at 0x100 */
+    uint32_t e = svcSetThreadActivity(h, 1);
+    if (e) { if (!*err_pause) *err_pause = e; return 0; }
+    uint32_t r = 1;
+    for (int t = 0; t < 50 && r; t++) r = svcGetThreadContext3(ctx, h);
+    svcSetThreadActivity(h, 0);
+    if (r) { if (!*err_ctx) *err_ctx = r; return 0; }
+    uint64_t pc = ctx[0x100 / 8], lr = ctx[0xF0 / 8], fp = ctx[0xE8 / 8], sp = ctx[0xF8 / 8];
+    out[0] = (int64_t)(pc - anchor); out[1] = (int64_t)(lr - anchor);
+    for (int d = 2; d < PROF_DEPTH; d++) {
+        if (fp < sp || fp >= sp + 0x100000 || (fp & 7)) { out[d] = 0; continue; }
+        const uint64_t *fr = (const uint64_t *)(uintptr_t)fp;
+        out[d] = (int64_t)(fr[1] - anchor);
+        fp = fr[0] > fp ? fr[0] : 0;
+    }
+    return 1;
+}
+static int prof_write(const char *name, int64_t (*off)[PROF_DEPTH], int n, int fails, const char *what) {
+    char path[1100]; snprintf(path, sizeof path, "%s", osd_cfg_path[0] ? osd_cfg_path : "osd.cfg");
+    char *slash = strrchr(path, '/'); snprintf(slash ? slash + 1 : path, 64, "%s", name);
+    FILE *f = fopen(path, "w");
+    fprintf(stderr, "dc-core: profile (%s): %d samples, %d errors, writing %s\n", what, n, fails, path);
+    if (!f) return 0;
+    fprintf(f, "# dc-core profile (%s): %d samples, %d errors; offsets from dc_prof_anchor: pc lr and 4 frames\n", what, n, fails);
+    for (int i = 0; i < n; i++) {
+        for (int d = 0; d < PROF_DEPTH; d++) fprintf(f, d ? " %llx" : "%llx", (unsigned long long)off[i][d]);
+        fputc('\n', f);
+    }
+    fclose(f);
+    return n > 0;
+}
+/* the game's thread to profile.txt and, when it has one, the sound chip's to profile_sound.txt */
 static int prof_main(void *arg) {
     (void)arg;
-    enum { MAX = 12000, DEPTH = 6 };                /* pc, lr and up to four frames of the stack */
-    static int64_t off[MAX][DEPTH];
-    static uint64_t ctx[0x320 / 8] __attribute__((aligned(16)));    /* libnx ThreadContext; pc at 0x100 */
+    static int64_t off[PROF_MAX][PROF_DEPTH], snd[PROF_MAX][PROF_DEPTH];
     /* it waits for the next PROFILE until dc_front_close stops it (prof_stop) */
     for (;;) {
     while (prof_state != 1 && !prof_quit) SDL_Delay(50);
     if (prof_quit) return 0;
-    uint32_t h = envGetMainThreadHandle();
+    uint32_t h = envGetMainThreadHandle(), hs = aica_thr ? dc_nx_thread_handle(aica_thr) : 0;
     const uint64_t anchor = (uint64_t)(uintptr_t)&dc_prof_anchor;
-    int n = 0, fails = 0; uint32_t err_pause = 0, err_ctx = 0;
-    fprintf(stderr, "dc-core: profile: main thread handle %x\n", h);
+    int n = 0, ns = 0, fails = 0, fails_s = 0; uint32_t err_pause = 0, err_ctx = 0;
     while (osd_open && !prof_quit) SDL_Delay(50);  /* the menu that started it */
     SDL_Delay(500);
     prof_sampling = 1;
     Uint32 end = SDL_GetTicks() + 10000;
-    while (SDL_GetTicks() < end && n < MAX && !prof_quit) {
+    while (SDL_GetTicks() < end && n < PROF_MAX && !prof_quit) {
         SDL_Delay(1);
         if (osd_open) continue;
-        { uint32_t e = svcSetThreadActivity(h, 1); if (e) { if (!err_pause) err_pause = e; fails++; continue; } }
-        uint32_t r = 1;
-        for (int t = 0; t < 50 && r; t++) r = svcGetThreadContext3(ctx, h);
-        svcSetThreadActivity(h, 0);
-        if (r) { if (!err_ctx) err_ctx = r; fails++; continue; }
-        /* the frame-pointer chain, read only inside the thread's stack (sp .. sp + 1 MB) */
-        uint64_t pc = ctx[0x100 / 8], lr = ctx[0xF0 / 8], fp = ctx[0xE8 / 8], sp = ctx[0xF8 / 8];
-        off[n][0] = (int64_t)(pc - anchor); off[n][1] = (int64_t)(lr - anchor);
-        for (int d = 2; d < DEPTH; d++) {
-            if (fp < sp || fp >= sp + 0x100000 || (fp & 7)) { off[n][d] = 0; continue; }
-            const uint64_t *fr = (const uint64_t *)(uintptr_t)fp;
-            off[n][d] = (int64_t)(fr[1] - anchor);
-            fp = fr[0] > fp ? fr[0] : 0;
-        }
-        n++;
+        if (prof_sample(h, off[n], anchor, &err_pause, &err_ctx)) n++; else fails++;
+        if (hs && ns < PROF_MAX) { if (prof_sample(hs, snd[ns], anchor, &err_pause, &err_ctx)) ns++; else fails_s++; }
     }
-    char path[1100]; snprintf(path, sizeof path, "%s", osd_cfg_path[0] ? osd_cfg_path : "osd.cfg");
-    char *slash = strrchr(path, '/'); snprintf(slash ? slash + 1 : path, 64, "profile.txt");
-    FILE *f = fopen(path, "w");
-    fprintf(stderr, "dc-core: profile: %d samples, %d errors (pause %x, context %x), writing %s\n", n, fails, err_pause, err_ctx, path);
-    if (!f || !n) {
-        if (f) { fprintf(f, "# no samples: %d errors, svcSetThreadActivity %x, svcGetThreadContext3 %x\n", fails, err_pause, err_ctx); fclose(f); }
-        prof_state = 3; continue;
-    }
-    fprintf(f, "# dc-core profile: %d samples, %d errors; offsets from dc_prof_anchor: pc lr and 4 frames\n", n, fails);
-    for (int i = 0; i < n; i++) {
-        for (int d = 0; d < DEPTH; d++) fprintf(f, d ? " %llx" : "%llx", (unsigned long long)off[i][d]);
-        fputc('\n', f);
-    }
-    fclose(f);
-    fprintf(stderr, "dc-core: profile: %d samples in %s\n", n, path);
-    prof_state = 2;
+    if (n) fprintf(stderr, "dc-core: profile errors: pause %x, context %x\n", err_pause, err_ctx);
+    int ok = prof_write("profile.txt", off, n, fails, "game thread");
+    if (hs) prof_write("profile_sound.txt", snd, ns, fails_s, "sound thread");
+    prof_state = ok ? 2 : 3;
     }
     return 0;
 }
@@ -484,7 +491,7 @@ static void osd_run(int port) {
     osd_req = 0;
     osd_port = port >= 0 && port < 4 ? port : 0;
     for (int p = 0; p < 4; p++) osd_rumble_pad(p, 0, 0);  /* the game is paused: so is its rumble */
-    if (audio) SDL_PauseAudioDevice(audio, 1);
+    if (audio) audio_pause(1);
     fprintf(stderr, "dc-core: menu\n");
     int sel = 0;
     if (cfg.scale < 1) cfg.scale = 2;
@@ -543,6 +550,6 @@ static void osd_run(int port) {
     osd_open = 0;
     while (!osd_all_released()) osd_frame();               /* the game doesn't see the closing press */
     need_present = 1;
-    if (audio) SDL_PauseAudioDevice(audio, 0);
+    if (audio) audio_pause(0);
     paced = 0;
 }
