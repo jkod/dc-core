@@ -963,9 +963,16 @@ static unsigned char *poly_edge;
  * those, writing depth; pass 2 draws the rest sorted, behind what pass 1 drew hidden. */
 int dc_pvr_gl_topaque;
 static int tpass;                         /* 0 off, 1 the opaque fragments, 2 the rest */
+static const pvr_frame *tp_frame;         /* the frame being drawn */
 static int two_pass_poly(const pvr_poly *p) {
     int zmode = (p->isp >> 29) & 7;
-    return p->list == 2 && ((p->tsp >> 29) & 7) == 4 && ((p->tsp >> 26) & 7) == 5 && (zmode == 4 || zmode == 6);
+    if (!(p->list == 2 && ((p->tsp >> 29) & 7) == 4 && ((p->tsp >> 26) & 7) == 5 && (zmode == 4 || zmode == 6))) return 0;
+    if (!tp_frame) return 0;
+    /* flat polygons (one depth: 2D screens, menus) keep their drawing order: layers of a menu at one depth
+     * rely on it, and pass 1's depth writes would hide later layers (Daytona's menus lost their panels) */
+    const pvr_vtx *v = tp_frame->verts + p->first;
+    for (int j = 1; j < p->n; j++) if (v[j].z != v[0].z) return 1;
+    return 0;
 }
 static void set_poly_state(const pvr_poly *p, int set) {
     uint32_t tsp = set ? p->tsp1 : p->tsp, tcw = set ? p->tcw1 : p->tcw;
@@ -1495,6 +1502,7 @@ void dc_pvr_gl_render(int scale) {
     frame_no++;
     pvr_frame f;
     pvr_get_frame(&f);
+    tp_frame = &f;
     /* Several renders into the same framebuffer, each clipped to its own band of lines (FB_Y_CLIP), make
      * up one picture (Looney Tunes Space Race's split screen: top view, bottom view, top strip): a
      * render whose band does not overlap the previous one's, same target, same displayed buffer, keeps
@@ -2171,7 +2179,8 @@ void dc_pvr_gl_render(int scale) {
         tpass = 1;
         for (int k = 0; k < nt; k++) {
             const pvr_poly *p = &f.polys[s[k].idx];
-            if (two_pass_poly(p)) batch_add(p, 0, -1, 1, spans[s[k].idx].first, spans[s[k].idx].count);
+            if (!two_pass_poly(p)) continue;
+            batch_add(p, 0, -1, 1, spans[s[k].idx].first, spans[s[k].idx].count);
         }
         batch_reset();
         tpass = 2;

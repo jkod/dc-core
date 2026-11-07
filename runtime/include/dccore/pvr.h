@@ -108,7 +108,8 @@ int  dc_pvr_gl_capture_to_vram(int scale);
  * them (default 1; 0 = sorted per polygon only) */
 extern int dc_pvr_gl_tsort2;
 /* translucent polygons (auto-sorted): their fully opaque fragments drawn first with depth, the rest sorted
- * after (default 0). Daytona USA 2001's car decals over the coplanar layers of the paint need it */
+ * after (default 0). Daytona USA 2001's car decals over the coplanar layers of the paint need it. Flat polygons (2D
+ * screens) keep their order */
 extern int dc_pvr_gl_topaque;
 extern int dc_pvr_gl_split_panel_x;   /* widescreen: split-screen views clipped to [0, x) beside a side panel become full width (0 = off) */
 extern int dc_pvr_gl_hud_sprites;       /* widescreen: only sprite polygons are HUD (Daytona USA 2001: its HUD is all sprites, while
