@@ -717,7 +717,10 @@ static void aica_thread_stop(void) {
 }
 static int aica_audio_read(int16_t *dst, int frames) {
     if (!aica_thr) return dc_aica_audio_read(dst, frames);
-    SDL_LockMutex(aica_mx); int n = dc_aica_audio_read(dst, frames); SDL_UnlockMutex(aica_mx);
+    /* the same hand-over as aica_async_enter: on the Switch a plain lock here waited for the sound thread
+     * to catch up and sleep (on_vblank in svcArbitrateLock: 36% of the game thread in a profile) */
+    SDL_AtomicIncRef(&aica_want); SDL_LockMutex(aica_mx); SDL_AtomicDecRef(&aica_want);
+    int n = dc_aica_audio_read(dst, frames); SDL_UnlockMutex(aica_mx);
     return n;
 }
 
@@ -843,11 +846,23 @@ void dc_front_close(void) {
 #endif
     /* the on-screen menu (and the focus pause) leave the device paused; on the Switch, closing a paused
      * device crashed SDL's audio thread (Reset / Quit from the menu): empty it and let it run first */
+#ifdef __SWITCH__
+    /* a thread that ends crashes in SDL's Switch thread clean-up, and closing the device (or SDL's audio
+     * shutdown) ends SDL's audio thread: Reset and Quit crashed there. The device is left open, paused
+     * and empty, and the process's exit (or the loader starting the game again) frees it. */
+    if (audio) { SDL_ClearQueuedAudio(audio); SDL_PauseAudioDevice(audio, 1); }
+#else
     if (audio) { SDL_ClearQueuedAudio(audio); SDL_PauseAudioDevice(audio, 0); SDL_CloseAudioDevice(audio); audio = 0; }
+#endif
     if (glc) SDL_GL_DeleteContext(glc);
     if (win) SDL_DestroyWindow(win);
-    memset(pads, 0, sizeof pads); audio = 0; glc = NULL; win = NULL;
+    memset(pads, 0, sizeof pads); glc = NULL; win = NULL;
+#ifdef __SWITCH__
+    SDL_QuitSubSystem(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER | SDL_INIT_HAPTIC);
+#else
+    audio = 0;
     SDL_Quit();
+#endif
 }
 
 unsigned long dc_front_frames(void) { return presented; }
