@@ -1304,6 +1304,8 @@ int dc_pvr_gl_hud_sprites;
 int dc_pvr_gl_hud_nzones;
 int dc_pvr_gl_shade_any_z;
 int dc_pvr_gl_hud_panel_rows;
+int dc_pvr_gl_hud_bars;
+#define HUD_BAR 127                     /* side[i]: a full-width HUD bar, stretched to the screen edges */
 static void hud_group(const pvr_frame *f, int RW, signed char *side) {
     static hud_box *b; static int cap;
     int n = 0;
@@ -1337,6 +1339,9 @@ static void hud_group(const pvr_frame *f, int RW, signed char *side) {
         /* small 3D HUD models (Rush's spinning coins) count; up to a fifth of the width: Space Race's
          * commentator frame grows past 15% as it slides out, and must keep moving with the portrait */
         if (!flat && (dc_pvr_gl_hud_exact || x1 - x0 > RW * 0.2f)) continue;
+        /* a flat bar across the whole 4:3 width, at most a quarter of the height (Propeller Arena's "Return
+         * to game" strip): its ends go out to the screen edges (dc_pvr_gl_hud_bars) */
+        if (dc_pvr_gl_hud_bars && flat && x0 <= 1.f && x1 >= RW - 1.f && y1 - y0 <= f->height * 0.25f) { side[i] = HUD_BAR; continue; }
         if (x1 - x0 > RW * 0.9f) continue;                    /* full-width bars and fades stay */
         if (n == cap) { cap = cap ? cap * 2 : 1024; b = realloc(b, (size_t)cap * sizeof *b); }
         b[n].x0 = x0; b[n].y0 = y0; b[n].x1 = x1; b[n].y1 = y1; b[n].poly = i; b[n].parent = n; n++;
@@ -1929,7 +1934,8 @@ void dc_pvr_gl_render(int scale) {
         const pvr_poly *p = &f.polys[i];
         const pvr_vtx *v = f.verts + p->first;
         push_dx = 0; push_str = 0;
-        if (hud_dx > 0 && hud_side && (hud_side[i] >= 8 || hud_side[i] <= -8)) {   /* a stretching zone: outer end out, inner end stays */
+        if (hud_dx > 0 && hud_side && hud_side[i] == HUD_BAR) { push_wide = hud_dx; push_rw = (float)RW; }
+        else if (hud_dx > 0 && hud_side && (hud_side[i] >= 8 || hud_side[i] <= -8)) {   /* a stretching zone: outer end out, inner end stays */
             const dc_hud_zone *hz = &dc_pvr_gl_hud_zones[abs(hud_side[i]) - 8];
             float zs = RW / 640.f;
             s_a = hz->x0 * zs; s_b = hz->x1 * zs; s_m = hz->stretch * zs;

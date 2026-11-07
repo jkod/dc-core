@@ -135,6 +135,10 @@ extern int dc_pvr_gl_hud_move;        /* widescreen: HUD pieces move out to the 
 /* widescreen HUD: a group of touching pieces that spans most of the width moves piece by piece instead of
  * staying centred: a fighting game's health bars joined by the timer between them (Dead or Alive 2) (default 0) */
 extern int dc_pvr_gl_hud_split_wide;
+/* widescreen HUD: a flat bar drawn across the whole 4:3 width (reaching both edges, at most a quarter of the
+ * height) is stretched out to the screen edges instead of staying 4:3 wide; what is drawn on it moves as
+ * usual (Propeller Arena's pause menu "Return to game" strip) (default 0) */
+extern int dc_pvr_gl_hud_bars;
 extern int dc_pvr_gl_hud_sharp;       /* HUD textures (flat polygons at >= dc_pvr_gl_hud_z) get a bicubic filter (default 1) */
 #ifdef __cplusplus
 }
