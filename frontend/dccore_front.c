@@ -897,18 +897,19 @@ void (*dc_front_on_reset)(struct sh4ctx *c);
 static jmp_buf reset_jb;
 static int reset_ready;                                     /* dc_front_run took its copy */
 void dc_front_run(struct sh4ctx *c, uint32_t entry) {
-    { int thr = aica_thr != NULL;                          /* the copy is taken with the sound thread stopped */
-      if (thr) aica_thread_stop();
-      reset_ready = dc_reset_snapshot(c) == 0;
-      if (thr) aica_thread_start(); }
+    /* the copy is taken holding the sound chip's lock: the sound thread touches the chip only under it
+     * (stopping the thread instead crashed the Switch: a thread that ends crashes there) */
+    if (aica_thr) { SDL_AtomicIncRef(&aica_want); SDL_LockMutex(aica_mx); SDL_AtomicDecRef(&aica_want); }
+    reset_ready = dc_reset_snapshot(c) == 0;
+    if (aica_thr) SDL_UnlockMutex(aica_mx);
     if (!reset_ready) fprintf(stderr, "dc-core: no memory for the reset copy: Reset starts the program again\n");
     if (DC_SETJMP(reset_jb)) {                              /* front_reset_now: back here, on the main stack */
-        int thr = aica_thr != NULL;
-        if (thr) aica_thread_stop();
-        dc_reset_restore(c);
+        if (aica_thr) { SDL_AtomicIncRef(&aica_want); SDL_LockMutex(aica_mx); SDL_AtomicDecRef(&aica_want); }
+        dc_reset_restore(c);                                /* under the sound chip's lock, the thread keeps running */
+        aica_target = 0; aica_slept_at = 0;                 /* the chip's clock is back at the copy's */
+        if (aica_thr) SDL_UnlockMutex(aica_mx);
         if (dc_front_on_reset) dc_front_on_reset(c);
         out_clear();
-        if (thr) aica_thread_start();
         paced = 0;
         fprintf(stderr, "dc-core: reset (the game starts again)\n");
     }

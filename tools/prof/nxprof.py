@@ -2,6 +2,8 @@
 """Turn a Switch profile.txt (the on-screen menu's PROFILE item) into function names.
 
     python3 tools/prof/nxprof.py build/switch/revolt.elf profile.txt [--top 40]
+    python3 tools/prof/nxprof.py build/switch/revolt.elf --crash 0123_0100690020fbe000.log
+      (an Atmosphere crash report: every "revolt + 0x..." address as a function name)
 
 Reads the .elf's own symbol table (no devkitPro tools needed). Recompiled game functions are f_* (and
 fs_*, their fallback copies); everything else is dc-core, SDL, Mesa or the system."""
@@ -32,14 +34,49 @@ def elf_funcs(path):
     return out
 
 
+def load_base(path):
+    d = open(path, "rb").read()
+    phoff, = struct.unpack_from("<Q", d, 0x20)
+    phentsize, phnum = struct.unpack_from("<HH", d, 0x36)
+    lo = None
+    for i in range(phnum):
+        typ, flags, off, vaddr = struct.unpack_from("<IIQQ", d, phoff + i * phentsize)
+        if typ == 1 and (lo is None or vaddr < lo):
+            lo = vaddr
+    return lo or 0
+
+
+def crash(elf, funcs, addrs, log):
+    import re
+    base = load_base(elf)
+    seen = set()
+    for line in open(log, errors="replace"):
+        m = re.search(r"\(\w+ \+ 0x([0-9a-fA-F]+)\)", line)
+        if not m:
+            if re.match(r"\s*(Thread ID|Threads\[|Crashed Thread|Exception Info|Type:|Address:)", line):
+                print(line.rstrip())
+            continue
+        pc = base + int(m.group(1), 16)
+        i = bisect.bisect_right(addrs, pc) - 1
+        name = funcs[i][2] if i >= 0 else "?"
+        off = pc - funcs[i][0] if i >= 0 else 0
+        print("%s   -> %s+0x%x" % (line.rstrip(), name, off))
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("elf")
-    ap.add_argument("profile")
+    ap.add_argument("profile", nargs="?")
     ap.add_argument("--top", type=int, default=40)
+    ap.add_argument("--crash", help="an Atmosphere crash report to put function names on")
     a = ap.parse_args()
     funcs = elf_funcs(a.elf)
     addrs = [f[0] for f in funcs]
+    if a.crash:
+        crash(a.elf, funcs, addrs, a.crash)
+        return
+    if not a.profile:
+        sys.exit("give a profile.txt, or --crash LOG")
     anchor = [f[0] for f in funcs if f[2] == "dc_prof_anchor"]
     if not anchor:
         sys.exit("dc_prof_anchor isn't in %s: is it the build that made the profile?" % a.elf)
