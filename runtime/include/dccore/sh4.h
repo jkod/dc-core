@@ -180,7 +180,12 @@ extern uint64_t dc_idle_skipped;
 #define DC_IDLE(c) do { uint64_t t_ = (c)->cycles + dc_idle_step; if (t_ > dc_next_event) t_ = dc_next_event; \
     if (t_ > (c)->cycles) { dc_idle_skipped += t_ - (c)->cycles; (c)->cycles = t_; } DC_TICK(c, dc_loop_cost); } while (0)
 extern uint32_t dc_call_cost;
+/* save states (reset.h): a save waits for the next call from recompiled code, where the callee's address
+ * is an exact place to go on from and every register is in the context */
+extern volatile int dc_state_req;
+void dc_state_point(sh4ctx *c, uint32_t addr);
 static inline void dc_call_site(sh4ctx *c, uint32_t addr, dc_site *s) {
+    if (dc_state_req) dc_state_point(c, addr);
     DC_TICK(c, dc_call_cost);
     if (s->gen != dc_dispatch_gen && !dc_site_resolve(s, addr)) { dc_call_ticked(c, addr); return; }
     c->entry = s->entry;

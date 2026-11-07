@@ -13,6 +13,7 @@
 #include "dccore/ta.h"
 #include "dccore/bios.h"
 #include "dccore/aica.h"
+#include "dccore/reset.h"
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
@@ -159,6 +160,7 @@ static void take_irq(sh4ctx *c, uint32_t code) {
     INTEVT = code;
     sh4_set_sr(c, sr | SR_MD | SR_RB | SR_BL);
     irq_depth++;
+    dc_state_block++;                       /* no save state inside an interrupt: going on from it needs this host frame */
     if (dc_hw.on_irq) dc_hw.on_irq(code);
     uint32_t saved_pr = c->pr;
     /* spc = "back to the interrupted code". A handler that wants the interrupt to return
@@ -178,6 +180,7 @@ static void take_irq(sh4ctx *c, uint32_t code) {
         c->spc = DC_IRQ_RET;
         dc_call(c, to);
     }
+    dc_state_block--;
 }
 
 static int holly_level(void) {
@@ -616,7 +619,6 @@ MEM_RD(uint8_t, 8) MEM_RD(uint16_t, 16) MEM_RD(uint32_t, 32)
 MEM_WR(uint8_t, 8) MEM_WR(uint16_t, 16) MEM_WR(uint32_t, 32)
 
 /* ------------------------------------------------------------------ reset in place (reset.h) */
-#include "dccore/reset.h"
 void dc_hw_state(dc_state_fn f) {
     tmu_power_on();                        /* done once: its counters' power-on values go into the copy */
     f(pvr, sizeof pvr); f(sb, sizeof sb); f(p4, sizeof p4); f(sq, sizeof sq); f(ocram, sizeof ocram);

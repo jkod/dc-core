@@ -19,6 +19,7 @@
 #endif
 #include "dccore/coro.h"
 #include "dccore/runtime.h"
+#include "dccore/reset.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -206,8 +207,10 @@ static uint32_t h_longjmp(sh4ctx *c) {
     uint32_t buf = (c->r[4] & 0x1FFFFFFFu) | 0x80000000u;
     /* the game's own restore: registers, r15, pr, r0 = val (ends with rts) */
     c->entry = longjmp_addr;
+    dc_state_block++;                        /* a save here would skip the switch below */
     uint32_t next = orig_longjmp(c);
     if (next) dc_call(c, next);
+    dc_state_block--;
     slot *s = find_slot(buf);
     if (s && s->r15 == c->r[15] && s->pr == c->pr) {
         if (dc_coro_trace) fprintf(stderr, "coro: longjmp %08X -> setjmp of %s%ld (pr %08X)\n", buf,
@@ -265,8 +268,10 @@ static uint32_t h_switch(sh4ctx *c) {
     uint32_t at = c->entry, r15 = c->r[15], ret = c->pr;
     sh4fn orig = NULL;
     for (int i = 0; i < nsw; i++) if (sw[i].addr == at) orig = sw[i].orig;
+    dc_state_block++;
     uint32_t next = orig(c);                 /* the game's switch; its rte returns here */
     if (next) dc_call(c, next);
+    dc_state_block--;
     uint32_t d = c->r[15] > r15 ? c->r[15] - r15 : r15 - c->r[15];
     if (d <= 256) return 0;    /* the task picked itself (also when preempted: the stack differs a little) */
     (void)ret;
@@ -306,7 +311,9 @@ static uint32_t h_stack_switch(sh4ctx *c) {
     uint32_t at = c->entry, r15 = c->r[15];
     sh4fn orig = NULL; int start = 0;
     for (int i = 0; i < nsw; i++) if (sw[i].addr == at) { orig = sw[i].orig; start = sw[i].kind == 2; }
+    dc_state_block++;
     uint32_t next = orig(c);                 /* stacks swapped; next: a jump on the other stack (0: rts to pr) */
+    dc_state_block--;
     uint32_t d = c->r[15] > r15 ? c->r[15] - r15 : r15 - c->r[15];
     if (d <= 256) return next;               /* stayed on this stack */
     coro *to = NULL;

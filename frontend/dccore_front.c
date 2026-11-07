@@ -407,6 +407,8 @@ static void events(void) {
                 SDL_SetWindowFullscreen(win, cfg.fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
             }
             if (e.key.keysym.sym == SDLK_F12) { screenshot(); shot_held_since = SDL_GetTicks() | 1; }
+            if (e.key.keysym.sym == SDLK_F2) { extern int front_state_key(int load); front_state_key(0); }   /* save state */
+            if (e.key.keysym.sym == SDLK_F4) { extern int front_state_key(int load); front_state_key(1); }   /* load state */
             if (e.key.keysym.sym == SDLK_F5) set_speed(speed_i - 1);
             if (e.key.keysym.sym == SDLK_F6) set_speed(speed_i + 1);
             if (e.key.keysym.sym == SDLK_F7) set_speed(SPEED_1X);
@@ -614,6 +616,10 @@ static void on_vblank(uint64_t f) {
     { static long reset_at = -2;                           /* DC_RESET_AT=frame: Reset there (tests) */
       if (reset_at == -2) { const char *e = getenv("DC_RESET_AT"); reset_at = e ? atol(e) : -1; }
       if (reset_at >= 0 && (long)presented >= reset_at) { reset_at = -1; front_reset_now(); } }
+    { static long save_at = -2, load_at = -2;              /* DC_STATE_SAVE_AT / DC_STATE_LOAD_AT=frame (tests) */
+      if (save_at == -2) { const char *e = getenv("DC_STATE_SAVE_AT"); save_at = e ? atol(e) : -1; e = getenv("DC_STATE_LOAD_AT"); load_at = e ? atol(e) : -1; }
+      if (save_at >= 0 && (long)presented >= save_at) { save_at = -1; front_state_save(); }
+      if (load_at >= 0 && (long)presented >= load_at) { load_at = -1; front_load_now(); } }
     if (wav_file() || audio) {
         static int16_t buf[4096 * 2];
         int n;
@@ -916,7 +922,31 @@ unsigned long dc_front_frames(void) { return presented; }
 #include "dccore/reset.h"
 #include "dccore/coro.h"
 void (*dc_front_on_reset)(struct sh4ctx *c);
-static jmp_buf reset_jb;
+static jmp_buf reset_jb, load_jb;
+static uint32_t run_pc;                                     /* where dc_front_run goes on */
+static void *load_buf;                                      /* a checked save state on its way in */
+int state_slot = 1;                                         /* 1..9: the menu's slot (dccore_osd.inc.c) */
+static void state_path(char *out, size_t n, int slot) {
+    snprintf(out, n, "%s", osd_cfg_path[0] ? osd_cfg_path : "osd.cfg");
+    char *s1 = strrchr(out, '/'), *s2 = strrchr(out, '\\'), *sl = s1 > s2 ? s1 : s2;
+    snprintf(sl ? sl + 1 : out, n - (size_t)(sl ? sl + 1 - out : 0), "state%d.dcs", slot);
+}
+static void toast_slot(const char *fmt) { static char m[40]; snprintf(m, sizeof m, fmt, state_slot); toast(m); }
+/* the save itself, at the next call from recompiled code (dc_state_req) */
+static void state_save_here(sh4ctx *c, uint32_t addr) {
+    char path[1100]; state_path(path, sizeof path, state_slot);
+    if (aica_thr) { SDL_AtomicIncRef(&aica_want); SDL_LockMutex(aica_mx); SDL_AtomicDecRef(&aica_want); }
+    int r = dc_state_save(c, addr, path, cfg.title);
+    if (aica_thr) SDL_UnlockMutex(aica_mx);
+    fprintf(stderr, "dc-core: state %d %s (%s)\n", state_slot, r ? "NOT saved" : "saved", path);
+    toast_slot(r ? "STATE %d NOT SAVED" : "STATE %d SAVED");
+    need_present = 1;
+}
+static int front_state_save(void) {
+    if (!reset_ready) return 0;
+    dc_state_hook = state_save_here; dc_state_req = 1;
+    return 1;
+}
 static int reset_ready;                                     /* dc_front_run took its copy */
 void dc_front_run(struct sh4ctx *c, uint32_t entry) {
     /* the copy is taken holding the sound chip's lock: the sound thread touches the chip only under it
@@ -935,10 +965,43 @@ void dc_front_run(struct sh4ctx *c, uint32_t entry) {
         paced = 0;
         fprintf(stderr, "dc-core: reset (the game starts again)\n");
     }
+    run_pc = entry;
     c->pr = 0;
-    dc_call(c, entry);
+    if (DC_SETJMP(load_jb)) {                               /* front_load_now: a save state, on the main stack */
+        if (aica_thr) { SDL_AtomicIncRef(&aica_want); SDL_LockMutex(aica_mx); SDL_AtomicDecRef(&aica_want); }
+        run_pc = dc_state_apply(c, load_buf); load_buf = NULL;
+        aica_target = 0; aica_slept_at = 0;
+        if (aica_thr) SDL_UnlockMutex(aica_mx);
+        if (dc_front_on_reset) dc_front_on_reset(c);
+        out_clear();
+        paced = 0;
+        fprintf(stderr, "dc-core: state %d loaded (going on at %08X)\n", state_slot, run_pc);
+        toast_slot("STATE %d LOADED");
+    }
+    /* the game never returns. After a load it goes on at the call the state was saved at, with none of its
+     * callers on the host stack: whenever a function returns here, go on at its return address (pr) */
+    for (;;) {
+        dc_call(c, run_pc);
+        run_pc = c->pr;
+        if (!run_pc) { fprintf(stderr, "dc-core: the game returned\n"); exit(1); }
+    }
 }
 /* from the menu (on the game's thread, anywhere in its code): leave it for dc_front_run's jmp_buf */
+static int front_load_now(void) {
+    if (!reset_ready) return 0;
+    char path[1100]; state_path(path, sizeof path, state_slot);
+    void *b = dc_state_load(path, cfg.title);
+    if (!b) { toast_slot("NO STATE %d"); fprintf(stderr, "dc-core: no state %d for this game (%s)\n", state_slot, path); return 1; }
+    load_buf = b;
+    if (osd_open) { osd_open = 0; while (!osd_all_released()) osd_frame(); }   /* from the menu: the game doesn't see the press */
+    need_present = 1;
+    if (audio) audio_pause(0);
+    dc_coro_leave(&load_jb);
+    return 1;                                               /* not reached */
+}
+/* F2 / F4: save / load the menu's slot. A load from here (the event loop, on the game's thread) is the
+ * same jump as the menu's */
+int front_state_key(int load) { return load ? front_load_now() : front_state_save(); }
 static int front_reset_now(void) {
     if (!reset_ready) return 0;
     osd_open = 0;

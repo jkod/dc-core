@@ -65,7 +65,9 @@ static const struct { char c; uint8_t r[7]; } osd_font[] = {
     { 'Z', { 0x1F, 0x01, 0x02, 0x04, 0x08, 0x10, 0x1F } },
 };
 #define OSD_W 200
-#define OSD_ITEMS 13
+/* the items, top to bottom */
+enum { OI_RESUME, OI_RESET, OI_SAVE, OI_LOAD, OI_RES, OI_ASPECT, OI_SCAN, OI_FPS, OI_RUMBLE, OI_FS, OI_FRATE,
+       OI_SPEED, OI_BAR, OI_PROF, OI_QUIT, OSD_ITEMS };
 static int osd_scan, osd_fps, osd_boost;
 int osd_bar;                                 /* the controls bar */
 static int osd_rumble[4] = { 2, 2, 2, 2 };   /* per port: 0 off, 1 low, 2 normal, 3 strong */
@@ -216,33 +218,37 @@ static void prof_start(void) {
 static void prof_stop(void) { if (prof_thr) { prof_quit = 1; dc_nx_thread_join(prof_thr); prof_thr = NULL; prof_quit = 0; } }
 #endif
 
+static int reset_ready;
+extern int state_slot;
 static const char *osd_label(int i, char *buf, size_t n) {
     static const char *scan[4] = { "OFF", "LIGHT", "MEDIUM", "STRONG" };
     static const char *rum[4] = { "OFF", "LOW", "NORMAL", "STRONG" };
     switch (i) {
-    case 0: return "RESUME";
-    case 1: return "RESET GAME";
-    case 2: snprintf(buf, n, "RESOLUTION    < %dX %dP >", cfg.scale, 480 * cfg.scale); return buf;
-    case 3: snprintf(buf, n, "ASPECT        < %s >", cfg.widescreen ? "WIDE" : "4:3"); return buf;
-    case 4: snprintf(buf, n, "SCANLINES     < %s >", scan[osd_scan]); return buf;
-    case 5: snprintf(buf, n, "SHOW FPS      < %s >", osd_fps ? "ON" : "OFF"); return buf;
-    case 6:
+    case OI_RESUME: return "RESUME";
+    case OI_RESET: return "RESET GAME";
+    case OI_SAVE: if (!reset_ready) return ""; snprintf(buf, n, "SAVE STATE    < %d >", state_slot); return buf;
+    case OI_LOAD: if (!reset_ready) return ""; snprintf(buf, n, "LOAD STATE    < %d >", state_slot); return buf;
+    case OI_RES: snprintf(buf, n, "RESOLUTION    < %dX %dP >", cfg.scale, 480 * cfg.scale); return buf;
+    case OI_ASPECT: snprintf(buf, n, "ASPECT        < %s >", cfg.widescreen ? "WIDE" : "4:3"); return buf;
+    case OI_SCAN: snprintf(buf, n, "SCANLINES     < %s >", scan[osd_scan]); return buf;
+    case OI_FPS: snprintf(buf, n, "SHOW FPS      < %s >", osd_fps ? "ON" : "OFF"); return buf;
+    case OI_RUMBLE:
         if (cfg.no_rumble) return "";
         snprintf(buf, n, "RUMBLE PAD %c  < %s >", 'A' + osd_port, rum[osd_rumble[osd_port] & 3]); return buf;
 #ifdef __SWITCH__
-    case 7: snprintf(buf, n, "CPU BOOST     < %s >", osd_boost ? "ON" : "OFF"); return buf;
+    case OI_FS: snprintf(buf, n, "CPU BOOST     < %s >", osd_boost ? "ON" : "OFF"); return buf;
 #else
-    case 7: snprintf(buf, n, "FULLSCREEN    < %s >", cfg.fullscreen ? "ON" : "OFF"); return buf;
+    case OI_FS: snprintf(buf, n, "FULLSCREEN    < %s >", cfg.fullscreen ? "ON" : "OFF"); return buf;
 #endif
-    case 8:                                               /* only for a port that offers both */
+    case OI_FRATE:                                               /* only for a port that offers both */
         if (dc_front_fps60 < 0) return "";
         snprintf(buf, n, "FRAME RATE    < %s >", dc_front_fps60 ? "60" : "30"); return buf;
-    case 9: snprintf(buf, n, "SPEED         < %gX >", (double)game_speed()); return buf;
-    case 10: snprintf(buf, n, "CONTROLS BAR  < %s >", osd_bar ? "ON" : "OFF"); return buf;
+    case OI_SPEED: snprintf(buf, n, "SPEED         < %gX >", (double)game_speed()); return buf;
+    case OI_BAR: snprintf(buf, n, "CONTROLS BAR  < %s >", osd_bar ? "ON" : "OFF"); return buf;
 #ifdef __SWITCH__
-    case 11: { static const char *ps[4] = { "PROFILE 10 S", "PROFILING...", "PROFILE SAVED", "PROFILE FAILED" }; return ps[prof_state & 3]; }
+    case OI_PROF: { static const char *ps[4] = { "PROFILE 10 S", "PROFILING...", "PROFILE SAVED", "PROFILE FAILED" }; return ps[prof_state & 3]; }
 #else
-    case 11: return "";
+    case OI_PROF: return "";
 #endif
     default: return "QUIT";
     }
@@ -401,6 +407,8 @@ static void osd_count_frame(void) {
 }
 
 static int front_reset_now(void);
+static int front_state_save(void);
+static int front_load_now(void);
 static void osd_restart(void) {
     if (front_reset_now()) return;                          /* in place (dc_front_run); otherwise the program starts again */
     fprintf(stderr, "dc-core: reset (starting the game again)\n");
@@ -513,9 +521,12 @@ static void osd_run(int port) {
         if (down & (DC_BTN_RIGHT | DC_BTN_A)) step = 1;
         if (down & (DC_BTN_B | DC_BTN_START)) break;
         if (step) {
-            if (sel == 0 && (down & DC_BTN_A)) break;
-            if (sel == 1 && (down & DC_BTN_A)) osd_restart();
-            if (sel == 2) {                                 /* the next frame renders at the new size */
+            if (sel == OI_RESUME && (down & DC_BTN_A)) break;
+            if (sel == OI_RESET && (down & DC_BTN_A)) osd_restart();
+            if ((sel == OI_SAVE || sel == OI_LOAD) && !(down & DC_BTN_A)) { state_slot += step; if (state_slot < 1) state_slot = 9; if (state_slot > 9) state_slot = 1; }
+            if (sel == OI_SAVE && (down & DC_BTN_A)) { front_state_save(); break; }   /* at the next call, once the menu is closed */
+            if (sel == OI_LOAD && (down & DC_BTN_A)) { front_load_now(); break; }       /* returns only when there is no such state */
+            if (sel == OI_RES) {                                 /* the next frame renders at the new size */
 #ifdef __SWITCH__
                 const int max_scale = 3;
 #else
@@ -523,27 +534,27 @@ static void osd_run(int port) {
 #endif
                 cfg.scale += step; if (cfg.scale < 1) cfg.scale = max_scale; if (cfg.scale > max_scale) cfg.scale = 1;
             }
-            if (sel == 3) {
+            if (sel == OI_ASPECT) {
                 cfg.widescreen = !cfg.widescreen; dc_pvr_gl_widescreen = cfg.widescreen;
             }
-            if (sel == 4) { osd_scan = (osd_scan + 4 + step) % 4; dc_pvr_gl_scanlines = osd_scan; osd_save(); }
-            if (sel == 5) { osd_fps = !osd_fps; osd_save(); }
-            if (sel == 6) {                                 /* this controller's rumble, felt at once */
+            if (sel == OI_SCAN) { osd_scan = (osd_scan + 4 + step) % 4; dc_pvr_gl_scanlines = osd_scan; osd_save(); }
+            if (sel == OI_FPS) { osd_fps = !osd_fps; osd_save(); }
+            if (sel == OI_RUMBLE) {                                 /* this controller's rumble, felt at once */
                 osd_rumble[osd_port] = (osd_rumble[osd_port] + 4 + step) % 4; osd_save();
                 osd_rumble_pad(osd_port, 0.6f * osd_rumble_scale(osd_port), 250);
             }
 #ifdef __SWITCH__
-            if (sel == 7) { osd_boost = !osd_boost; set_boost(osd_boost); osd_save(); }
+            if (sel == OI_FS) { osd_boost = !osd_boost; set_boost(osd_boost); osd_save(); }
 #else
-            if (sel == 7) { cfg.fullscreen = !cfg.fullscreen; SDL_SetWindowFullscreen(win, cfg.fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0); }
+            if (sel == OI_FS) { cfg.fullscreen = !cfg.fullscreen; SDL_SetWindowFullscreen(win, cfg.fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0); }
 #endif
-            if (sel == 8 && dc_front_fps60 >= 0) { dc_front_fps60 = !dc_front_fps60; osd_save(); }
-            if (sel == 9) { speed_i += step; if (speed_i < 0) speed_i = SPEED_N - 1; if (speed_i >= SPEED_N) speed_i = 0; }
-            if (sel == 10) { osd_bar = !osd_bar; osd_save(); }
+            if (sel == OI_FRATE && dc_front_fps60 >= 0) { dc_front_fps60 = !dc_front_fps60; osd_save(); }
+            if (sel == OI_SPEED) { speed_i += step; if (speed_i < 0) speed_i = SPEED_N - 1; if (speed_i >= SPEED_N) speed_i = 0; }
+            if (sel == OI_BAR) { osd_bar = !osd_bar; osd_save(); }
 #ifdef __SWITCH__
-            if (sel == 11 && (down & DC_BTN_A)) { prof_start(); break; }    /* it samples once the menu is closed */
+            if (sel == OI_PROF && (down & DC_BTN_A)) { prof_start(); break; }    /* it samples once the menu is closed */
 #endif
-            if (sel == OSD_ITEMS - 1 && (down & DC_BTN_A)) { dc_front_close(); exit(0); }
+            if (sel == OI_QUIT && (down & DC_BTN_A)) { dc_front_close(); exit(0); }
         }
         osd_paint(sel);
     }
