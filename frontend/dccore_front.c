@@ -850,6 +850,7 @@ int dc_front_open(const dc_front_config *c) {
     dc_prof_clock = prof_clock;
 #ifdef __SWITCH__
     dc_aica_arm_throttle = 1;                              /* the sound chip's ARM: see aica.c */
+    dc_aica_arm_cycles = 128;                              /* half the ARM's cycles: the sound thread was the limit */
 #endif
     aica_thread_start();
     if (!cfg.no_audio) {

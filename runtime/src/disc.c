@@ -23,6 +23,7 @@ typedef struct {
     FILE *f;
     int chd;                /* in the CHD: frames from chd_frame on (2448 bytes each: sector + subcode) */
     uint32_t chd_frame;
+    uint8_t *ra; uint32_t ra_first, ra_n;   /* read-ahead window (track_sector_unlocked) */
 } track_t;
 
 static track_t trk[MAX_TRACKS];
@@ -114,13 +115,26 @@ static int track_sector_unlocked(track_t *t, uint32_t k, uint8_t *dst) {
     }
 #endif
     if (!t->f && !(t->f = fopen(t->path, "rb"))) return -1;
+    /* read ahead RA_SECTORS at a time: one seek and read per sector was a request to the SD card for each
+     * of CD audio's 75 sectors a second on the Switch (6.5% of the sound thread) */
+    enum { RA_SECTORS = 32 };
+    if (!t->ra) t->ra = malloc((size_t)RA_SECTORS * 2352);
+    if (t->ra && k >= t->ra_first && k < t->ra_first + t->ra_n) {
+        memcpy(dst, t->ra + (size_t)(k - t->ra_first) * t->sector, (size_t)t->sector);
+        return 0;
+    }
     long long off = (long long)(k + t->skip) * t->sector;
 #ifdef _WIN32
     _fseeki64(t->f, off, SEEK_SET);
 #else
     fseeko(t->f, (off_t)off, SEEK_SET);
 #endif
-    return fread(dst, 1, (size_t)t->sector, t->f) == (size_t)t->sector ? 0 : -1;
+    if (!t->ra) return fread(dst, 1, (size_t)t->sector, t->f) == (size_t)t->sector ? 0 : -1;
+    size_t got = fread(t->ra, (size_t)t->sector, RA_SECTORS, t->f);
+    t->ra_first = k; t->ra_n = (uint32_t)got;
+    if (!got) return -1;
+    memcpy(dst, t->ra, (size_t)t->sector);
+    return 0;
 }
 
 static void dirname_of(const char *p, char *out, size_t n) {
@@ -221,7 +235,7 @@ int dc_disc_open(const char *path) {
 }
 
 void dc_disc_close(void) {
-    for (int i = 0; i < ntrk; i++) if (trk[i].f) fclose(trk[i].f);
+    for (int i = 0; i < ntrk; i++) { if (trk[i].f) fclose(trk[i].f); free(trk[i].ra); }
     memset(trk, 0, sizeof trk); ntrk = 0; is_gd = 0;
 #ifdef DCCORE_CHD
     if (chd) chd_close(chd);

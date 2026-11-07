@@ -17,6 +17,10 @@
 #define CPU_HZ 200000000ull
 #define SAMPLE_HZ 44100ull
 #define ARM_CYCLES_PER_SAMPLE 256
+/* the ARM's cycles per sample: 256 (a PC), the frontend sets 128 on the Switch, DC_ARM_CYCLES overrides.
+ * Sound drivers are paced by the chip's timers, not the ARM's speed: in a Re-Volt race 128 halved the ARM's
+ * time with the same race and the same sound, only its replies to the SH-4 a little later. */
+int dc_aica_arm_cycles = ARM_CYCLES_PER_SAMPLE;
 
 uint8_t dc_aram[0x200000];
 static uint32_t regs[0x4000];                  /* 0x0000..0xFFFF as 32-bit words (low 16 bits used) */
@@ -470,15 +474,21 @@ int dc_aica_audio_read(int16_t *dst, int frames) {
  * dc_aica_arm_throttle is set (the frontend does on the Switch); DC_ARM_THROTTLE=1 / 0 overrides. */
 int dc_aica_arm_throttle;
 #define ARM_QUIET    64
-#define ARM_IDLE_DIV 8
+int dc_aica_arm_idle_div = 8;                       /* its share while throttled: 1 / this (DC_ARM_IDLE_DIV) */
 static void arm_slice(void) {
-    static int off = -1;
+    static int off = -1, div;
     static unsigned last, quiet;
-    if (off < 0) { const char *e = getenv("DC_ARM_THROTTLE"); off = e ? *e == '0' : !dc_aica_arm_throttle; }
+    if (off < 0) {
+        const char *e = getenv("DC_ARM_THROTTLE"); off = e ? *e == '0' : !dc_aica_arm_throttle;
+        e = getenv("DC_ARM_IDLE_DIV"); div = e && atoi(e) > 0 ? atoi(e) : dc_aica_arm_idle_div;
+        if (div < 1) div = 1;
+    }
     unsigned act = arm_wakes + arm_regwrites + dc_aica_ext_events;
     if (off || act != last) { last = act; quiet = 0; }
     else if (quiet < ARM_QUIET + 1) quiet++;
-    arm7_run(quiet > ARM_QUIET ? ARM_CYCLES_PER_SAMPLE / ARM_IDLE_DIV : ARM_CYCLES_PER_SAMPLE);
+    static int cyc = -1;
+    if (cyc < 0) { const char *e = getenv("DC_ARM_CYCLES"); cyc = e && atoi(e) > 0 ? atoi(e) : dc_aica_arm_cycles > 0 ? dc_aica_arm_cycles : ARM_CYCLES_PER_SAMPLE; }
+    arm7_run(quiet > ARM_QUIET ? cyc / div : cyc);
 }
 static void sample_tick(void) {
     if (arm_running) {

@@ -19,6 +19,8 @@ extern uint64_t dc_prof_aica, dc_prof_aica_arm, dc_prof_aica_dsp;   /* all, its 
  * default): everything runs inline on the game's thread. */
 typedef struct { void (*advance)(uint64_t now); void (*enter)(uint64_t now); void (*leave)(void); } dc_aica_async_t;
 extern dc_aica_async_t dc_aica_async;
+extern int dc_aica_arm_cycles;                   /* the ARM's cycles per sample (256; 128 on the Switch); DC_ARM_CYCLES overrides */
+extern int dc_aica_arm_idle_div;                 /* its share while throttled: 1 / this (8); DC_ARM_IDLE_DIV overrides */
 extern int dc_aica_arm_throttle;                 /* slow the ARM down while nothing reaches it (aica.c); DC_ARM_THROTTLE overrides */
 extern volatile unsigned dc_aica_ext_events;     /* the SH-4 wrote the chip's registers or its RAM (the ARM's idle throttle wakes) */
 uint64_t dc_aica_clock(void);                      /* SH-4 cycle count the sound chip has run to */
