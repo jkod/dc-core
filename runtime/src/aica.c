@@ -363,7 +363,19 @@ int dc_aica_dsp_active(void) { return dsp.last_step > 0; }
 /* ---------------------------------------------------------------- mixing */
 #define RING 16384                                   /* stereo frames */
 static int16_t ring[RING * 2];
+/* One writer (the chip, on the sound thread when it has one) and one reader (the frontend's per-frame read,
+ * on the game's thread): no lock. Each side writes only its own index, publishing it after the samples it
+ * covers (release) and reading the other's with acquire. When nobody reads, the newest samples are dropped
+ * rather than moving the reader's index. On the Switch the lock this replaces held the game thread up to
+ * a third of each frame. */
 static uint32_t ring_w, ring_r;
+#if defined(_MSC_VER)
+#define RING_LOAD(v) (*(volatile uint32_t *)&(v))                   /* x86/x64 volatile: acquire / release */
+#define RING_STORE(v, x) (*(volatile uint32_t *)&(v) = (x))
+#else
+#define RING_LOAD(v) __atomic_load_n(&(v), __ATOMIC_ACQUIRE)
+#define RING_STORE(v, x) __atomic_store_n(&(v), (x), __ATOMIC_RELEASE)
+#endif
 /* all level terms are multiples of 3/32 dB: envelope 1 step, TL 4, send level / pan 32 */
 static float gain_tab[4096];
 static float gain(int units) { return units >= 4096 ? 0.f : gain_tab[units]; }
@@ -420,12 +432,16 @@ static void mix_sample(void) {
     float mv = gain(32 * (int)(15 - (R(0x2800) & 15))) * 32767.f * 0.5f;   /* headroom: no voice filter yet, so bright voices run hotter than on the console */
     l *= mv; r *= mv;
     int il = l > 32767 ? 32767 : l < -32768 ? -32768 : (int)l, ir = r > 32767 ? 32767 : r < -32768 ? -32768 : (int)r;
-    if (ring_w - ring_r >= RING) ring_r++;                       /* nobody listening: drop the oldest */
-    ring[(ring_w % RING) * 2] = (int16_t)il; ring[(ring_w % RING) * 2 + 1] = (int16_t)ir; ring_w++;
+    uint32_t w = ring_w;                                             /* only this side writes ring_w */
+    if (w - RING_LOAD(ring_r) >= RING) return;                       /* nobody listening: drop this one */
+    ring[(w % RING) * 2] = (int16_t)il; ring[(w % RING) * 2 + 1] = (int16_t)ir;
+    RING_STORE(ring_w, w + 1);
 }
 int dc_aica_audio_read(int16_t *dst, int frames) {
+    uint32_t r = ring_r, w = RING_LOAD(ring_w);                      /* only this side writes ring_r */
     int n = 0;
-    while (n < frames && ring_r != ring_w) { dst[n * 2] = ring[(ring_r % RING) * 2]; dst[n * 2 + 1] = ring[(ring_r % RING) * 2 + 1]; ring_r++; n++; }
+    while (n < frames && r != w) { dst[n * 2] = ring[(r % RING) * 2]; dst[n * 2 + 1] = ring[(r % RING) * 2 + 1]; r++; n++; }
+    RING_STORE(ring_r, r);
     return n;
 }
 

@@ -361,7 +361,14 @@ static void set_speed(int i) {
 static int bar_click(int x, int y);
 
 int dc_front_fps60 = -1;
+#ifdef __SWITCH__
+/* libnx threads on the Switch (dccore_nxthread.c): an SDL thread crashed in SDL's clean-up when it ended */
+void *dc_nx_thread_start(int (*fn)(void *), void *arg, int core);
+void dc_nx_thread_join(void *t);
+static void *aica_thr;
+#else
 static SDL_Thread *aica_thr;                               /* the sound chip's thread (below) */
+#endif
 static Uint64 prof_wait;                                    /* the game waiting for it */
 static int osd_open, osd_req;                              /* the on-screen menu (dccore_osd.inc.c) */
 static void events(void) {
@@ -627,16 +634,10 @@ static volatile uint64_t aica_target, aica_slept_at;
 static SDL_atomic_t aica_sleeping;
 static SDL_atomic_t aica_want;                           /* the game is waiting for aica_mx */
 static int aica_game_waits;                                 /* under aica_mx */
-static volatile int aica_stop, aica_parked;
+static volatile int aica_stop;
 static const uint64_t aica_chunk = 64ull * 200000000ull / 44100ull;   /* 64 samples a turn, then the game may get in */
-#ifdef __SWITCH__
-extern unsigned int svcSetThreadCoreMask(unsigned int handle, int preferred_core, unsigned int affinity_mask);
-#endif
 static int aica_thread(void *u) {
     (void)u;
-#ifdef __SWITCH__
-    svcSetThreadCoreMask(0xFFFF8000u, 1, 1u << 1);         /* core 1; the game's thread is on core 0 */
-#endif
     SDL_LockMutex(aica_mx);
     while (!aica_stop) {
         uint64_t t = aica_target, at = dc_aica_clock();
@@ -657,12 +658,6 @@ static int aica_thread(void *u) {
         SDL_LockMutex(aica_mx);
     }
     SDL_UnlockMutex(aica_mx);
-#ifdef __SWITCH__
-    /* a thread that ends crashes in SDL's Switch thread clean-up (Quit crashed this way, as the profiler's
-     * thread did): it parks instead, and the process's exit takes it */
-    aica_parked = 1;
-    for (;;) SDL_Delay(1000);
-#endif
     return 0;
 }
 static void aica_async_advance(uint64_t now) {
@@ -700,7 +695,11 @@ static void aica_thread_start(void) {
     if (!aica_mx || !disc_mx || !aica_cv || !aica_done_cv) return;
     dc_disc_lock = disc_lock;
     dc_aica_async.advance = aica_async_advance; dc_aica_async.enter = aica_async_enter; dc_aica_async.leave = aica_async_leave;
+#ifdef __SWITCH__
+    aica_thr = dc_nx_thread_start(aica_thread, NULL, 1);   /* core 1; the game's thread is on core 0 */
+#else
     aica_thr = SDL_CreateThread(aica_thread, "aica", NULL);
+#endif
     if (!aica_thr) { memset(&dc_aica_async, 0, sizeof dc_aica_async); dc_disc_lock = NULL; return; }
     fprintf(stderr, "sound chip on its own thread\n");
 }
@@ -708,21 +707,14 @@ static void aica_thread_stop(void) {
     if (!aica_thr) return;
     SDL_LockMutex(aica_mx); aica_stop = 1; SDL_CondBroadcast(aica_cv); SDL_CondBroadcast(aica_done_cv); SDL_UnlockMutex(aica_mx);
 #ifdef __SWITCH__
-    while (!aica_parked) SDL_Delay(1);                      /* it parks rather than ends (aica_thread) */
-    aica_parked = 0; aica_thr = NULL;
+    dc_nx_thread_join(aica_thr); aica_thr = NULL;
 #else
     SDL_WaitThread(aica_thr, NULL); aica_thr = NULL;
 #endif
     memset(&dc_aica_async, 0, sizeof dc_aica_async); dc_disc_lock = NULL;
 }
-static int aica_audio_read(int16_t *dst, int frames) {
-    if (!aica_thr) return dc_aica_audio_read(dst, frames);
-    /* the same hand-over as aica_async_enter: on the Switch a plain lock here waited for the sound thread
-     * to catch up and sleep (on_vblank in svcArbitrateLock: 36% of the game thread in a profile) */
-    SDL_AtomicIncRef(&aica_want); SDL_LockMutex(aica_mx); SDL_AtomicDecRef(&aica_want);
-    int n = dc_aica_audio_read(dst, frames); SDL_UnlockMutex(aica_mx);
-    return n;
-}
+/* the chip's sample ring has one writer and one reader and needs no lock (aica.c) */
+static int aica_audio_read(int16_t *dst, int frames) { return dc_aica_audio_read(dst, frames); }
 
 static const unsigned char *app_icon;
 int dc_front_open_icon(const dc_front_config *c, const unsigned char *icon_rgba) { app_icon = icon_rgba; return dc_front_open(c); }
@@ -847,22 +839,13 @@ void dc_front_close(void) {
     /* the on-screen menu (and the focus pause) leave the device paused; on the Switch, closing a paused
      * device crashed SDL's audio thread (Reset / Quit from the menu): empty it and let it run first */
 #ifdef __SWITCH__
-    /* a thread that ends crashes in SDL's Switch thread clean-up, and closing the device (or SDL's audio
-     * shutdown) ends SDL's audio thread: Reset and Quit crashed there. The device is left open, paused
-     * and empty, and the process's exit (or the loader starting the game again) frees it. */
-    if (audio) { SDL_ClearQueuedAudio(audio); SDL_PauseAudioDevice(audio, 1); }
-#else
-    if (audio) { SDL_ClearQueuedAudio(audio); SDL_PauseAudioDevice(audio, 0); SDL_CloseAudioDevice(audio); audio = 0; }
+    prof_stop();                                           /* the profiler's thread, if it ran */
 #endif
+    if (audio) { SDL_ClearQueuedAudio(audio); SDL_PauseAudioDevice(audio, 0); SDL_CloseAudioDevice(audio); audio = 0; }
     if (glc) SDL_GL_DeleteContext(glc);
     if (win) SDL_DestroyWindow(win);
-    memset(pads, 0, sizeof pads); glc = NULL; win = NULL;
-#ifdef __SWITCH__
-    SDL_QuitSubSystem(SDL_INIT_VIDEO | SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER | SDL_INIT_HAPTIC);
-#else
-    audio = 0;
+    memset(pads, 0, sizeof pads); audio = 0; glc = NULL; win = NULL;
     SDL_Quit();
-#endif
 }
 
 unsigned long dc_front_frames(void) { return presented; }

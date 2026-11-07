@@ -143,24 +143,25 @@ extern uint32_t svcGetThreadContext3(void *ctx, uint32_t thread);
 __attribute__((noinline, used)) void dc_prof_anchor(void) { __asm__ volatile(""); }
 static volatile int prof_state;                    /* 0 idle, 1 waiting / sampling, 2 saved, 3 failed */
 static volatile int prof_sampling;                 /* set once the samples start */
+static volatile int prof_quit;                     /* dc_front_close: the thread ends */
 static int prof_main(void *arg) {
     (void)arg;
     enum { MAX = 12000, DEPTH = 6 };                /* pc, lr and up to four frames of the stack */
     static int64_t off[MAX][DEPTH];
     static uint64_t ctx[0x320 / 8] __attribute__((aligned(16)));    /* libnx ThreadContext; pc at 0x100 */
-    /* it never exits: a detached SDL thread that ends crashed the Switch (SDL's thread clean-up);
-     * it waits for the next PROFILE instead */
+    /* it waits for the next PROFILE until dc_front_close stops it (prof_stop) */
     for (;;) {
-    while (prof_state != 1) SDL_Delay(100);
+    while (prof_state != 1 && !prof_quit) SDL_Delay(50);
+    if (prof_quit) return 0;
     uint32_t h = envGetMainThreadHandle();
     const uint64_t anchor = (uint64_t)(uintptr_t)&dc_prof_anchor;
     int n = 0, fails = 0; uint32_t err_pause = 0, err_ctx = 0;
     fprintf(stderr, "dc-core: profile: main thread handle %x\n", h);
-    while (osd_open) SDL_Delay(50);                 /* the menu that started it */
+    while (osd_open && !prof_quit) SDL_Delay(50);  /* the menu that started it */
     SDL_Delay(500);
     prof_sampling = 1;
     Uint32 end = SDL_GetTicks() + 10000;
-    while (SDL_GetTicks() < end && n < MAX) {
+    while (SDL_GetTicks() < end && n < MAX && !prof_quit) {
         SDL_Delay(1);
         if (osd_open) continue;
         { uint32_t e = svcSetThreadActivity(h, 1); if (e) { if (!err_pause) err_pause = e; fails++; continue; } }
@@ -198,13 +199,14 @@ static int prof_main(void *arg) {
     }
     return 0;
 }
+static void *prof_thr;                             /* a libnx thread (dccore_nxthread.c) */
 static void prof_start(void) {
-    static SDL_Thread *t;
     if (prof_state == 1) return;
     prof_sampling = 0; prof_state = 1;
-    if (!t) t = SDL_CreateThread(prof_main, "dc-prof", NULL);
-    if (!t) prof_state = 3;
+    if (!prof_thr) prof_thr = dc_nx_thread_start(prof_main, NULL, -2);
+    if (!prof_thr) prof_state = 3;
 }
+static void prof_stop(void) { if (prof_thr) { prof_quit = 1; dc_nx_thread_join(prof_thr); prof_thr = NULL; prof_quit = 0; } }
 #endif
 
 static const char *osd_label(int i, char *buf, size_t n) {
