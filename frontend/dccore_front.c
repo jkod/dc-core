@@ -198,6 +198,7 @@ static void on_render(void) {
 }
 
 /* ------------------------------------------------------------------ input */
+static int pause_held, pause_req;   /* the pause button down this poll; a pause asked for (P / Pause, the button) */
 static uint8_t axis8(Sint16 v) { int x = (v + 32768) >> 8; return (uint8_t)(x < 0 ? 0 : x > 255 ? 255 : x); }
 static void read_pad(SDL_GameController *pad, uint16_t *b, int *jx, int *jy, int *lt, int *rt) {
     Sint16 ax = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTX), ay = SDL_GameControllerGetAxis(pad, SDL_CONTROLLER_AXIS_LEFTY);
@@ -209,12 +210,15 @@ static void read_pad(SDL_GameController *pad, uint16_t *b, int *jx, int *jy, int
     static const struct { SDL_GameControllerButton s; uint16_t d; } map[] = {
         { SDL_CONTROLLER_BUTTON_A, DC_BTN_A }, { SDL_CONTROLLER_BUTTON_B, DC_BTN_B }, { SDL_CONTROLLER_BUTTON_X, DC_BTN_X },
         { SDL_CONTROLLER_BUTTON_Y, DC_BTN_Y }, { SDL_CONTROLLER_BUTTON_START, DC_BTN_START },
-        { SDL_CONTROLLER_BUTTON_BACK, DC_BTN_START },      /* View / Select / - as Start too (the Dreamcast pad has one) */
         { SDL_CONTROLLER_BUTTON_DPAD_UP, DC_BTN_UP }, { SDL_CONTROLLER_BUTTON_DPAD_DOWN, DC_BTN_DOWN },
         { SDL_CONTROLLER_BUTTON_DPAD_LEFT, DC_BTN_LEFT }, { SDL_CONTROLLER_BUTTON_DPAD_RIGHT, DC_BTN_RIGHT } };
     for (unsigned i = 0; i < sizeof map / sizeof map[0]; i++) if (SDL_GameControllerGetButton(pad, map[i].s)) *b |= map[i].d;
+    /* View / Select / -: Start too (the Dreamcast pad has one), or the pause button (cfg.pause_button) */
+    if (SDL_GameControllerGetButton(pad, SDL_CONTROLLER_BUTTON_BACK)) { if (cfg.pause_button) pause_held = 1; else *b |= DC_BTN_START; }
 }
 static void read_input(void) {
+    static int pause_was;
+    pause_held = 0;
     for (int p = 1; p < 4; p++) {                          /* ports B-D: gamepads 2-4 */
         uint16_t pb = 0; int px = 128, py = 128, pl = 0, pr = 0;
         if (pads[p]) read_pad(pads[p], &pb, &px, &py, &pl, &pr);
@@ -255,6 +259,7 @@ static void read_input(void) {
         #define JB(i) SDL_JoystickGetButton(joy, i)
         if (JB(NB)) b |= DC_BTN_A; if (JB(NA)) b |= DC_BTN_B; if (JB(NY)) b |= DC_BTN_X; if (JB(NX)) b |= DC_BTN_Y;
         if (JB(NPLUS)) b |= DC_BTN_START;
+        if (cfg.pause_button && JB(NMINUS) && !JB(NPLUS)) pause_held = 1;
         if (JB(NUP)) b |= DC_BTN_UP; if (JB(NDOWN)) b |= DC_BTN_DOWN; if (JB(NLEFT)) b |= DC_BTN_LEFT; if (JB(NRIGHT)) b |= DC_BTN_RIGHT;
         if (JB(NZL)) lt = 255; if (JB(NZR)) rt = 255;
         Sint16 ax = SDL_JoystickGetAxis(joy, 0), ay = SDL_JoystickGetAxis(joy, 1);
@@ -264,6 +269,8 @@ static void read_input(void) {
         #undef JB
     }
 #endif
+    if (pause_held && !pause_was) pause_req = 1;
+    pause_was = pause_held;
     /* only the focused window plays: a controller can be read by every program at once, so with two
      * ports open both would follow it (the pads are polled with background events allowed, so a
      * console window that kept focus doesn't make the pad look dead; one click on the game fixes that) */
@@ -402,6 +409,7 @@ static void events(void) {
         if (e.type == SDL_KEYDOWN && !e.key.repeat) {
             if (e.key.keysym.sym == SDLK_ESCAPE) { if (osd_open) osd_req = 1; else { dc_front_close(); exit(0); } }
             if (e.key.keysym.sym == SDLK_F1) osd_req = 1;   /* the on-screen menu */
+            if ((e.key.keysym.sym == SDLK_p || e.key.keysym.sym == SDLK_PAUSE) && !e.key.repeat) pause_req = 1;
             if (e.key.keysym.sym == SDLK_F11) {
                 cfg.fullscreen = !cfg.fullscreen;
                 SDL_SetWindowFullscreen(win, cfg.fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
@@ -632,6 +640,7 @@ static void on_vblank(uint64_t f) {
     pause_while_unfocused();
     osd_count_frame();
     if (!dc_front_fast) { int by = osd_combo(); if (osd_req || by) osd_run(by ? by - 1 : 0); }
+    if (pause_req) pause_run();
     /* pacing: emulated SH-4 time (200 MHz) against the wall clock */
     if (dc_front_fast) { paced = 0; return; }              /* fast-forward: no pacing, resynchronised after */
     if (!cfg.no_pacing && dc_current_ctx) {

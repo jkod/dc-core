@@ -40,6 +40,9 @@ typedef struct {
                                    implies this); DC_RUN_IN_BACKGROUND=1 does the same */
     int no_rumble;              /* no Jump Pack in the controllers (by default each has one, and its
                                    effects rumble the host's gamepad); DC_NO_RUMBLE=1 does the same */
+    int pause_button;           /* the gamepad's View / Back / Select (Switch: -) pauses and resumes the game
+                                   instead of being a second Start: for games with no pause of their own
+                                   (arcade conversions). P / Pause on the keyboard pause in every game */
 } dc_front_config;
 /* frame rate choice in the on-screen menu: a port that can run at 60 or 30 fps sets this to 1 or 0 (its
  * default) before dc_front_open and follows it every field; -1 (the default) hides the menu item. A choice

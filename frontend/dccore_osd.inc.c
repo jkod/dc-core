@@ -356,9 +356,19 @@ static int bar_click(int x, int y) {
     }
     return 0;
 }
+static int pause_on;                                      /* "PAUSED" in the middle of the screen */
 /* drawn over the presented picture, before the swap */
 static void osd_overlays(int ww, int wh) {
     if (osd_bar && !osd_open) bar_draw(ww, wh);
+    if (pause_on && !osd_open) {
+        enum { PW = 48, PH = 13 };
+        static uint8_t px[PW * PH * 4];
+        memset(px, 0, sizeof px);
+        osd_fill(px, PW, 0, 0, PW, PH, 0x000000B0u);
+        osd_text(px, PW, PH, (PW - 6 * 6) / 2 + 1, 3, "PAUSED", 0xFFFFFFFFu);
+        int k = wh / 180; if (k < 2) k = 2;
+        dc_pvr_gl_overlay(px, PW, PH, (ww - PW * k) / 2, (wh - PH * k) / 2, PW * k, PH * k, ww, wh);
+    }
     if (toast_until && SDL_GetTicks() < toast_until) {
         enum { TW = 140, TH = 11 };
         static uint8_t px[TW * TH * 4];
@@ -507,6 +517,43 @@ static int osd_all_released(void) {
     return !(osd_buttons() & (DC_BTN_UP | DC_BTN_DOWN | DC_BTN_LEFT | DC_BTN_RIGHT));
 }
 static void osd_frame(void) { events(); need_present = 1; present_window(); SDL_Delay(8); }
+
+/* Pause (P / Pause, or the pause button with cfg.pause_button): the game stops, sound and rumble too,
+ * "PAUSED" shows in the middle; the same key or button, or Start, goes on. The press that resumes is not seen by
+ * the game (it waits until every button is up). F1 / the menu combo still opens the menu. */
+static void osd_run(int port);
+static int pause_down(void) {
+    int d = 0;
+    for (int p = 0; p < 4; p++) if (pads[p]) {
+        if (cfg.pause_button && SDL_GameControllerGetButton(pads[p], SDL_CONTROLLER_BUTTON_BACK)) d = 1;
+        if (SDL_GameControllerGetButton(pads[p], SDL_CONTROLLER_BUTTON_START)) d = 1;
+    }
+#ifdef __SWITCH__
+    if (joy && (SDL_JoystickGetButton(joy, 10) || (cfg.pause_button && SDL_JoystickGetButton(joy, 11)))) d = 1;   /* + / - */
+#endif
+    return d;
+}
+static void pause_run(void) {
+    pause_req = 0;
+    for (int p = 0; p < 4; p++) osd_rumble_pad(p, 0, 0);
+    if (audio) { audio_pause(1); out_clear(); }
+    fprintf(stderr, "dc-core: paused\n");
+    int was = 1;                                    /* the press that paused: wait for its release first */
+    for (;;) {
+        pause_on = 1;
+        osd_frame();
+        if (osd_req) { pause_on = 0; pause_req = 0; osd_run(0); continue; }   /* the menu from the pause; back to the pause after */
+        int d = pause_down();
+        if ((d && !was) || pause_req) break;
+        was = d;
+    }
+    pause_req = 0;
+    pause_on = 0;
+    for (int n = 0; n < 200 && (pause_down() || !osd_all_released()); n++) osd_frame();
+    if (audio) audio_pause(0);
+    paced = 0;
+    fprintf(stderr, "dc-core: resumed\n");
+}
 
 static void osd_run(int port) {
     osd_req = 0;
