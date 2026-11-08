@@ -81,6 +81,8 @@ typedef unsigned char GLboolean, GLubyte; typedef char GLchar; typedef ptrdiff_t
 #define GL_COLOR_ATTACHMENT0 0x8CE0
 #define GL_DEPTH_STENCIL_ATTACHMENT 0x821A
 #define GL_DEPTH24_STENCIL8 0x88F0
+#define GL_MAX_SAMPLES 0x8D57
+#define GL_SAMPLE_ALPHA_TO_COVERAGE 0x809E
 #define GL_FRAMEBUFFER_COMPLETE 0x8CD5
 #define GL_COLOR_BUFFER_BIT 0x4000
 #define GL_DEPTH_BUFFER_BIT 0x0100
@@ -99,6 +101,7 @@ typedef unsigned char GLboolean, GLubyte; typedef char GLchar; typedef ptrdiff_t
     F(void, glFramebufferTexture2D, (GLenum, GLenum, GLenum, GLuint, GLint)) \
     F(void, glFramebufferRenderbuffer, (GLenum, GLenum, GLenum, GLuint)) F(void, glGenRenderbuffers, (GLsizei, GLuint *)) \
     F(void, glBindRenderbuffer, (GLenum, GLuint)) F(void, glRenderbufferStorage, (GLenum, GLenum, GLsizei, GLsizei)) \
+    F(void, glRenderbufferStorageMultisample, (GLenum, GLsizei, GLenum, GLsizei, GLsizei)) F(void, glGetIntegerv, (GLenum, GLint *)) \
     F(GLenum, glCheckFramebufferStatus, (GLenum)) F(void, glDeleteFramebuffers, (GLsizei, const GLuint *)) \
     F(void, glDeleteRenderbuffers, (GLsizei, const GLuint *)) F(void, glGenTextures, (GLsizei, GLuint *)) \
     F(void, glDeleteTextures, (GLsizei, const GLuint *)) F(void, glBindTexture, (GLenum, GLuint)) \
@@ -279,7 +282,11 @@ static const char *fs_src =
 "    if (u_fog == 1) { fc = u_fog_vert; f = off.a; } else { fc = u_fog_ram; f = fog_alpha(iw); }\n"
 "    if (u_fog == 3) px = vec4(fc, f); else px.rgb = mix(px.rgb, fc, f);\n"
 "  }\n"
-"  if (u_pt != 0 && px.a * 255.0 + 0.5 < u_pt_ref * 255.0) discard;\n"
+"  if (u_pt == 2) {\n"   /* MSAA: punch-through edges by alpha to coverage, a ramp one pixel wide across the cut-off */
+"    float c = clamp((px.a * 255.0 + 0.5 - u_pt_ref * 255.0) / max(fwidth(px.a) * 255.0, 1.0) + 0.5, 0.0, 1.0);\n"
+"    if (c <= 0.0) discard;\n"
+"    px.a = c;\n"
+"  } else if (u_pt != 0 && px.a * 255.0 + 0.5 < u_pt_ref * 255.0) discard;\n"
 "  if (u_tpass == 1 && px.a < 0.996) discard;\n"
 "  if (u_tpass == 2 && px.a >= 0.996) discard;\n"   /* in 8-bit steps like the PVR: colours divided by the interpolated 1/w can land a hair below 1.0 (NVIDIA), which dropped whole letters of Rush's text */
 "  o_col = px;\n"
@@ -313,6 +320,7 @@ static GLuint compile(GLenum type, const char *src) {
 }
 
 int dc_pvr_gl_mipmaps;                 /* enhancement: mipmaps for every texture */
+int dc_pvr_gl_msaa;                    /* enhancement: multisample anti-aliasing, samples per pixel (0/1: off) */
 float dc_pvr_gl_anisotropy;            /* enhancement: anisotropic filtering (clamped to the driver's max) */
 static float max_aniso;
 static void bars_init(void);
@@ -367,12 +375,49 @@ static float last_ww, last_rw, last_rh;   /* the last render's target width and 
 static struct { uint32_t tgt; int w, h, fbw, fbh; float ww; GLuint fbo, tex; unsigned frame; } keep[NKEEP];
 int dc_pvr_gl_keep_outside = 1;
 static int fb_scale = 1;                                   /* the render's scale over the console's lines */
+/* MSAA: the frame's polygons are drawn into ms_fbo (the same size, dc_pvr_gl_msaa samples a pixel) and
+ * resolved into fbo once they are all drawn; everything after (side bars, readbacks, keep, present)
+ * works on fbo as without it. Not while capturing a render-to-texture pass (its own buffers). */
+static GLuint ms_fbo, ms_col, ms_depth; static int ms_w, ms_h, ms_n, ms_max = -1;
+static int ms_a2c;                              /* this frame: punch-through by alpha to coverage */
+static int ms_want(void) {
+    if (dc_pvr_gl_msaa < 2) return 0;
+    if (ms_max < 0) { GLint m = 0; p_glGetIntegerv(GL_MAX_SAMPLES, &m); while (p_glGetError()) {} ms_max = m; }
+    int n = dc_pvr_gl_msaa < ms_max ? dc_pvr_gl_msaa : ms_max;
+    return n >= 2 ? n : 0;
+}
+static int ensure_ms(void) {                     /* 1: draw into ms_fbo this frame */
+    int n = ms_want();
+    if (n && ms_fbo && ms_n == n && ms_w == fb_w && ms_h == fb_h) return 1;
+    if (ms_fbo) { p_glDeleteFramebuffers(1, &ms_fbo); p_glDeleteRenderbuffers(1, &ms_col); p_glDeleteRenderbuffers(1, &ms_depth); ms_fbo = 0; }
+    ms_n = 0;
+    if (!n) return 0;
+    p_glGenRenderbuffers(1, &ms_col); p_glBindRenderbuffer(GL_RENDERBUFFER, ms_col);
+    p_glRenderbufferStorageMultisample(GL_RENDERBUFFER, n, GL_RGBA8, fb_w, fb_h);
+    p_glGenRenderbuffers(1, &ms_depth); p_glBindRenderbuffer(GL_RENDERBUFFER, ms_depth);
+    p_glRenderbufferStorageMultisample(GL_RENDERBUFFER, n, GL_DEPTH24_STENCIL8, fb_w, fb_h);
+    p_glGenFramebuffers(1, &ms_fbo); p_glBindFramebuffer(GL_FRAMEBUFFER, ms_fbo);
+    p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, ms_col);
+    p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, ms_depth);
+    int ok = p_glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+    while (p_glGetError()) {}
+    if (!ok) {
+        fprintf(stderr, "pvr_gl: no %dx anti-aliasing here (framebuffer incomplete)\n", n);
+        p_glDeleteFramebuffers(1, &ms_fbo); p_glDeleteRenderbuffers(1, &ms_col); p_glDeleteRenderbuffers(1, &ms_depth); ms_fbo = 0;
+        ms_max = n - 1;                           /* try fewer next time */
+        return 0;
+    }
+    ms_n = n; ms_w = fb_w; ms_h = fb_h;
+    fprintf(stderr, "pvr_gl: %dx anti-aliasing\n", n);
+    return 1;
+}
 static void ensure_fbo(int w, int h) {
     if (fbo && w == fb_w && h == fb_h) return;
     if (fbo) { p_glDeleteFramebuffers(1, &fbo); p_glDeleteTextures(1, &color_tex); p_glDeleteRenderbuffers(1, &depth_rb); }
     p_glGenTextures(1, &color_tex); p_glBindTexture(GL_TEXTURE_2D, color_tex);
     p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
     p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     p_glGenRenderbuffers(1, &depth_rb); p_glBindRenderbuffer(GL_RENDERBUFFER, depth_rb);
     p_glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h);
     p_glGenFramebuffers(1, &fbo); p_glBindFramebuffer(GL_FRAMEBUFFER, fbo);
@@ -989,7 +1034,8 @@ static void set_poly_state(const pvr_poly *p, int set) {
     p_glUniform1i(U.set, set);
     p_glUniform1i(U.textured, tex); p_glUniform1i(U.offset, (p->isp >> 24) & 1); p_glUniform1i(U.gouraud, (p->isp >> 23) & 1);
     p_glUniform1i(U.shade, (tsp >> 6) & 3); p_glUniform1i(U.use_alpha, (tsp >> 20) & 1); p_glUniform1i(U.ign_ta, (tsp >> 19) & 1);
-    p_glUniform1i(U.fog, (tsp >> 22) & 3); p_glUniform1i(U.pt, p->list == 4);
+    p_glUniform1i(U.fog, (tsp >> 22) & 3); p_glUniform1i(U.pt, p->list == 4 ? (ms_a2c ? 2 : 1) : 0);
+    if (ms_a2c) { if (p->list == 4) p_glEnable(GL_SAMPLE_ALPHA_TO_COVERAGE); else p_glDisable(GL_SAMPLE_ALPHA_TO_COVERAGE); }
     if (tex) {
         int ci = poly_cap && poly_base ? poly_cap[p - poly_base] : 0;
         p_glActiveTexture(GL_TEXTURE0); p_glBindTexture(GL_TEXTURE_2D, ci ? cap[ci - 1].tex : texture_for(tcw, tsp));
@@ -2051,7 +2097,10 @@ void dc_pvr_gl_render(int scale) {
     p_glBindBuffer(GL_ARRAY_BUFFER, vbo);
     p_glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)nverts * (GLsizeiptr)sizeof(gv), verts, GL_STREAM_DRAW);
 
-    p_glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    int ms = !capturing && ensure_ms();
+    ms_a2c = ms;
+    GLuint tgt_fbo = ms ? ms_fbo : fbo;                   /* see ms_fbo */
+    p_glBindFramebuffer(GL_FRAMEBUFFER, tgt_fbo);
     p_glViewport(0, 0, fb_w, fb_h);
     p_glUseProgram(prog);
     p_glUniform2f(U.scale, 2.f / WW, 2.f / RH);
@@ -2073,9 +2122,14 @@ void dc_pvr_gl_render(int scale) {
     {
         if (restore >= 0 && keep[restore].fbw == fb_w && keep[restore].fbh == fb_h) {   /* see keep */
             p_glDisable(GL_SCISSOR_TEST);
-            p_glBindFramebuffer(GL_READ_FRAMEBUFFER, keep[restore].fbo); p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo);
+            p_glBindFramebuffer(GL_READ_FRAMEBUFFER, keep[restore].fbo); p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, tgt_fbo);
             p_glBlitFramebuffer(0, 0, fb_w, fb_h, 0, 0, fb_w, fb_h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
-            p_glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+            p_glBindFramebuffer(GL_FRAMEBUFFER, tgt_fbo);
+        } else if (ms && band) {                          /* a band over what is there: the samples start from it */
+            p_glDisable(GL_SCISSOR_TEST);
+            p_glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo); p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, ms_fbo);
+            p_glBlitFramebuffer(0, 0, fb_w, fb_h, 0, 0, fb_w, fb_h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+            p_glBindFramebuffer(GL_FRAMEBUFFER, ms_fbo);
         } else if (!band || restore >= 0) {
             p_glDisable(GL_SCISSOR_TEST);
             p_glClearColor(0, 0, 0, 1);
@@ -2260,6 +2314,12 @@ void dc_pvr_gl_render(int scale) {
     p_glDisable(GL_BLEND);
     p_glDisable(GL_SCISSOR_TEST);
     p_glDepthMask(1);
+    if (ms_a2c) { p_glDisable(GL_SAMPLE_ALPHA_TO_COVERAGE); ms_a2c = 0; }
+    if (ms) {                                             /* resolve: the rest works on fbo */
+        p_glBindFramebuffer(GL_READ_FRAMEBUFFER, ms_fbo); p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fbo);
+        p_glBlitFramebuffer(0, 0, fb_w, fb_h, 0, 0, fb_w, fb_h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        p_glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    }
     if (dc_pvr_gl_widescreen && dc_pvr_gl_clip_2d && !lbox && WW > (float)RW + 1.f) {
         /* a 2D frame (no 3D scene of 50+ polygons reaching past the 4:3 picture): what the game draws
          * beyond the 4:3 edges (a background's overhang, a ticker running on) is cleared, and the side
@@ -2459,6 +2519,83 @@ void dc_pvr_gl_capture(int scale) {
 }
 
 static void present_scanlines(int x, int y, int w, int h, int lines, int win_w, int win_h);
+/* the picture into the window. Scaled down by more than 1.5x (a high render resolution in a smaller window)
+ * each window pixel averages the render pixels it covers (supersampling), where a plain linear blit would
+ * pick 2x2 of them and skip the rest: shimmering edges and sparkling textures. Rects in GL pixels. */
+static GLuint ds_prog, ds_vao; static GLint ds_rect, ds_src, ds_foot, ds_n, ds_texloc, ds_nb, ds_sharp; static int ds_failed;
+static const char *ds_vs =
+"#version 330 core\n"
+"layout(location=0) in vec2 a_pos; uniform vec4 u_rect; out vec2 v_uv;\n"
+"void main() { v_uv = a_pos; gl_Position = vec4(mix(u_rect.xy, u_rect.zw, a_pos), 0.0, 1.0); }\n";
+static const char *ds_fs =
+"#version 330 core\n"
+"in vec2 v_uv; uniform sampler2D u_tex; uniform vec4 u_src; uniform vec2 u_foot, u_nb; uniform int u_n; uniform float u_sharp; out vec4 o_col;\n"
+"vec3 avg(vec2 c) {\n"
+"  vec3 s = vec3(0.0);\n"
+"  for (int j = 0; j < u_n; j++) for (int i = 0; i < u_n; i++)\n"     /* bilinear taps, 2x2 texels each */
+"    s += texture(u_tex, c + u_foot * ((vec2(float(i), float(j)) + 0.5) / float(u_n) - 0.5)).rgb;\n"
+"  return s / float(u_n * u_n);\n"
+"}\n"
+"void main() {\n"
+"  vec2 c = mix(u_src.xy, u_src.zw, v_uv);\n"
+"  vec3 m = avg(c);\n"
+"  if (u_sharp > 0.0) {\n"    /* contrast-adaptive sharpening (after AMD's CAS): less where the contrast is already high */
+"    vec3 a = texture(u_tex, c + vec2(0.0, u_nb.y)).rgb, b = texture(u_tex, c - vec2(u_nb.x, 0.0)).rgb;\n"
+"    vec3 d = texture(u_tex, c + vec2(u_nb.x, 0.0)).rgb, e = texture(u_tex, c - vec2(0.0, u_nb.y)).rgb;\n"
+"    vec3 mn = min(min(min(a, b), min(d, e)), m), mx = max(max(max(a, b), max(d, e)), m);\n"
+"    vec3 amp = sqrt(clamp(min(mn, 1.0 - mx) / max(mx, vec3(1e-4)), 0.0, 1.0));\n"
+"    vec3 w = -amp / mix(8.0, 5.0, u_sharp);\n"
+"    m = clamp((m + (a + b + d + e) * w) / (1.0 + 4.0 * w), 0.0, 1.0);\n"
+"  }\n"
+"  o_col = vec4(m, 1.0);\n"
+"}\n";
+static int ds_init(void) {
+    if (ds_prog) return 1;
+    if (ds_failed) return 0;
+    ds_prog = p_glCreateProgram();
+    p_glAttachShader(ds_prog, compile(GL_VERTEX_SHADER, ds_vs)); p_glAttachShader(ds_prog, compile(GL_FRAGMENT_SHADER, ds_fs));
+    p_glLinkProgram(ds_prog);
+    GLint ok = 0; p_glGetProgramiv(ds_prog, GL_LINK_STATUS, &ok);
+    if (!ok) { ds_prog = 0; ds_failed = 1; return 0; }
+    ds_rect = p_glGetUniformLocation(ds_prog, "u_rect"); ds_src = p_glGetUniformLocation(ds_prog, "u_src");
+    ds_foot = p_glGetUniformLocation(ds_prog, "u_foot"); ds_n = p_glGetUniformLocation(ds_prog, "u_n");
+    ds_texloc = p_glGetUniformLocation(ds_prog, "u_tex");
+    ds_nb = p_glGetUniformLocation(ds_prog, "u_nb"); ds_sharp = p_glGetUniformLocation(ds_prog, "u_sharp");
+    static const float q[12] = { 0, 0, 1, 0, 0, 1, 1, 0, 1, 1, 0, 1 };
+    GLuint vb; p_glGenVertexArrays(1, &ds_vao); p_glBindVertexArray(ds_vao);
+    p_glGenBuffers(1, &vb); p_glBindBuffer(GL_ARRAY_BUFFER, vb);
+    p_glBufferData(GL_ARRAY_BUFFER, sizeof q, q, GL_STREAM_DRAW);
+    p_glEnableVertexAttribArray(0); p_glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, (void *)0);
+    p_glBindVertexArray(vao);
+    return 1;
+}
+int dc_pvr_gl_plain_scaling;           /* 1: always the plain linear blit (comparisons) */
+float dc_pvr_gl_sharpen;               /* 0: off; up to 1: contrast-adaptive sharpening of the presented picture */
+static void present_blit(int x0, int y0, int x1, int y1, int dx0, int dy0, int dx1, int dy1, int win_w, int win_h) {
+    float rx = (float)(x1 - x0) / (float)(dx1 - dx0), ry = (float)(y1 - y0) / (float)(dy1 - dy0);
+    float r = rx > ry ? rx : ry;
+    if ((r <= 1.5f && dc_pvr_gl_sharpen <= 0.f) || dc_pvr_gl_plain_scaling || !ds_init()) {
+        p_glBlitFramebuffer(x0, y0, x1, y1, dx0, dy0, dx1, dy1, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+        return;
+    }
+    int n = r <= 1.5f ? 1 : (int)ceilf(r * 0.5f); if (n > 8) n = 8;
+    p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    p_glViewport(0, 0, win_w, win_h);
+    p_glDisable(GL_DEPTH_TEST); p_glDisable(GL_STENCIL_TEST); p_glDisable(GL_SCISSOR_TEST); p_glDisable(GL_CULL_FACE); p_glDisable(GL_BLEND);
+    p_glColorMask(1, 1, 1, 1);
+    p_glUseProgram(ds_prog);
+    p_glActiveTexture(GL_TEXTURE0); p_glBindTexture(GL_TEXTURE_2D, color_tex);
+    p_glUniform1i(ds_texloc, 0); p_glUniform1i(ds_n, n);
+    p_glUniform4f(ds_rect, dx0 * 2.f / win_w - 1, dy0 * 2.f / win_h - 1, dx1 * 2.f / win_w - 1, dy1 * 2.f / win_h - 1);
+    p_glUniform4f(ds_src, (float)x0 / fb_w, (float)y0 / fb_h, (float)x1 / fb_w, (float)y1 / fb_h);
+    p_glUniform2f(ds_foot, r <= 1.5f ? 0.f : rx / fb_w, r <= 1.5f ? 0.f : ry / fb_h);
+    p_glUniform2f(ds_nb, (rx > 1.f ? rx : 1.f) / fb_w, (ry > 1.f ? ry : 1.f) / fb_h);   /* a window pixel, at least a render pixel */
+    p_glUniform1f(ds_sharp, dc_pvr_gl_sharpen > 1.f ? 1.f : dc_pvr_gl_sharpen);
+    p_glBindVertexArray(ds_vao);
+    p_glDrawArrays(GL_TRIANGLES, 0, 6);
+    p_glBindVertexArray(vao); p_glUseProgram(prog);
+    p_glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo); p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
+}
 void dc_pvr_gl_present(int win_w, int win_h, int stretch) {
     if (!fbo) return;
     int dw = win_w, dh = win_h, dx = 0, dy = 0;
@@ -2476,13 +2613,13 @@ void dc_pvr_gl_present(int win_w, int win_h, int stretch) {
         int x0 = zoom_x0, x1 = zoom_x1, y0 = zoom_y0, y1 = zoom_y1;
         if (sw / shh > want) { int c = (int)(((float)(x1 - x0) - want * shh / px) * 0.5f); x0 += c; x1 -= c; }
         else { int c = (int)((shh - sw / want) * 0.5f); y0 += c; y1 -= c; }
-        p_glBlitFramebuffer(x0, y0, x1, y1, dx, dy, dx + dw, dy + dh, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+        present_blit(x0, y0, x1, y1, dx, dy, dx + dw, dy + dh, win_w, win_h);
     } else if (dc_pvr_gl_fill_lines && pic_y1 > pic_y0) {         /* the drawn lines fill the height */
-        p_glBlitFramebuffer(0, pic_y0, fb_w, pic_y1, dx, dy, dx + dw, dy + dh, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+        present_blit(0, pic_y0, fb_w, pic_y1, dx, dy, dx + dw, dy + dh, win_w, win_h);
         if (dc_pvr_gl_scanlines) present_scanlines(dx, dy, dw, dh, (pic_y1 - pic_y0) / (fb_scale > 0 ? fb_scale : 1), win_w, win_h);
     } else {
         int sh = (int)(pic_offy * (float)dh + (pic_offy >= 0 ? 0.5f : -0.5f));   /* centre the drawn lines (GL rows go up) */
-        p_glBlitFramebuffer(0, 0, fb_w, fb_h, dx, dy - sh, dx + dw, dy + dh - sh, GL_COLOR_BUFFER_BIT, GL_LINEAR);
+        present_blit(0, 0, fb_w, fb_h, dx, dy - sh, dx + dw, dy + dh - sh, win_w, win_h);
         if (dc_pvr_gl_scanlines) present_scanlines(dx, dy - sh, dw, dh, fb_h / (fb_scale > 0 ? fb_scale : 1), win_w, win_h);
     }
     p_glBindFramebuffer(GL_FRAMEBUFFER, 0);

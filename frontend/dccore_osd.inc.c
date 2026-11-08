@@ -66,7 +66,7 @@ static const struct { char c; uint8_t r[7]; } osd_font[] = {
 };
 #define OSD_W 200
 /* the items, top to bottom */
-enum { OI_RESUME, OI_RESET, OI_SAVE, OI_LOAD, OI_RES, OI_ASPECT, OI_SCAN, OI_FPS, OI_RUMBLE, OI_FS, OI_FRATE,
+enum { OI_RESUME, OI_RESET, OI_SAVE, OI_LOAD, OI_RES, OI_AA, OI_SHARP, OI_ASPECT, OI_SCAN, OI_FPS, OI_RUMBLE, OI_FS, OI_FRATE,
        OI_SPEED, OI_BAR, OI_PROF, OI_QUIT, OSD_ITEMS };
 static int osd_scan, osd_fps, osd_boost;
 int osd_bar;                                 /* the controls bar */
@@ -83,24 +83,35 @@ static int osd_h;
 static float fps_now;
 static char fps_detail[48], fps_sound[48];
 
+#ifdef __SWITCH__
+static int osd_aa = 0;                  /* anti-aliasing (MSAA samples; 0 off): costly on the Switch's GPU */
+#else
+static int osd_aa = 4;
+#endif
+static int osd_sharp = 1;                /* sharpen: off, low, medium, high */
+static const float sharp_amount[4] = { 0.f, 0.35f, 0.65f, 1.f };
 static void osd_load(void) {
     char *dir = SDL_GetPrefPath("dc-core", cfg.save_name ? cfg.save_name : "default");
-    if (!dir) return;
-    snprintf(osd_cfg_path, sizeof osd_cfg_path, "%sosd.cfg", dir);
-    SDL_free(dir);
-    FILE *f = fopen(osd_cfg_path, "r");
-    if (!f) return;
+    if (dir) { snprintf(osd_cfg_path, sizeof osd_cfg_path, "%sosd.cfg", dir); SDL_free(dir); }
+    FILE *f = osd_cfg_path[0] ? fopen(osd_cfg_path, "r") : NULL;   /* none yet: the defaults below still apply */
     char line[128];
-    while (fgets(line, sizeof line, f)) {
+    while (f && fgets(line, sizeof line, f)) {
         if (!strncmp(line, "scanlines=", 10)) osd_scan = atoi(line + 10) & 3;
+        if (!strncmp(line, "sharpen=", 8)) osd_sharp = atoi(line + 8) & 3;
+        if (!strncmp(line, "aa=", 3)) { int a = atoi(line + 3); osd_aa = a >= 8 ? 8 : a >= 4 ? 4 : a >= 2 ? 2 : 0; }
         if (!strncmp(line, "fps=", 4)) osd_fps = atoi(line + 4) != 0;
         if (!strncmp(line, "boost=", 6)) osd_boost = atoi(line + 6) != 0;
         if (!strncmp(line, "bar=", 4)) osd_bar = atoi(line + 4) != 0;
         if (!strncmp(line, "framerate=", 10) && dc_front_fps60 >= 0) dc_front_fps60 = atoi(line + 10) >= 60;
         if (!strncmp(line, "rumble_", 7) && line[7] >= 'a' && line[7] <= 'd' && line[8] == '=') osd_rumble[line[7] - 'a'] = atoi(line + 9) & 3;
     }
-    fclose(f);
+    if (f) fclose(f);
     dc_pvr_gl_scanlines = osd_scan;
+    { const char *e = getenv("DC_AA"); if (e) osd_aa = atoi(e); }   /* tests: anti-aliasing for this run */
+    dc_pvr_gl_msaa = osd_aa;
+    { const char *e = getenv("DC_SHARPEN"); if (e) osd_sharp = atoi(e) & 3; }
+    dc_pvr_gl_sharpen = sharp_amount[osd_sharp & 3];
+    if (getenv("DC_PLAIN_SCALING")) dc_pvr_gl_plain_scaling = 1;   /* tests: the old linear blit to the window */
 #ifdef __SWITCH__
     if (osd_boost) set_boost(1);
 #endif
@@ -109,7 +120,7 @@ static void osd_save(void) {
     if (!osd_cfg_path[0]) return;
     FILE *f = fopen(osd_cfg_path, "w");
     if (!f) return;
-    fprintf(f, "scanlines=%d\nfps=%d\nboost=%d\nbar=%d\n", osd_scan, osd_fps, osd_boost, osd_bar);
+    fprintf(f, "scanlines=%d\nfps=%d\nboost=%d\nbar=%d\naa=%d\nsharpen=%d\n", osd_scan, osd_fps, osd_boost, osd_bar, osd_aa, osd_sharp);
     if (dc_front_fps60 >= 0) fprintf(f, "framerate=%d\n", dc_front_fps60 ? 60 : 30);
     for (int p = 0; p < 4; p++) fprintf(f, "rumble_%c=%d\n", 'a' + p, osd_rumble[p]);
     fclose(f);
@@ -229,6 +240,8 @@ static const char *osd_label(int i, char *buf, size_t n) {
     case OI_SAVE: if (!reset_ready) return ""; snprintf(buf, n, "SAVE STATE    < %d >", state_slot); return buf;
     case OI_LOAD: if (!reset_ready) return ""; snprintf(buf, n, "LOAD STATE    < %d >", state_slot); return buf;
     case OI_RES: snprintf(buf, n, "RESOLUTION    < %dX %dP >", cfg.scale, 480 * cfg.scale); return buf;
+    case OI_SHARP: { static const char *n4[4] = { "OFF", "LOW", "MEDIUM", "HIGH" }; snprintf(buf, n, "SHARPEN       < %s >", n4[osd_sharp & 3]); return buf; }
+    case OI_AA: if (osd_aa < 2) return "ANTI-ALIASING < OFF >"; snprintf(buf, n, "ANTI-ALIASING < %dX >", osd_aa); return buf;
     case OI_ASPECT: snprintf(buf, n, "ASPECT        < %s >", cfg.widescreen ? "WIDE" : "4:3"); return buf;
     case OI_SCAN: snprintf(buf, n, "SCANLINES     < %s >", scan[osd_scan]); return buf;
     case OI_FPS: snprintf(buf, n, "SHOW FPS      < %s >", osd_fps ? "ON" : "OFF"); return buf;
@@ -537,6 +550,9 @@ static void osd_run(int port) {
             if (sel == OI_ASPECT) {
                 cfg.widescreen = !cfg.widescreen; dc_pvr_gl_widescreen = cfg.widescreen;
             }
+            if (sel == OI_SHARP) { osd_sharp = (osd_sharp + 4 + step) % 4; dc_pvr_gl_sharpen = sharp_amount[osd_sharp]; need_present = 1; osd_save(); }
+            if (sel == OI_AA) { static const int lv[4] = { 0, 2, 4, 8 }; int i = osd_aa >= 8 ? 3 : osd_aa >= 4 ? 2 : osd_aa >= 2 ? 1 : 0;
+                                i = (i + 4 + step) % 4; osd_aa = lv[i]; dc_pvr_gl_msaa = osd_aa; need_present = 1; osd_save(); }
             if (sel == OI_SCAN) { osd_scan = (osd_scan + 4 + step) % 4; dc_pvr_gl_scanlines = osd_scan; osd_save(); }
             if (sel == OI_FPS) { osd_fps = !osd_fps; osd_save(); }
             if (sel == OI_RUMBLE) {                                 /* this controller's rumble, felt at once */

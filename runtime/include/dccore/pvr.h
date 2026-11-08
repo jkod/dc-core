@@ -60,6 +60,9 @@ extern float dc_pvr_gl_aspect;        /* widescreen: the window's width / height
  * and anisotropic filtering up to this many samples where the driver supports it */
 extern int dc_pvr_gl_mipmaps;
 extern float dc_pvr_gl_anisotropy;
+extern int dc_pvr_gl_msaa;              /* multisample anti-aliasing: samples a pixel (0/1 off; clamped to the GPU's max) */
+extern float dc_pvr_gl_sharpen;          /* 0 off .. 1: contrast-adaptive sharpening when presenting */
+extern int dc_pvr_gl_plain_scaling;      /* 1: plain linear scaling to the window, no supersampled downscale */
 /* texture packs: textures are named <hash>_<w>x<h>.png by a hash of their decoded pixels. With
  * dc_pvr_gl_tex_dump set to a folder, every texture the game uploads is saved there once; with
  * dc_pvr_gl_tex_pack set, a PNG of that name in that folder (any size: upscaled, redrawn) is used
