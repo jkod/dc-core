@@ -1725,7 +1725,12 @@ void dc_pvr_gl_render(int scale) {
         WW = aspect * (float)lines * (float)RW / (4.f / 3.f * (float)f.height);
         if (WW < (float)RW) WW = (float)RW;
     }
-    ensure_fbo((int)(WW / (float)RW * (float)(f.width * scale) + 0.5f), f.height * scale);
+    /* the 4:3 picture starts on a whole pixel: margins of half a pixel put the console's pixel edges
+     * (where 2D background tiles meet) through pixel centres, where both tiles may draw the pixel: a
+     * thin line of doubled translucency (Sega Rally 2's title at 1707 x 960) */
+    int pic_w = f.width * scale, fb_w = pic_w + 2 * (int)((WW / (float)RW - 1.f) * (float)pic_w * 0.5f + 0.5f);
+    if (WW > (float)RW) WW = (float)RW * (float)fb_w / (float)pic_w;
+    ensure_fbo(fb_w, f.height * scale);
     fb_scale = scale;
     gl_selftest();
     disp_aspect = aspect;
