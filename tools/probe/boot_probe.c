@@ -284,6 +284,7 @@ int main(int argc, char **argv) {
     dc_hw.on_vblank = on_vblank;
     if (getenv("DC_CABLE")) dc_cable = atoi(getenv("DC_CABLE"));
     if (getenv("DC_GD_DMA_IRQ")) dc_gd_dma_irq = 1;   /* Tennis 2K2 */
+    if (getenv("DC_GD_STAT_FREE")) dc_gd_stat_free = 1;   /* Dolphin Blue */
     if (!getenv("DC_NOPAD")) dc_maple_install();   /* a standard controller on port A */
     if (getenv("DC_VMU") && dc_vmu_attach(0, getenv("DC_VMU"))) fprintf(stderr, "cannot use VMU %s\n", getenv("DC_VMU"));
     if (getenv("DC_CALLCOST")) dc_call_cost = (uint32_t)atoi(getenv("DC_CALLCOST"));

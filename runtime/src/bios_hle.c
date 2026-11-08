@@ -101,6 +101,32 @@ static uint32_t last_lba;
  * which Tennis 2K2's file system needs and Rush 2049's track loader does not survive (it stops
  * drawing for good after the car select). */
 int dc_gd_dma_irq;
+/* get_cmd_stat as on the console: a finished request reports COMPLETED (2) once, after that its
+ * slot is free and reads NO_ACTIVE (0). Off by default (always 2); Dolphin Blue's GD init waits
+ * for 0. Not part of save states (a restored game only ever polls requests it makes afterwards). */
+int dc_gd_stat_free;
+static uint8_t req_reported[MAX_REQ];
+
+/* Stream reads (DMAREAD_STREAM 28, PIOREAD_STREAM 37 and their _EX forms 38/39): the command only
+ * opens the stream (p[0] FAD, p[1] sectors); the game then pulls it in pieces of any size with
+ * REQ_DMA_TRANS / REQ_PIO_TRANS (dst, bytes) and polls CHECK_*_TRANS: 1 while that piece is still
+ * moving, 0 once it arrived, with the stream's bytes left in *size. get_cmd_stat says 3 (STREAMING)
+ * until all were taken; READ_ABORT ends it early. Pieces are copied at once (no transfer time). */
+static struct { uint32_t id, lba, total, done; } stream;
+static int is_stream_cmd(int cmd) { return cmd == 28 || cmd == 37 || cmd == 38 || cmd == 39; }
+static int stream_copy(uint32_t dst, uint32_t n) {
+    if (!stream.id || !DC_IS_RAM(dst) || DC_RAM_OFS(dst) + n > DC_RAM_SIZE) return -1;
+    if (n > stream.total - stream.done) n = stream.total - stream.done;
+    static uint8_t sec[2048];
+    while (n) {
+        uint32_t s0 = stream.done / 2048, o = stream.done % 2048, k = 2048 - o < n ? 2048 - o : n;
+        if (dc_disc_read(stream.lba + s0, 1, sec)) return -1;
+        memcpy(dc_ram + DC_RAM_OFS(dst), sec + o, k);
+        dst += k; n -= k; stream.done += k;
+    }
+    last_lba = stream.lba + (stream.done + 2047) / 2048;
+    return 0;
+}
 
 /* ---- CD audio: image LBAs [cur, end), `repeat` more times (15 = forever) from `start` */
 static struct { int playing, paused; uint32_t start, cur, end; int repeat; uint8_t buf[2352]; int pos; } cdda;
@@ -261,6 +287,10 @@ static uint32_t h_gdrom(sh4ctx *c) {
         for (int i = 0; i < 4; i++) req[k].p[i] = c->r[5] ? dc_rd32(c->r[5] + i * 4) : 0;
         TR("bios: gd req cmd %d (%08X %08X %08X %08X) -> %u\n", req[k].cmd, req[k].p[0], req[k].p[1], req[k].p[2], req[k].p[3], id);
         req[k].status = gd_exec(req[k].cmd, req[k].p);
+        req_reported[k] = 0;
+        if (is_stream_cmd(req[k].cmd)) {
+            stream.id = id; stream.lba = req[k].p[0] - 150; stream.total = req[k].p[1] * 2048u; stream.done = 0;
+        }
         c->r[0] = id;
         break;
     }
@@ -274,6 +304,15 @@ static uint32_t h_gdrom(sh4ctx *c) {
             dc_wr32(c->r[5] + 12, 0);
         }
         c->r[0] = req[k].status ? (uint32_t)-1 : 2;   /* 2 = completed */
+        if (is_stream_cmd(req[k].cmd)) {
+            if (stream.id == c->r[4] && stream.done < stream.total) {
+                if (c->r[5]) dc_wr32(c->r[5] + 8, stream.done);
+                c->r[0] = 3;                          /* streaming */
+                break;
+            }
+            if (stream.id != c->r[4] && req_reported[k]) { c->r[0] = 0; break; }   /* aborted */
+        }
+        if (dc_gd_stat_free && !req[k].status && req_reported[k]++) c->r[0] = 0;   /* no active request */
         break;
     }
     case 4:                                           /* get_drv_stat(status[2]) */
@@ -291,7 +330,24 @@ static uint32_t h_gdrom(sh4ctx *c) {
         dc_wr32(0xA05F6900u, 1u << 14);              /* acknowledge it (ISTNRM bit 14, write 1 to clear) */
         c->r[0] = 0;
         break;
-    case 2: case 3: case 8: case 9:                   /* exec_server, init, abort, reset */
+    case 6: case 11: {                                /* req_dma_trans / req_pio_trans(id, {dst, bytes}) */
+        uint32_t dst = c->r[5] ? dc_rd32(c->r[5]) : 0, n = c->r[5] ? dc_rd32(c->r[5] + 4) : 0;
+        TR("bios: gd stream %s %u bytes -> %08X (%u/%u)\n", f == 6 ? "dma" : "pio", n, dst, stream.done, stream.total);
+        c->r[0] = stream.id == c->r[4] && !stream_copy(dst, n) ? 0 : (uint32_t)-1;
+        if (f == 6 && !c->r[0] && dc_gd_dma_irq) dc_raise(1u << 14);
+        break;
+    }
+    case 7: case 12: {                                /* check_dma_trans / check_pio_trans(id, &bytes_left) */
+        uint32_t left = stream.id == c->r[4] ? stream.total - stream.done : 0;
+        if (c->r[5]) dc_wr32(c->r[5], left);
+        c->r[0] = 0;                                  /* the piece is done (1: still moving) */
+        break;
+    }
+    case 8:                                           /* abort: ends a stream */
+        if (stream.id) { int k = stream.id % MAX_REQ; req_reported[k] = 1; stream.id = 0; }
+        c->r[0] = 0;
+        break;
+    case 2: case 3: case 9:                           /* exec_server, init, reset */
         c->r[0] = 0;
         break;
     default:

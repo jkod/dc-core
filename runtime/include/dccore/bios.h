@@ -9,6 +9,7 @@ extern "C" {
 int dc_bios_install(sh4ctx *c, char region);
 extern int dc_bios_trace;
 extern int dc_gd_dma_irq;          /* 1: GD DMA reads raise the GD-DMA end interrupt (Tennis 2K2) */
+extern int dc_gd_stat_free;        /* 1: get_cmd_stat reports COMPLETED once, then NO_ACTIVE (Dolphin Blue) */
 /* CD audio (GD commands PLAY / PLAY2 / PAUSE / RELEASE / SEEK / STOP): the next stereo frame at
  * 44.1 kHz, 0 when nothing plays. The AICA mixes it as its external inputs (EFSDL/EFPAN 16, 17). */
 int dc_cdda_frame(int16_t *l, int16_t *r);
