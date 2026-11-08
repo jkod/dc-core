@@ -1255,14 +1255,10 @@ static int column_empty(const uint8_t *col, int n) {      /* under 5% of the col
     return lit * 20 < n;
 }
 /* side bars' decisions read back from the GPU. glReadPixels straight into memory makes the CPU wait until
- * the GPU has finished the frame, so the two stop working side by side: on the Switch that cost menus and
- * the title screen a third of the frame. dc_pvr_gl_async_readback: read into pixel-pack buffers instead
+ * the GPU has finished the frame, so the two stop working side by side (on the Switch that cost menus and
+ * the title screen a third of the frame; on PCs less, but the same stall). dc_pvr_gl_async_readback: read into pixel-pack buffers instead
  * and decide from the newest one the GPU has finished (a frame or two old). */
-#ifdef __SWITCH__
 int dc_pvr_gl_async_readback = 1;
-#else
-int dc_pvr_gl_async_readback = 0;
-#endif
 enum { PROBE_N = 3 };
 static struct { GLuint pbo; GLsync fence; size_t size; int n; } probe[PROBE_N];
 static int probe_next, probe_have, probe_fill[2], probe_flat[2]; static float probe_col[2][3];
