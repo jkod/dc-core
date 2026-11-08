@@ -53,7 +53,7 @@ int main(void) {
       ta(hdr); ta(w0); ta(w1); ta(w2); ta(v0); ta(v1); ta(v2); ta(eol); }
     pvr(0x014, 1);
     dc_pvr_gl_read(rgb, &w, &h);
-    CHECK(w == 171 && h == 128, "widescreen target %dx%d, want 171x128", w, h);
+    CHECK(w == 170 && h == 128, "widescreen target %dx%d, want 170x128 (whole-pixel margins of 21)", w, h);
     const uint8_t *side = rgb + (20 * w + 6) * 3, *mid = rgb + (20 * w + 21 + 20) * 3, *edge = rgb + (100 * w + 5) * 3;
     CHECK(side[1] == 255 && side[0] == 0, "left band %02X%02X%02X, want the green triangle", side[0], side[1], side[2]);
     CHECK(mid[0] == 255 && mid[1] == 0, "centre %02X%02X%02X, want the red triangle", mid[0], mid[1], mid[2]);
