@@ -80,7 +80,7 @@ static char osd_cfg_path[1024];
 #define OSD_H_MAX (22 + OSD_ITEMS * 12 + 22)     /* osd_paint: top + items + footer */
 static uint8_t osd_px[OSD_W * OSD_H_MAX * 4];
 static int osd_h;
-static float fps_now;
+static float fps_now, fps_worst;
 static char fps_detail[48], fps_sound[48];
 
 #ifdef __SWITCH__
@@ -158,7 +158,7 @@ static volatile int prof_state;                    /* 0 idle, 1 waiting / sampli
 static volatile int prof_sampling;                 /* set once the samples start */
 static volatile int prof_quit;                     /* dc_front_close: the thread ends */
 /* one sample of a paused thread: pc, lr and the frame-pointer chain read only inside its stack */
-enum { PROF_MAX = 12000, PROF_DEPTH = 6 };
+enum { PROF_MAX = 12000, PROF_DEPTH = 12 };
 static int prof_sample(uint32_t h, int64_t *out, uint64_t anchor, uint32_t *err_pause, uint32_t *err_ctx) {
     static uint64_t ctx[0x320 / 8] __attribute__((aligned(16)));    /* libnx ThreadContext; pc at 0x100 */
     uint32_t e = svcSetThreadActivity(h, 1);
@@ -183,7 +183,7 @@ static int prof_write(const char *name, int64_t (*off)[PROF_DEPTH], int n, int f
     FILE *f = fopen(path, "w");
     fprintf(stderr, "dc-core: profile (%s): %d samples, %d errors, writing %s\n", what, n, fails, path);
     if (!f) return 0;
-    fprintf(f, "# dc-core profile (%s): %d samples, %d errors; offsets from dc_prof_anchor: pc lr and 4 frames\n", what, n, fails);
+    fprintf(f, "# dc-core profile (%s): %d samples, %d errors; offsets from dc_prof_anchor: pc lr and %d frames\n", what, n, fails, PROF_DEPTH - 2);
     for (int i = 0; i < n; i++) {
         for (int d = 0; d < PROF_DEPTH; d++) fprintf(f, d ? " %llx" : "%llx", (unsigned long long)off[i][d]);
         fputc('\n', f);
@@ -388,7 +388,7 @@ static void osd_overlays(int ww, int wh) {
     if (osd_fps) {                                        /* frames a second, and where the time goes */
         enum { FW = 140, FH = 29 };
         static uint8_t px[FW * FH * 4];
-        char s[16]; snprintf(s, sizeof s, "%.0f FPS", fps_now);
+        char s[32]; snprintf(s, sizeof s, "%.0f FPS  MAX %.0f MS", fps_now, fps_worst);
         memset(px, 0, sizeof px);
         int w1 = (int)strlen(s) * 6 + 3, w2 = (int)strlen(fps_detail) * 6 + 3, w3 = (int)strlen(fps_sound) * 6 + 3;
         int w = w1 > w2 ? w1 : w2; if (w3 > w) w = w3;
@@ -404,14 +404,17 @@ static void osd_overlays(int ww, int wh) {
  * S the sound chip, R rendering, P presenting (with vsync, waiting for the display), I pacing sleeps */
 
 static void osd_count_frame(void) {
-    static Uint64 t0, a0, r0t, p0, i0, w0, ar0, ds0; static unsigned long r0;
+    static Uint64 t0, a0, r0t, p0, i0, w0, ar0, ds0, last, worst; static unsigned long r0;
     Uint64 now = SDL_GetPerformanceCounter();
+    if (last && now - last > worst) worst = now - last;    /* the longest frame: drops show here before the average */
+    last = now;
     if (!t0) { t0 = now; r0 = renders; a0 = dc_prof_aica; r0t = prof_render; p0 = prof_present; i0 = prof_idle; w0 = prof_wait;
                ar0 = dc_prof_aica_arm; ds0 = dc_prof_aica_dsp; return; }
     double f = (double)SDL_GetPerformanceFrequency(), dt = (double)(now - t0) / f;
     if (dt < 0.5) return;
     unsigned long fr = renders - r0;
     fps_now = (float)(fr / dt);
+    fps_worst = (float)((double)worst * 1000.0 / f); worst = 0;
     double per = fr ? 1000.0 / f / (double)fr : 0;
     double a = (double)(dc_prof_aica - a0) * per, r = (double)(prof_render - r0t) * per, p = (double)(prof_present - p0) * per,
            i = (double)(prof_idle - i0) * per, w = (double)(prof_wait - w0) * per, tot = fr ? dt * 1000.0 / (double)fr : 0,

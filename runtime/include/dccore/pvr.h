@@ -62,6 +62,7 @@ extern int dc_pvr_gl_mipmaps;
 extern float dc_pvr_gl_anisotropy;
 extern int dc_pvr_gl_msaa;              /* multisample anti-aliasing: samples a pixel (0/1 off; clamped to the GPU's max) */
 extern float dc_pvr_gl_sharpen;          /* 0 off .. 1: contrast-adaptive sharpening when presenting */
+extern int dc_pvr_gl_async_readback;     /* side bars decided from GPU readbacks a frame or two old, so the CPU never waits for the GPU (default: on the Switch) */
 extern int dc_pvr_gl_plain_scaling;      /* 1: plain linear scaling to the window, no supersampled downscale */
 /* texture packs: textures are named <hash>_<w>x<h>.png by a hash of their decoded pixels. With
  * dc_pvr_gl_tex_dump set to a folder, every texture the game uploads is saved there once; with

@@ -27,7 +27,8 @@
 
 /* ------------------------------------------------------------------ minimal GL binding */
 typedef unsigned int GLenum, GLuint, GLbitfield; typedef int GLint, GLsizei; typedef float GLfloat;
-typedef unsigned char GLboolean, GLubyte; typedef char GLchar; typedef ptrdiff_t GLsizeiptr; typedef double GLdouble;
+typedef unsigned char GLboolean, GLubyte; typedef char GLchar; typedef ptrdiff_t GLsizeiptr, GLintptr; typedef double GLdouble;
+typedef struct __GLsync *GLsync; typedef unsigned long long GLuint64;
 #define GL_FALSE 0
 #define GL_TRUE 1
 #define GL_TRIANGLES 0x0004
@@ -82,6 +83,12 @@ typedef unsigned char GLboolean, GLubyte; typedef char GLchar; typedef ptrdiff_t
 #define GL_DEPTH_STENCIL_ATTACHMENT 0x821A
 #define GL_DEPTH24_STENCIL8 0x88F0
 #define GL_MAX_SAMPLES 0x8D57
+#define GL_PIXEL_PACK_BUFFER 0x88EB
+#define GL_STREAM_READ 0x88E1
+#define GL_MAP_READ_BIT 0x0001
+#define GL_SYNC_GPU_COMMANDS_COMPLETE 0x9117
+#define GL_ALREADY_SIGNALED 0x911A
+#define GL_CONDITION_SATISFIED 0x911C
 #define GL_SAMPLE_ALPHA_TO_COVERAGE 0x809E
 #define GL_FRAMEBUFFER_COMPLETE 0x8CD5
 #define GL_COLOR_BUFFER_BIT 0x4000
@@ -132,7 +139,9 @@ typedef unsigned char GLboolean, GLubyte; typedef char GLchar; typedef ptrdiff_t
     F(void, glEnableVertexAttribArray, (GLuint)) F(void, glDrawArrays, (GLenum, GLint, GLsizei)) \
     F(void, glReadPixels, (GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void *)) \
     F(void, glBlitFramebuffer, (GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum)) \
-    F(void, glPixelStorei, (GLenum, GLint)) F(GLenum, glGetError, (void))
+    F(void, glPixelStorei, (GLenum, GLint)) F(GLenum, glGetError, (void)) \
+    F(void *, glMapBufferRange, (GLenum, GLintptr, GLsizeiptr, GLbitfield)) F(GLboolean, glUnmapBuffer, (GLenum)) \
+    F(GLsync, glFenceSync, (GLenum, GLbitfield)) F(GLenum, glClientWaitSync, (GLsync, GLbitfield, GLuint64)) F(void, glDeleteSync, (GLsync))
 #define F(ret, name, args) static ret (*p_##name) args;
 GLFUNCS
 #undef F
@@ -179,6 +188,7 @@ static void verify_upload(const pvr_texinfo *ti, uint32_t tcw, uint32_t tsp) {
 static void *(*p_getproc_saved)(const char *);
 static void gl_debug_init(void *(*getproc)(const char *)) {
     p_getproc_saved = getproc;
+    { extern int dc_pvr_gl_async_readback; const char *a = getenv("DC_ASYNC_READBACK"); if (a) dc_pvr_gl_async_readback = *a == '1'; }
     const char *e = getenv("DC_GL_DEBUG");
     if (!e || *e != '1') return;
     dbg_log = fopen("dc_gl_debug.txt", "w");
@@ -1220,25 +1230,108 @@ static void bars_init(void) {
     p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 /* side = 0 left, 1 right; picture columns [px0, px1) of the FBO, rows [y0, y1) */
-static void draw_bars(int px0, int px1, int y0, int y1, int left, int right) {
-    if (!bar_prog || px0 <= 0 || y1 <= y0) return;
-    if (px1 >= fb_w || px1 - px0 < 8) return;
+/* the picture's edge strips, blurred, into edge_tex (what the bars show) */
+static int edges_ok(int px0, int px1, int y0, int y1) { return bar_prog && px0 > 0 && y1 > y0 && px1 < fb_w && px1 - px0 >= 8; }
+static void edge_blit(int px0, int px1, int y0, int y1) {
     int strip = (px1 - px0) / 40 > 2 ? (px1 - px0) / 40 : 2;
-    int flat[2] = { 0, 0 }; float col[2][3] = { { 0 } };
     for (int i = 0; i < 2; i++) {
         int sx = i ? px1 - 1 - strip : px0 + 1;         /* inside the picture, past its (often dark) edge pixel */
         p_glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo); p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, edge_fbo[i]);
         p_glBlitFramebuffer(sx, y0, sx + strip, y1, 0, 0, EDGE_W, EDGE_H, GL_COLOR_BUFFER_BIT, GL_LINEAR);
         p_glBindTexture(GL_TEXTURE_2D, edge_tex[i]); p_glGenerateMipmap(GL_TEXTURE_2D);
-        /* one flat colour down the whole edge (every texel within 3% of the first)? */
-        static uint8_t px[EDGE_W * EDGE_H * 4];
-        p_glBindFramebuffer(GL_READ_FRAMEBUFFER, edge_fbo[i]); p_glPixelStorei(GL_PACK_ALIGNMENT, 1);
-        p_glReadPixels(0, 0, EDGE_W, EDGE_H, GL_RGBA, GL_UNSIGNED_BYTE, px);
-        int same = 1;
-        for (int k = 1; k < EDGE_W * EDGE_H && same; k++)
-            for (int ch = 0; ch < 3; ch++) if (abs((int)px[k * 4 + ch] - (int)px[ch]) > 8) { same = 0; break; }
-        flat[i] = same;
-        for (int ch = 0; ch < 3; ch++) col[i][ch] = px[ch] / 255.f;
+    }
+}
+/* one flat colour down the whole edge (every texel within 3% of the first)? */
+static int edge_is_flat(const uint8_t *px, float col[3]) {
+    int same = 1;
+    for (int k = 1; k < EDGE_W * EDGE_H && same; k++)
+        for (int ch = 0; ch < 3; ch++) if (abs((int)px[k * 4 + ch] - (int)px[ch]) > 8) { same = 0; break; }
+    for (int ch = 0; ch < 3; ch++) col[ch] = px[ch] / 255.f;
+    return same;
+}
+static int column_empty(const uint8_t *col, int n) {      /* under 5% of the column drawn */
+    int lit = 0;
+    for (int y = 0; y < n; y++) if (col[y * 4] + col[y * 4 + 1] + col[y * 4 + 2] > 24) lit++;
+    return lit * 20 < n;
+}
+/* side bars' decisions read back from the GPU. glReadPixels straight into memory makes the CPU wait until
+ * the GPU has finished the frame, so the two stop working side by side: on the Switch that cost menus and
+ * the title screen a third of the frame. dc_pvr_gl_async_readback: read into pixel-pack buffers instead
+ * and decide from the newest one the GPU has finished (a frame or two old). */
+#ifdef __SWITCH__
+int dc_pvr_gl_async_readback = 1;
+#else
+int dc_pvr_gl_async_readback = 0;
+#endif
+enum { PROBE_N = 3 };
+static struct { GLuint pbo; GLsync fence; size_t size; int n; } probe[PROBE_N];
+static int probe_next, probe_have, probe_fill[2], probe_flat[2]; static float probe_col[2][3];
+static void probe_collect(void) {                          /* the newest finished readback, if any */
+    for (int k = 1; k <= PROBE_N; k++) {
+        int i = (probe_next - k + PROBE_N) % PROBE_N;
+        if (!probe[i].fence) continue;
+        GLenum r = p_glClientWaitSync(probe[i].fence, 0, 0);
+        if (r != GL_ALREADY_SIGNALED && r != GL_CONDITION_SATISFIED) continue;
+        p_glBindBuffer(GL_PIXEL_PACK_BUFFER, probe[i].pbo);
+        const uint8_t *m = p_glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, (GLsizeiptr)probe[i].size, GL_MAP_READ_BIT);
+        if (m) {
+            int n = probe[i].n;
+            for (int sd = 0; sd < 2; sd++) {
+                probe_fill[sd] = column_empty(m + (size_t)sd * n * 4, n);
+                probe_flat[sd] = edge_is_flat(m + (size_t)2 * n * 4 + (size_t)sd * EDGE_W * EDGE_H * 4, probe_col[sd]);
+            }
+            p_glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+            probe_have = 1;
+        }
+        p_glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+        for (int j = 0; j < PROBE_N; j++)                  /* this one and any older: done with */
+            if (probe[j].fence && (j == i || (probe_next - 1 - j + PROBE_N) % PROBE_N > (probe_next - 1 - i + PROBE_N) % PROBE_N)) {
+                p_glDeleteSync(probe[j].fence); probe[j].fence = 0;
+            }
+        return;
+    }
+}
+static void probe_drop(void) {                             /* side bars not in play: forget what was read */
+    if (!probe_have && !probe[0].fence && !probe[1].fence && !probe[2].fence) return;
+    for (int j = 0; j < PROBE_N; j++) if (probe[j].fence) { p_glDeleteSync(probe[j].fence); probe[j].fence = 0; }
+    probe_have = 0;
+}
+static void probe_issue(int cx0, int cx1, int y0, int y1) {  /* columns just outside the picture, and its edges */
+    int i = probe_next, n = y1 - y0;
+    if (probe[i].fence) { p_glDeleteSync(probe[i].fence); probe[i].fence = 0; }   /* never collected: overwrite */
+    size_t need = (size_t)2 * n * 4 + (size_t)2 * EDGE_W * EDGE_H * 4;
+    if (!probe[i].pbo) p_glGenBuffers(1, &probe[i].pbo);
+    p_glBindBuffer(GL_PIXEL_PACK_BUFFER, probe[i].pbo);
+    if (probe[i].size < need) { p_glBufferData(GL_PIXEL_PACK_BUFFER, (GLsizeiptr)need, NULL, GL_STREAM_READ); probe[i].size = need; }
+    p_glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    p_glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
+    p_glReadPixels(cx0, y0, 1, n, GL_RGBA, GL_UNSIGNED_BYTE, (void *)0);
+    p_glReadPixels(cx1, y0, 1, n, GL_RGBA, GL_UNSIGNED_BYTE, (void *)(uintptr_t)((size_t)n * 4));
+    for (int sd = 0; sd < 2; sd++) {
+        p_glBindFramebuffer(GL_READ_FRAMEBUFFER, edge_fbo[sd]);
+        p_glReadPixels(0, 0, EDGE_W, EDGE_H, GL_RGBA, GL_UNSIGNED_BYTE, (void *)(uintptr_t)((size_t)2 * n * 4 + (size_t)sd * EDGE_W * EDGE_H * 4));
+    }
+    p_glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    probe[i].n = n;
+    probe[i].fence = p_glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
+    probe_next = (i + 1) % PROBE_N;
+    p_glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+}
+/* side = 0 left, 1 right; picture columns [px0, px1) of the FBO, rows [y0, y1). async: edge_tex already
+ * holds this frame's edges, flat colours from the probe */
+static void draw_bars(int px0, int px1, int y0, int y1, int left, int right, int async) {
+    if (!edges_ok(px0, px1, y0, y1)) return;
+    int flat[2] = { 0, 0 }; float col[2][3] = { { 0 } };
+    if (async) {
+        for (int i = 0; i < 2; i++) { flat[i] = probe_flat[i]; memcpy(col[i], probe_col[i], sizeof col[i]); }
+    } else {
+        edge_blit(px0, px1, y0, y1);
+        for (int i = 0; i < 2; i++) {
+            static uint8_t px[EDGE_W * EDGE_H * 4];
+            p_glBindFramebuffer(GL_READ_FRAMEBUFFER, edge_fbo[i]); p_glPixelStorei(GL_PACK_ALIGNMENT, 1);
+            p_glReadPixels(0, 0, EDGE_W, EDGE_H, GL_RGBA, GL_UNSIGNED_BYTE, px);
+            flat[i] = edge_is_flat(px, col[i]);
+        }
     }
     p_glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     p_glViewport(0, 0, fb_w, fb_h);
@@ -2370,19 +2463,24 @@ void dc_pvr_gl_render(int scale) {
          * a bar: menus, the title, the panel beside Rush's split-screen views. One pixel column each,
          * just outside the picture. */
         int y0 = fb_h - (f.clip_y1 + 1) * scale, y1 = fb_h - f.clip_y0 * scale, fill[2] = { 0, 0 };
-        if (y1 > y0 && px0 > 4 && px1 < fb_w - 4) {
+        int async = dc_pvr_gl_async_readback && !capturing && edges_ok(px0, px1, y0, y1) && y1 > y0 && px0 > 4 && px1 < fb_w - 4;
+        if (async) {                                         /* see dc_pvr_gl_async_readback */
+            probe_collect();
+            edge_blit(px0, px1, y0, y1);
+            probe_issue(px0 - 3, px1 + 2, y0, y1);
+            if (probe_have) { fill[0] = probe_fill[0]; fill[1] = probe_fill[1]; }
+        } else if (y1 > y0 && px0 > 4 && px1 < fb_w - 4) {
             static uint8_t *col; static int cap_col;
             if (y1 - y0 > cap_col) { cap_col = y1 - y0; col = realloc(col, (size_t)cap_col * 4); }
             p_glBindFramebuffer(GL_FRAMEBUFFER, fbo); p_glPixelStorei(GL_PACK_ALIGNMENT, 1);
             for (int sd = 0; sd < 2; sd++) {
                 p_glReadPixels(sd ? px1 + 2 : px0 - 3, y0, 1, y1 - y0, GL_RGBA, GL_UNSIGNED_BYTE, col);
-                int lit = 0;
-                for (int y = 0; y < y1 - y0; y++) if (col[y * 4] + col[y * 4 + 1] + col[y * 4 + 2] > 24) lit++;
-                fill[sd] = lit * 20 < y1 - y0;                       /* under 5% of the column drawn */
+                fill[sd] = column_empty(col, y1 - y0);
             }
         }
-        if (fill[0] || fill[1]) draw_bars(px0, px1, y0, y1, fill[0], fill[1]);
-    }
+        if (fill[0] || fill[1]) draw_bars(px0, px1, y0, y1, fill[0], fill[1], async);
+        if (!async && !capturing) probe_drop();
+    } else if (!capturing) probe_drop();
     pic_offy = ((float)(f.height - 1 - f.clip_y1) - (float)f.clip_y0) * 0.5f / (float)f.height;
     pic_y0 = fb_h - (f.clip_y1 + 1) * scale; pic_y1 = fb_h - f.clip_y0 * scale;
     /* odd clip or one band (a split-screen view, a loading screen's progress bar): the whole picture

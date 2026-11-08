@@ -96,7 +96,8 @@ def main():
             v = -v
         return v - (1 << 64) if v >= 1 << 63 else v
 
-    # waiting / system-call leaves: what called them (newer profiles carry lr and 4 stack frames)
+    # waiting / system-call leaves: what called them (newer profiles carry lr and 4 or 10 stack frames)
+    ours = ("dc_", "f_", "fs_", "pvr", "osd_", "aica", "present", "batch_", "draw_", "probe_", "edge_", "texture_for", "load_rgb", "on_vblank", "ready_task")
     plumbing = ("svc", "mutex", "rmutex", "condvar", "__libnx", "_lock", "__retarget_lock", "__lock", "barrier", "semaphore")
     for line in open(a.profile):
         line = line.strip()
@@ -107,7 +108,7 @@ def main():
         n += 1
         hits[name] += 1
         if name.startswith("svc") and len(cols) > 1:
-            path = []
+            path, frm = [], None
             for t in cols[1:]:
                 v = num(t)
                 if v == 0:
@@ -115,10 +116,15 @@ def main():
                 c = name_of(v)
                 if c.startswith(plumbing) or (path and path[-1] == c):
                     continue
-                path.append(c)
-                if len(path) == 3:
+                if len(path) < 3:
+                    path.append(c)
+                elif c.startswith(ours):              # deeper profiles: the first of our own code that led there
+                    frm = c
                     break
-            chains[name + "  <-  " + "  <-  ".join(path or ["?"])] += 1
+            chain = name + "  <-  " + "  <-  ".join(path or ["?"])
+            if frm and not any(p.startswith(ours) for p in path):
+                chain += "  ...  " + frm
+            chains[chain] += 1
     for name, v in hits.items():
         if name.startswith(("f_", "fs_")):
             groups["game code (f_ / fs_)"] += v
