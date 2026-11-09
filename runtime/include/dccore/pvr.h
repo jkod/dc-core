@@ -23,6 +23,9 @@ int  dc_pvr_display(uint8_t *rgb, int maxw, int maxh, int *w, int *h);
  * software renderer's TA collection: call dc_pvr_sw_install() too. */
 int  dc_pvr_gl_init(void *(*getproc)(const char *name));
 void dc_pvr_gl_render(int scale);
+/* on the game's thread, before a dc_pvr_gl_render on another: takes the frame (TA lists, registers,
+ * textures) so that render reads nothing of the console. 0: not this frame, render the usual way. */
+int  dc_pvr_gl_prepare(void);
 void dc_pvr_gl_present(int win_w, int win_h, int stretch);
 void dc_pvr_gl_read(uint8_t *rgb, int *w, int *h);
 void dc_pvr_gl_read_window(uint8_t *rgb, int win_w, int win_h);   /* the presented window (before swapping), RGB8 */

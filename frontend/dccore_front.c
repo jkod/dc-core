@@ -168,6 +168,13 @@ static int shows_render(void) {
 /* where the time goes (Show FPS, --stats): rendering, presenting (with vsync: waiting for the display),
  * pacing sleeps; the sound chip in dc_prof_aica; the rest is the game's own code */
 static Uint64 prof_render, prof_present, prof_idle;
+/* the render thread (rt_*, below present_window) */
+static int rt_on;
+static void rt_wait_idle(void);
+static void rt_call(void (*fn)(void *), void *arg);
+static void rt_render(int scale);
+static void job_capture(void *u) { (void)u; if (!dc_pvr_gl_capture_to_vram(cfg.scale)) { dc_pvr_sw_render(); dc_pvr_gl_capture(cfg.scale); } }
+static void job_sw_render(void *u);
 static uint64_t prof_clock(void) { return SDL_GetPerformanceCounter(); }
 static void on_render(void) {
     /* clip 0..0 (Soulcalibur's VS screen while the stage loads): nothing is drawn, the picture stays */
@@ -175,7 +182,8 @@ static void on_render(void) {
     /* render to texture (FB_W_SOF1 bit 24): the frame goes into VRAM as a texture the game draws later
      * (Tennis 2K2's crossfades), not to the screen; the software renderer writes it there */
     if ((dc_pvr_reg(0x060) >> 24) & 1) {
-        if (!dc_pvr_gl_capture_to_vram(cfg.scale)) { dc_pvr_sw_render(); dc_pvr_gl_capture(cfg.scale); }
+        if (rt_on) rt_call(job_capture, NULL);              /* VRAM is read back at once: the game waits */
+        else job_capture(NULL);
         return;
     }
     static long skip = -1;                                 /* debugging: DC_RENDER_EVERY=n draws every nth frame */
@@ -188,9 +196,12 @@ static void on_render(void) {
     static int sw = -1;                                    /* DC_SW_RENDER=1: software renderer (diagnosing GPU issues) */
     if (sw < 0) { const char *e = getenv("DC_SW_RENDER"); sw = e && *e == '1'; }
     if (sw) {
-        static uint8_t rgb[1280 * 1024 * 3]; int w, h;
-        dc_pvr_sw_render();
-        if (dc_pvr_display(rgb, 1280, 1024, &w, &h) == 0) dc_pvr_gl_load_rgb(rgb, w, h);
+        if (rt_on) rt_call(job_sw_render, NULL); else job_sw_render(NULL);
+    } else if (rt_on) {
+        rt_render(cfg.scale);                               /* drawn and presented on the render thread */
+        note_render_target();
+        renders++; last_render_frame = (unsigned long)vblanks;
+        return;
     } else { Uint64 t = SDL_GetPerformanceCounter(); dc_pvr_gl_render(cfg.scale); prof_render += SDL_GetPerformanceCounter() - t; }
     note_render_target();
     need_present = 1;
@@ -339,10 +350,13 @@ static void print_stats(void) {
 static uint8_t win_rgb[1920 * 1080 * 3 * 4]; static int win_rgb_w, win_rgb_h;
 static int shot_window(void) { static int v = -1; if (v < 0) { const char *e = getenv("DC_SHOTS_WINDOW"); v = e && *e == '1'; } return v; }
 static void toast(const char *msg);
+static void job_load_rgb(void *u) { struct { uint8_t *p; int w, h; } *a = u; dc_pvr_gl_load_rgb(a->p, a->w, a->h); }
+static void job_read(void *u) { struct { uint8_t *p; int *w, *h; } *a = u; dc_pvr_gl_read(a->p, a->w, a->h); }
 static int screenshot_to(const char *path) {
     int w = 0, h = 0;
     static uint8_t *rgb; rgb = realloc(rgb, 1920 * 4 * 1440 * 4 * 3);
     if (shot_window() && win_rgb_w) { w = win_rgb_w; h = win_rgb_h; size_t n = (size_t)w * (size_t)h * 3; memcpy(rgb, win_rgb, n < sizeof win_rgb ? n : sizeof win_rgb); }
+    else if (rt_on) { struct { uint8_t *p; int *w, *h; } a = { rgb, &w, &h }; rt_call(job_read, &a); }
     else dc_pvr_gl_read(rgb, &w, &h);
     if (w <= 0) return 0;
     SDL_Surface *s = SDL_CreateRGBSurfaceWithFormatFrom(rgb, w, h, 24, w * 3, SDL_PIXELFORMAT_RGB24);
@@ -475,7 +489,13 @@ int dc_front_fast;
 
 static void osd_overlays(int ww, int wh);
 static int aica_audio_read(int16_t *dst, int frames);
+static void rt_present(void);
+static void present_gl(void);
 static void present_window(void) {
+    if (rt_on) { need_present = 0; rt_present(); return; }   /* on the render thread, when it is free */
+    present_gl();
+}
+static void present_gl(void) {
     Uint64 pt = SDL_GetPerformanceCounter();
     int dw, dh; SDL_GL_GetDrawableSize(win, &dw, &dh);
     /* the window's shape, also in 4:3: the widescreen target uses it (the next frame fills the window),
@@ -488,6 +508,112 @@ static void present_window(void) {
     SDL_GL_SwapWindow(win);
     need_present = 0;
     prof_present += SDL_GetPerformanceCounter() - pt;
+}
+
+/* ------------------------------------------------------------------ render thread
+ * The frame is drawn and presented on its own thread (and core) while the game goes on with the next
+ * one, as the PowerVR draws beside the SH-4 on the console. At STARTRENDER the game's thread waits for
+ * the previous frame to be done, takes what the drawing reads of the console (dc_pvr_gl_prepare) and
+ * hands it over. The thread owns the OpenGL context; anything else that draws or reads back (render to
+ * a texture, the software renderer, CPU-drawn pictures, screenshots) runs there with the game waiting
+ * (rt_call). Presenting without a new frame (menu, toasts, Show FPS) is asked for and done when the
+ * thread is free. Default on the Switch; DC_RENDER_THREAD=1 / 0 elsewhere / to turn it off. */
+static void *rt_thr;
+static SDL_mutex *rt_mx; static SDL_cond *rt_cv, *rt_done_cv;
+static int rt_job, rt_busy, rt_quit, rt_want_present, rt_scale;   /* under rt_mx; job: 1 render, 2 call */
+static void (*rt_fn)(void *); static void *rt_arg;
+static int rt_main(void *u) {
+    (void)u;
+    SDL_GL_MakeCurrent(win, glc);
+    SDL_LockMutex(rt_mx);
+    for (;;) {
+        while (!rt_job && !rt_want_present && !rt_quit) SDL_CondWait(rt_cv, rt_mx);
+        if (rt_quit) break;
+        int job = rt_job; rt_busy = 1;
+        if (job == 1 || !job) rt_want_present = 0;
+        SDL_UnlockMutex(rt_mx);
+        if (job == 1) {
+            Uint64 t = SDL_GetPerformanceCounter();
+            dc_pvr_gl_render(rt_scale);
+            prof_render += SDL_GetPerformanceCounter() - t;
+            present_gl();
+        } else if (job == 2) rt_fn(rt_arg);
+        else present_gl();
+        SDL_LockMutex(rt_mx);
+        if (job) rt_job = 0;
+        rt_busy = 0;
+        SDL_CondBroadcast(rt_done_cv);
+    }
+    SDL_UnlockMutex(rt_mx);
+    SDL_GL_MakeCurrent(win, NULL);
+    return 0;
+}
+static void rt_wait_idle(void) {
+    if (!rt_on) return;
+    SDL_LockMutex(rt_mx);
+    while (rt_job || rt_busy) SDL_CondWait(rt_done_cv, rt_mx);
+    SDL_UnlockMutex(rt_mx);
+}
+static void rt_post(int job) {                             /* the thread is idle (rt_wait_idle) */
+    SDL_LockMutex(rt_mx); rt_job = job; SDL_CondSignal(rt_cv); SDL_UnlockMutex(rt_mx);
+}
+static void rt_call(void (*fn)(void *), void *arg) {
+    rt_wait_idle();
+    rt_fn = fn; rt_arg = arg;
+    rt_post(2);
+    rt_wait_idle();
+}
+static void job_render_sync(void *u) { (void)u; Uint64 t = SDL_GetPerformanceCounter(); dc_pvr_gl_render(rt_scale); prof_render += SDL_GetPerformanceCounter() - t; present_gl(); }
+static void rt_render(int scale) {
+    rt_wait_idle();                                         /* the last frame drawn: its snapshot is free */
+    rt_scale = scale;
+    if (dc_pvr_gl_prepare()) rt_post(1);                    /* the game goes on meanwhile */
+    else rt_call(job_render_sync, NULL);                    /* too much to take: drawn reading the console, the game waits */
+}
+static void rt_present(void) {
+    SDL_LockMutex(rt_mx);
+    rt_want_present = 1;
+    SDL_CondSignal(rt_cv);
+    SDL_UnlockMutex(rt_mx);
+}
+static void rt_start(void) {
+    const char *e = getenv("DC_RENDER_THREAD");
+#ifdef __SWITCH__
+    int on = !(e && *e == '0');
+#else
+    int on = e && *e == '1';
+#endif
+    if (!on || rt_thr) return;
+    if (!rt_mx) { rt_mx = SDL_CreateMutex(); rt_cv = SDL_CreateCond(); rt_done_cv = SDL_CreateCond(); }
+    if (!rt_mx || !rt_cv || !rt_done_cv) return;
+    rt_job = rt_busy = rt_quit = rt_want_present = 0;
+    SDL_GL_MakeCurrent(win, NULL);                          /* the context moves to the thread */
+#ifdef __SWITCH__
+    rt_thr = dc_nx_thread_start(rt_main, NULL, 2);          /* core 2: game on 0, sound on 1 */
+#else
+    rt_thr = SDL_CreateThread(rt_main, "render", NULL);
+#endif
+    if (!rt_thr) { SDL_GL_MakeCurrent(win, glc); return; }
+    rt_on = 1;
+    fprintf(stderr, "drawing on its own thread\n");
+}
+static void rt_stop(void) {
+    if (!rt_thr) return;
+    rt_wait_idle();
+    SDL_LockMutex(rt_mx); rt_quit = 1; SDL_CondBroadcast(rt_cv); SDL_UnlockMutex(rt_mx);
+#ifdef __SWITCH__
+    dc_nx_thread_join(rt_thr);
+#else
+    SDL_WaitThread(rt_thr, NULL);
+#endif
+    rt_thr = NULL; rt_on = 0;
+    SDL_GL_MakeCurrent(win, glc);
+}
+static uint8_t sw_rgb[1280 * 1024 * 3];
+static void job_sw_render(void *u) {
+    (void)u; int w, h;
+    dc_pvr_sw_render();
+    if (dc_pvr_display(sw_rgb, 1280, 1024, &w, &h) == 0) dc_pvr_gl_load_rgb(sw_rgb, w, h);
 }
 
 /* the game pauses and goes quiet while its window is not focused (another window clicked, minimised,
@@ -587,7 +713,9 @@ static void on_vblank(uint64_t f) {
                 lit_rows += lit;
             }
             if (lit_rows > 0 && lit_rows <= 8 && (x1 - x0) * 4 >= w * 3) memset(rgb, 0, (size_t)w * h * 3);
-            dc_pvr_gl_load_rgb(rgb, w, h); need_present = 1;
+            if (rt_on) { struct { uint8_t *p; int w, h; } a = { rgb, w, h }; rt_call(job_load_rgb, &a); }
+            else dc_pvr_gl_load_rgb(rgb, w, h);
+            need_present = 1;
         }
     }
     {   /* burst capture: F12 held for more than 0.3 s, or BURST on the controls bar: a picture every 100 ms */
@@ -847,6 +975,7 @@ int dc_front_open(const dc_front_config *c) {
     } else SDL_GL_SetSwapInterval(0);
     if (dc_pvr_gl_init(getproc)) return -1;
     dc_pvr_sw_install();                                   /* TA collection (shared by the backends) */
+    rt_start();
     dc_maple_install();
     if (!cfg.no_vmu) {                                     /* VMU in controller A's first slot */
         char path[1024]; char *dir = NULL;
@@ -905,6 +1034,7 @@ int dc_front_open(const dc_front_config *c) {
 }
 
 void dc_front_close(void) {
+    rt_stop();
     aica_thread_stop();
     wav_close();
     for (int k = 0; k < 4; k++) if (pads[k]) SDL_GameControllerClose(pads[k]);
@@ -1008,6 +1138,7 @@ static int front_load_now(void) {
     if (osd_open) { osd_open = 0; while (!osd_all_released()) osd_frame(); }   /* from the menu: the game doesn't see the press */
     need_present = 1;
     if (audio) audio_pause(0);
+    rt_wait_idle();                                         /* the drawing done with the frame it took */
     dc_coro_leave(&load_jb);
     return 1;                                               /* not reached */
 }
@@ -1020,6 +1151,7 @@ static int front_reset_now(void) {
     while (!osd_all_released()) osd_frame();               /* the game doesn't see the press */
     need_present = 1;
     if (audio) audio_pause(0);
+    rt_wait_idle();                                         /* the drawing done with the frame it took */
     dc_coro_leave(&reset_jb);
     return 1;                                               /* not reached */
 }

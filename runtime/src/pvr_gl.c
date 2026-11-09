@@ -25,6 +25,42 @@
 #include <sys/stat.h>   /* first: newlib (Switch) #defines quad, used as a name below */
 #include "dccore/texpack.h"
 
+/* Drawing on another thread (dc_pvr_gl_prepare): what a frame reads of the console -- the TA's lists,
+ * the PowerVR registers, decoded textures -- is taken on the game's thread at STARTRENDER, and the
+ * drawing reads only that, while the game goes on. */
+static uint32_t snap_reg[0x2000 / 4]; static int snap_on;
+static inline uint32_t preg(uint32_t o) { return snap_on ? snap_reg[(o & 0x1FFC) >> 2] : (dc_pvr_reg)(o); }
+#define dc_pvr_reg(o) preg(o)
+enum { TMAP = 2048 };                    /* (tcw, tsp size) -> the texture, decoded at prepare */
+static struct { uint32_t tcw, tsz, stamp; pvr_texinfo ti; } tmap[TMAP];
+static uint32_t tmap_stamp; static int tmap_on, tmap_n, tmap_miss;
+static unsigned tmap_slot(uint32_t tcw, uint32_t tsz) { uint32_t h = tcw * 2654435761u ^ tsz * 40503u; return (h ^ (h >> 15)) & (TMAP - 1); }
+static int tmap_add(uint32_t tcw, uint32_t tsp) {
+    uint32_t tsz = tsp & 0x3F;
+    for (unsigned i = tmap_slot(tcw, tsz), k = 0; k < TMAP; k++, i = (i + 1) & (TMAP - 1)) {
+        if (tmap[i].stamp != tmap_stamp) {
+            tmap[i].stamp = tmap_stamp; tmap[i].tcw = tcw; tmap[i].tsz = tsz;
+            pvr_get_texture(tcw, tsp, &tmap[i].ti);
+            return ++tmap_n;
+        }
+        if (tmap[i].tcw == tcw && tmap[i].tsz == tsz) return tmap_n;
+    }
+    return 1 << 30;
+}
+static void tex_get(uint32_t tcw, uint32_t tsp, pvr_texinfo *ti) {
+    if (tmap_on) {
+        uint32_t tsz = tsp & 0x3F;
+        for (unsigned i = tmap_slot(tcw, tsz), k = 0; k < TMAP; k++, i = (i + 1) & (TMAP - 1)) {
+            if (tmap[i].stamp != tmap_stamp) break;
+            if (tmap[i].tcw == tcw && tmap[i].tsz == tsz) { *ti = tmap[i].ti; return; }
+        }
+        tmap_miss++;                                         /* not seen at prepare: decoded here after all */
+    }
+    pvr_get_texture(tcw, tsp, ti);
+}
+static pvr_frame snap_f; static pvr_vtx *snap_v; static pvr_poly *snap_p; static pvr_modtri *snap_m;
+static int snap_cv, snap_cp, snap_cm;
+
 /* ------------------------------------------------------------------ minimal GL binding */
 typedef unsigned int GLenum, GLuint, GLbitfield; typedef int GLint, GLsizei; typedef float GLfloat;
 typedef unsigned char GLboolean, GLubyte; typedef char GLchar; typedef ptrdiff_t GLsizeiptr, GLintptr; typedef double GLdouble;
@@ -460,7 +496,7 @@ static uint8_t *tex_replacement(const pvr_texinfo *ti, uint64_t h, unsigned *fla
 
 static GLuint texture_for(uint32_t tcw, uint32_t tsp) {
     pvr_texinfo ti;
-    pvr_get_texture(tcw, tsp, &ti);
+    tex_get(tcw, tsp, &ti);
     int slot = -1, oldest = 0;
     for (int i = 0; i < GLTEX; i++) {
         if (gtex[i].name && gtex[i].id == ti.id) {
@@ -1583,7 +1619,7 @@ static int black_textured(const pvr_poly *p, const pvr_vtx *v) {
     if (p->tcw1 && p->twovol) return 0;
     for (int k = 0; k < p->n; k++)
         if (((p->isp >> 24) & 1) && (v[k].o[0] > 0.06f || v[k].o[1] > 0.06f || v[k].o[2] > 0.06f)) return 0;
-    pvr_texinfo ti; pvr_get_texture(p->tcw, p->tsp, &ti);
+    pvr_texinfo ti; tex_get(p->tcw, p->tsp, &ti);
     if (!ti.px || ti.w <= 0 || ti.h <= 0) return 0;
     float u0 = v[0].u, u1 = v[0].u, w0 = v[0].v, w1 = v[0].v;
     for (int k = 1; k < p->n; k++) {
@@ -1669,12 +1705,42 @@ static int backdrop_card(const pvr_frame *f, int RW) {
     return 0;
 }
 
+/* on the game's thread: take what the next dc_pvr_gl_render reads of the console (see snap_on), so it
+ * can run on another thread while the game goes on. 0: not possible this frame (too many textures to
+ * keep decoded at once); render the usual way then. */
+int dc_pvr_gl_prepare(void) {
+    snap_on = tmap_on = 0;
+    pvr_frame f; pvr_get_frame(&f);
+    #define SNAP_GROW(buf, cap, n) if ((n) > cap) { cap = (n) + (n) / 2 + 64; buf = realloc(buf, (size_t)cap * sizeof *buf); if (!buf) { cap = 0; return 0; } }
+    SNAP_GROW(snap_v, snap_cv, f.nverts) SNAP_GROW(snap_p, snap_cp, f.npolys) SNAP_GROW(snap_m, snap_cm, f.nmods)
+    #undef SNAP_GROW
+    if (f.nverts) memcpy(snap_v, f.verts, (size_t)f.nverts * sizeof *snap_v);
+    if (f.npolys) memcpy(snap_p, f.polys, (size_t)f.npolys * sizeof *snap_p);
+    if (f.nmods) memcpy(snap_m, f.mods, (size_t)f.nmods * sizeof *snap_m);
+    snap_f = f; snap_f.verts = snap_v; snap_f.polys = snap_p; snap_f.mods = snap_m;
+    for (uint32_t i = 0; i < 0x2000 / 4; i++) snap_reg[i] = (dc_pvr_reg)(i * 4);
+    tmap_stamp++; tmap_n = 0; tmap_miss = 0;
+    if (!tmap_stamp) { memset(tmap, 0, sizeof tmap); tmap_stamp = 1; }
+    for (int i = 0; i < f.npolys; i++) {                 /* the decoded textures stay in pvr_sw's cache (512) */
+        const pvr_poly *p = &f.polys[i];
+        if (!((p->isp >> 25) & 1)) continue;
+        if (tmap_add(p->tcw, p->tsp) > 384) return 0;
+        if (p->twovol && tmap_add(p->tcw1, p->tsp1) > 384) return 0;
+    }
+    snap_on = tmap_on = 1;
+    return 1;
+}
+static void render_frame(int scale);
 void dc_pvr_gl_render(int scale) {
+    render_frame(scale);
+    snap_on = tmap_on = 0;
+}
+static void render_frame(int scale) {
     if (!ready) return;
     if (scale < 1) scale = 1;
     frame_no++;
     pvr_frame f;
-    pvr_get_frame(&f);
+    if (snap_on) f = snap_f; else pvr_get_frame(&f);
     tp_frame = &f;
     /* Several renders into the same framebuffer, each clipped to its own band of lines (FB_Y_CLIP), make
      * up one picture (Looney Tunes Space Race's split screen: top view, bottom view, top strip): a

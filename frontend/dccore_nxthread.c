@@ -15,7 +15,8 @@ void *dc_nx_thread_start(int (*fn)(void *), void *arg, int core) {
     nx_thread *x = calloc(1, sizeof *x);
     if (!x) return NULL;
     x->fn = fn; x->arg = arg;
-    if (R_FAILED(threadCreate(&x->t, entry, x, NULL, 0x40000, 0x2C, core))) { free(x); return NULL; }
+    /* 2 MB: the render thread runs Mesa, whose shader compiler (variants built at draw time) recurses deep */
+    if (R_FAILED(threadCreate(&x->t, entry, x, NULL, 0x200000, 0x2C, core))) { free(x); return NULL; }
     if (R_FAILED(threadStart(&x->t))) { threadClose(&x->t); free(x); return NULL; }
     return x;
 }
