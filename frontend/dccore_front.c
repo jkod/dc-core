@@ -88,15 +88,13 @@ static void pad_close(SDL_JoystickID id) {
 }
 #ifdef __SWITCH__
 static SDL_Joystick *joy;
-/* libnx: the CPU boost mode (1785 MHz instead of 1020; the system may lower the GPU clock in it), set
- * from the on-screen menu (CPU BOOST) and kept in osd.cfg */
-extern unsigned int appletSetCpuBoostMode(int mode);
-static int boosted;
-static void set_boost(int on) {
-    if (on == boosted) return;
-    unsigned int rc = appletSetCpuBoostMode(on ? 1 : 0);
-    if (rc == 0) boosted = on;
-    fprintf(stderr, "CPU boost %s%s\n", on ? "on" : "off", rc ? " (refused: start from a game, not the Album)" : "");
+/* the CPU clock, from the on-screen menu (CPU CLOCK) and kept in osd.cfg: 0 = the system's (dccore_nxthread.c) */
+int dc_nx_set_cpu_mhz(int mhz);
+static void set_cpu_clock(int mhz) {
+    int r = dc_nx_set_cpu_mhz(mhz);
+    if (r == -1) fprintf(stderr, "CPU clock: Horizon OC's profile decides\n");
+    else if (r < 0) fprintf(stderr, "CPU clock: can't be set here (%d)\n", r);
+    else fprintf(stderr, "CPU clock %d MHz\n", r);
 }
 #else
 /* a joystick SDL has no gamepad mapping for: buttons 0-3 = A B X Y, 7 or 9 = Start, axes 0/1 = stick,
@@ -1044,7 +1042,7 @@ void dc_front_close(void) {
 #ifdef __SWITCH__
     if (joy) SDL_JoystickClose(joy);
     joy = NULL;
-    set_boost(0);
+    set_cpu_clock(0);
 #endif
     /* the on-screen menu (and the focus pause) leave the device paused; on the Switch, closing a paused
      * device crashed SDL's audio thread (Reset / Quit from the menu): empty it and let it run first */

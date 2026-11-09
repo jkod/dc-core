@@ -68,7 +68,10 @@ static const struct { char c; uint8_t r[7]; } osd_font[] = {
 /* the items, top to bottom */
 enum { OI_RESUME, OI_RESET, OI_SAVE, OI_LOAD, OI_RES, OI_AA, OI_SHARP, OI_ASPECT, OI_SCAN, OI_FPS, OI_RUMBLE, OI_FS, OI_FRATE,
        OI_SPEED, OI_BAR, OI_PROF, OI_QUIT, OSD_ITEMS };
-static int osd_scan, osd_fps, osd_boost;
+static int osd_scan, osd_fps;
+/* Switch: CPU CLOCK. 1224 MHz by default, the smallest step over the system's 1020 */
+static const int cpu_mhz[4] = { 0, 1224, 1581, 1785 };
+static int osd_cpu = 1;
 int osd_bar;                                 /* the controls bar */
 static int osd_rumble[4] = { 2, 2, 2, 2 };   /* per port: 0 off, 1 low, 2 normal, 3 strong */
 static int osd_port;                         /* the port whose controller opened the menu (keyboard: A) */
@@ -100,7 +103,8 @@ static void osd_load(void) {
         if (!strncmp(line, "sharpen=", 8)) osd_sharp = atoi(line + 8) & 3;
         if (!strncmp(line, "aa=", 3)) { int a = atoi(line + 3); osd_aa = a >= 8 ? 8 : a >= 4 ? 4 : a >= 2 ? 2 : 0; }
         if (!strncmp(line, "fps=", 4)) osd_fps = atoi(line + 4) != 0;
-        if (!strncmp(line, "boost=", 6)) osd_boost = atoi(line + 6) != 0;
+        if (!strncmp(line, "boost=", 6) && atoi(line + 6)) osd_cpu = 3;    /* CPU BOOST ON, before CPU CLOCK */
+        if (!strncmp(line, "cpu=", 4)) { int m = atoi(line + 4); osd_cpu = 0; for (int i = 1; i < 4; i++) if (m >= cpu_mhz[i]) osd_cpu = i; }
         if (!strncmp(line, "bar=", 4)) osd_bar = atoi(line + 4) != 0;
         if (!strncmp(line, "framerate=", 10) && dc_front_fps60 >= 0) dc_front_fps60 = atoi(line + 10) >= 60;
         if (!strncmp(line, "rumble_", 7) && line[7] >= 'a' && line[7] <= 'd' && line[8] == '=') osd_rumble[line[7] - 'a'] = atoi(line + 9) & 3;
@@ -113,14 +117,14 @@ static void osd_load(void) {
     dc_pvr_gl_sharpen = sharp_amount[osd_sharp & 3];
     if (getenv("DC_PLAIN_SCALING")) dc_pvr_gl_plain_scaling = 1;   /* tests: the old linear blit to the window */
 #ifdef __SWITCH__
-    if (osd_boost) set_boost(1);
+    if (cpu_mhz[osd_cpu]) set_cpu_clock(cpu_mhz[osd_cpu]);
 #endif
 }
 static void osd_save(void) {
     if (!osd_cfg_path[0]) return;
     FILE *f = fopen(osd_cfg_path, "w");
     if (!f) return;
-    fprintf(f, "scanlines=%d\nfps=%d\nboost=%d\nbar=%d\naa=%d\nsharpen=%d\n", osd_scan, osd_fps, osd_boost, osd_bar, osd_aa, osd_sharp);
+    fprintf(f, "scanlines=%d\nfps=%d\nbar=%d\naa=%d\nsharpen=%d\ncpu=%d\n", osd_scan, osd_fps, osd_bar, osd_aa, osd_sharp, cpu_mhz[osd_cpu]);
     if (dc_front_fps60 >= 0) fprintf(f, "framerate=%d\n", dc_front_fps60 ? 60 : 30);
     for (int p = 0; p < 4; p++) fprintf(f, "rumble_%c=%d\n", 'a' + p, osd_rumble[p]);
     fclose(f);
@@ -249,7 +253,7 @@ static const char *osd_label(int i, char *buf, size_t n) {
         if (cfg.no_rumble) return "";
         snprintf(buf, n, "RUMBLE PAD %c  < %s >", 'A' + osd_port, rum[osd_rumble[osd_port] & 3]); return buf;
 #ifdef __SWITCH__
-    case OI_FS: snprintf(buf, n, "CPU BOOST     < %s >", osd_boost ? "ON" : "OFF"); return buf;
+    case OI_FS: if (!osd_cpu) return "CPU CLOCK     < STOCK >"; snprintf(buf, n, "CPU CLOCK     < %d MHZ >", cpu_mhz[osd_cpu]); return buf;
 #else
     case OI_FS: snprintf(buf, n, "FULLSCREEN    < %s >", cfg.fullscreen ? "ON" : "OFF"); return buf;
 #endif
@@ -610,7 +614,7 @@ static void osd_run(int port) {
                 osd_rumble_pad(osd_port, 0.6f * osd_rumble_scale(osd_port), 250);
             }
 #ifdef __SWITCH__
-            if (sel == OI_FS) { osd_boost = !osd_boost; set_boost(osd_boost); osd_save(); }
+            if (sel == OI_FS) { osd_cpu = (osd_cpu + 4 + step) % 4; set_cpu_clock(cpu_mhz[osd_cpu]); osd_save(); }
 #else
             if (sel == OI_FS) { cfg.fullscreen = !cfg.fullscreen; SDL_SetWindowFullscreen(win, cfg.fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0); }
 #endif

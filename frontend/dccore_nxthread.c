@@ -6,6 +6,49 @@
 
 typedef struct { Thread t; int (*fn)(void *); void *arg; } nx_thread;
 
+/* The CPU clock (CPU CLOCK in the menu), through clkrst: only the CPU's, the GPU keeps its own. (The
+ * applet's CPU boost mode, used before, gives 1785 MHz but is the system's loading mode and may
+ * drop the GPU clock.) The rate is only ever raised over what the system set, the old one comes back
+ * at exit, and it is put back after the system resets clocks (docking, focus, resume). Left alone
+ * when Horizon OC's own clock service runs: its profile decides. Returns the clock now, in MHz. */
+static ClkrstSession clk_s; static int clk_open, clk_inited, clk_hooked; static u32 clk_old, clk_set;
+static AppletHookCookie clk_cookie;
+static int service_running(const char *name) {
+    Handle h;
+    Result rc = smRegisterService(&h, smEncodeName(name), false, 1);
+    if (R_SUCCEEDED(rc)) { smUnregisterService(smEncodeName(name)); svcCloseHandle(h); return 0; }
+    return rc == MAKERESULT(21, 4);                         /* already registered */
+}
+static void clk_hook(AppletHookType hook, void *u) {
+    (void)u;
+    if (hook != AppletHookType_OnFocusState && hook != AppletHookType_OnOperationMode &&
+        hook != AppletHookType_OnPerformanceMode && hook != AppletHookType_OnResume) return;
+    if (clk_open && clk_set && appletGetFocusState() == AppletFocusState_InFocus) clkrstSetClockRate(&clk_s, clk_set);
+}
+int dc_nx_set_cpu_mhz(int mhz) {
+    if (!clk_open) {
+        if (!mhz) return 0;
+        if (service_running("hoc:clk")) return -1;          /* Horizon OC */
+        if (!clk_inited) { if (!hosversionAtLeast(8, 0, 0) || R_FAILED(clkrstInitialize())) return -2; clk_inited = 1; }
+        if (R_FAILED(clkrstOpenSession(&clk_s, PcvModuleId_CpuBus, 3))) return -3;
+        clk_open = 1;
+        clkrstGetClockRate(&clk_s, &clk_old);
+        if (!clk_hooked) { appletHook(&clk_cookie, clk_hook, NULL); clk_hooked = 1; }
+    }
+    if (!mhz) {                                             /* back to the system's */
+        if (clk_set && clk_old) clkrstSetClockRate(&clk_s, clk_old);
+        clk_set = 0;
+        return (int)(clk_old / 1000000u);
+    }
+    u32 want = (u32)mhz * 1000000u;
+    if (clk_old >= want && !clk_set) return (int)(clk_old / 1000000u);
+    if (want < clk_old) want = clk_old;
+    clkrstSetClockRate(&clk_s, want);
+    u32 now = 0; clkrstGetClockRate(&clk_s, &now);
+    clk_set = now ? now : want;
+    return (int)(clk_set / 1000000u);
+}
+
 /* The thread ends with svcExitThread right away: returning into libnx (threadExit and the C library's
  * per-thread clean-up) crashed on a garbage pointer at Quit, with SDL's threads and libnx's alike. The
  * handle still signals, so dc_nx_thread_join works; the thread's small C-library block is not freed. */
