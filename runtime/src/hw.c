@@ -508,7 +508,15 @@ static uint32_t rd(uint32_t a, int size) {
         return (m & 4) ? (t & 0xFFFF) : (t >> 16);
     }
     if (m >= 0x00700000u && m < 0x00710000u) { aica_enter(now_cycles()); uint32_t v = dc_aica_read(m, size); aica_leave(); return v; }
-    if (m >= 0x00800000u && m < 0x00A00000u) { aica_enter(now_cycles()); uint32_t v = 0; memcpy(&v, aram + (m & 0x1FFFFF), size); aica_leave(); return v; }
+    if (m >= 0x00800000u && m < 0x00A00000u) {
+        uint64_t now = now_cycles();
+        uint32_t v = 0;
+        if (dc_aica_async.slack && dc_aica_clock() + dc_aica_async.slack >= now) {   /* see dc_aica_async_t */
+            memcpy(&v, aram + (m & 0x1FFFFF), size);
+            return v;
+        }
+        aica_enter(now); memcpy(&v, aram + (m & 0x1FFFFF), size); aica_leave(); return v;
+    }
     if ((m >> 24) == 0x04 || (m >> 24) == 0x06) { uint32_t v = 0; memcpy(&v, dc_vram + (m & 0x7FFFFF), size); return v; }
     if ((m >> 24) == 0x05 || (m >> 24) == 0x07) { uint32_t v = 0; memcpy(&v, dc_vram + (vram32(m) | (m & 3)), size); return v; }   /* 8/16-bit: byte lanes within the word */
     if (m < 0x00200000u && dc_bios_rom) { uint32_t v = 0; memcpy(&v, dc_bios_rom + m, size); return v; }   /* boot ROM */

@@ -735,9 +735,10 @@ static void aica_async_enter(uint64_t now) {
     SDL_LockMutex(aica_mx);
     SDL_AtomicDecRef(&aica_want);
     if (now > aica_target) aica_target = now;
-    if (dc_aica_clock() <= now) {
+    uint64_t need = now > dc_aica_async.slack ? now - dc_aica_async.slack : 0;   /* see dc_aica_async_t */
+    if (dc_aica_clock() <= need) {
         aica_game_waits = 1;
-        while (dc_aica_clock() <= now) { SDL_CondSignal(aica_cv); SDL_CondWait(aica_done_cv, aica_mx); }
+        while (dc_aica_clock() <= need) { SDL_CondSignal(aica_cv); SDL_CondWait(aica_done_cv, aica_mx); }
         aica_game_waits = 0;
     }
     prof_wait += SDL_GetPerformanceCounter() - t;
@@ -758,6 +759,8 @@ static void aica_thread_start(void) {
     SDL_AtomicSet(&aica_sleeping, 0); SDL_AtomicSet(&aica_want, 0);
     dc_disc_lock = disc_lock;
     dc_aica_async.advance = aica_async_advance; dc_aica_async.enter = aica_async_enter; dc_aica_async.leave = aica_async_leave;
+    { const char *sl = getenv("DC_AICA_SLACK");            /* samples; 0: exact */
+      dc_aica_async.slack = (sl ? (uint64_t)atoi(sl) : 192ull) * 200000000ull / 44100ull; }
 #ifdef __SWITCH__
     aica_thr = dc_nx_thread_start(aica_thread, NULL, 1);   /* core 1; the game's thread is on core 0 */
 #else

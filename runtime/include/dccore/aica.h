@@ -17,7 +17,11 @@ extern uint64_t dc_prof_aica, dc_prof_aica_arm, dc_prof_aica_dsp;   /* all, its 
  * or a read of its RAM is bracketed by enter (the thread catches up to `now` and pauses) and leave. The
  * chip's interrupt line to the SH-4 is then delivered on this thread by dc_aica_apply_irq. All NULL (the
  * default): everything runs inline on the game's thread. */
-typedef struct { void (*advance)(uint64_t now); void (*enter)(uint64_t now); void (*leave)(void); } dc_aica_async_t;
+/* slack: SH-4 cycles the chip may lag the game when it touches the chip. The thread always runs a bit
+ * behind (it is woken a chunk at a time); catching it up to the exact cycle on every access made the
+ * game wait for it (8% of the Switch's race frame). Within the slack, reads of sound RAM don't even lock:
+ * they see the chip as it is, a few milliseconds back. 0: exact. */
+typedef struct { void (*advance)(uint64_t now); void (*enter)(uint64_t now); void (*leave)(void); uint64_t slack; } dc_aica_async_t;
 extern dc_aica_async_t dc_aica_async;
 extern int dc_aica_arm_cycles;                   /* the ARM's cycles per sample (256; 128 on the Switch); DC_ARM_CYCLES overrides */
 extern int dc_aica_arm_idle_div;                 /* its share while throttled: 1 / this (8); DC_ARM_IDLE_DIV overrides */
