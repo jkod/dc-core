@@ -168,6 +168,7 @@ static int shows_render(void) {
 static Uint64 prof_render, prof_present, prof_idle;
 /* the render thread (rt_*, below present_window) */
 static int rt_on;
+static volatile uint32_t rt_handle;                         /* Switch: the render thread's kernel handle (profiler) */
 static void rt_wait_idle(void);
 static void rt_call(void (*fn)(void *), void *arg);
 static void rt_render(int scale);
@@ -400,6 +401,7 @@ void *dc_nx_thread_start(int (*fn)(void *), void *arg, int core);
 void dc_nx_thread_join(void *t);
 void dc_nx_set_core(int core);
 void dc_nx_clear_tls(void);
+uint32_t dc_nx_cur_handle(void);
 int dc_nx_egl_grab(void);
 int dc_nx_egl_current(int on);
 void dc_nx_egl_swap(void);
@@ -536,6 +538,7 @@ static int rt_main(void *u) {
     (void)u;
 #ifdef __SWITCH__
     dc_nx_clear_tls();                                      /* before any SDL call: see there */
+    rt_handle = dc_nx_cur_handle();
     dc_nx_set_core(2);                                      /* game on 0, sound on 1 */
 #endif
     RT_CURRENT(1);

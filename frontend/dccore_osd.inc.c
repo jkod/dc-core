@@ -198,14 +198,14 @@ static int prof_write(const char *name, int64_t (*off)[PROF_DEPTH], int n, int f
 /* the game's thread to profile.txt and, when it has one, the sound chip's to profile_sound.txt */
 static int prof_main(void *arg) {
     (void)arg;
-    static int64_t off[PROF_MAX][PROF_DEPTH], snd[PROF_MAX][PROF_DEPTH];
+    static int64_t off[PROF_MAX][PROF_DEPTH], snd[PROF_MAX][PROF_DEPTH], drw[PROF_MAX][PROF_DEPTH];
     /* it waits for the next PROFILE until dc_front_close stops it (prof_stop) */
     for (;;) {
     while (prof_state != 1 && !prof_quit) SDL_Delay(50);
     if (prof_quit) return 0;
-    uint32_t h = envGetMainThreadHandle(), hs = aica_thr ? dc_nx_thread_handle(aica_thr) : 0;
+    uint32_t h = envGetMainThreadHandle(), hs = aica_thr ? dc_nx_thread_handle(aica_thr) : 0, hr = rt_on ? rt_handle : 0;
     const uint64_t anchor = (uint64_t)(uintptr_t)&dc_prof_anchor;
-    int n = 0, ns = 0, fails = 0, fails_s = 0; uint32_t err_pause = 0, err_ctx = 0;
+    int n = 0, ns = 0, nr = 0, fails = 0, fails_s = 0, fails_r = 0; uint32_t err_pause = 0, err_ctx = 0;
     while (osd_open && !prof_quit) SDL_Delay(50);  /* the menu that started it */
     SDL_Delay(500);
     prof_sampling = 1;
@@ -215,10 +215,12 @@ static int prof_main(void *arg) {
         if (osd_open) continue;
         if (prof_sample(h, off[n], anchor, &err_pause, &err_ctx)) n++; else fails++;
         if (hs && ns < PROF_MAX) { if (prof_sample(hs, snd[ns], anchor, &err_pause, &err_ctx)) ns++; else fails_s++; }
+        if (hr && nr < PROF_MAX) { if (prof_sample(hr, drw[nr], anchor, &err_pause, &err_ctx)) nr++; else fails_r++; }
     }
     if (n) fprintf(stderr, "dc-core: profile errors: pause %x, context %x\n", err_pause, err_ctx);
     int ok = prof_write("profile.txt", off, n, fails, "game thread");
     if (hs) prof_write("profile_sound.txt", snd, ns, fails_s, "sound thread");
+    if (hr) prof_write("profile_render.txt", drw, nr, fails_r, "render thread");
     prof_state = ok ? 2 : 3;
     }
     return 0;
@@ -227,7 +229,8 @@ static void *prof_thr;                             /* a libnx thread (dccore_nxt
 static void prof_start(void) {
     if (prof_state == 1) return;
     prof_sampling = 0; prof_state = 1;
-    if (!prof_thr) prof_thr = dc_nx_thread_start(prof_main, NULL, 2);   /* core 2: on the game's core it only caught it waiting */
+    /* core 1, beside the sound thread: on the game's core it only caught it waiting, and core 2 draws */
+    if (!prof_thr) prof_thr = dc_nx_thread_start(prof_main, NULL, 1);
     if (!prof_thr) prof_state = 3;
 }
 static void prof_stop(void) { if (prof_thr) { prof_quit = 1; dc_nx_thread_join(prof_thr); prof_thr = NULL; prof_quit = 0; } }

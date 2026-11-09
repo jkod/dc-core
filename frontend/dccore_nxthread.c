@@ -94,6 +94,7 @@ void *dc_nx_pthread_start(int (*fn)(void *), void *arg, int core) {
  * thread-local storage) aren't cleared by libnx, and the kernel hands out TLS pages of threads that
  * ended: the render thread found an old pointer there and crashed in SDL_TLSGet. Called first thing in
  * each thread of ours. */
+uint32_t dc_nx_cur_handle(void) { return threadGetCurHandle(); }
 void dc_nx_clear_tls(void) { memset((uint8_t *)armGetTls() + 0x180, 0, 0x1E0 - 0x180); }
 /* The render thread's OpenGL context, through EGL itself. SDL_GL_MakeCurrent / SwapWindow look up the
  * current window in SDL's thread-local storage, which crashed in any thread but the main one here
