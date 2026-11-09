@@ -135,6 +135,15 @@ static void read_raw(uint16_t *b, int *jx, int *jy, int *lt, int *rt) {
 #endif
 static dc_front_config cfg;
 static unsigned long presented, renders, last_render_frame;
+/* FRAME RATE for games without a 30 / 60 choice of their own (dc_front_fps60 < 0): at 30 a 60 fps game is
+ * drawn every other frame (it still runs at 60): steady where the Switch can't draw each one. A game that
+ * draws at 30 anyway is not touched. 30 by default on the Switch. */
+#ifdef __SWITCH__
+static int osd_half = 1;
+#else
+static int osd_half = 0;
+#endif
+static unsigned long last_drawn_vblank;
 static int need_present = 1;
 static uint64_t vblanks;
 static Uint64 t0_count; static uint64_t t0_cycles; static int paced;
@@ -192,6 +201,8 @@ static void on_render(void) {
     if (skip > 1 && (from < 0 || (long)presented < from) && renders % (unsigned long)skip) { renders++; last_render_frame = (unsigned long)vblanks; return; }
     if (frame_skip() > 1 && renders % (unsigned long)frame_skip()) { renders++; last_render_frame = (unsigned long)vblanks; return; }
     if (dc_front_fast && renders % 8) { renders++; last_render_frame = (unsigned long)vblanks; return; }   /* fast-forward: draw every 8th frame */
+    if (osd_half && dc_front_fps60 < 0 && (unsigned long)vblanks - last_drawn_vblank < 2) { renders++; last_render_frame = (unsigned long)vblanks; return; }
+    last_drawn_vblank = (unsigned long)vblanks;
     static int sw = -1;                                    /* DC_SW_RENDER=1: software renderer (diagnosing GPU issues) */
     if (sw < 0) { const char *e = getenv("DC_SW_RENDER"); sw = e && *e == '1'; }
     if (sw) {

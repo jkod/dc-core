@@ -107,6 +107,7 @@ static void osd_load(void) {
         if (!strncmp(line, "cpu=", 4)) { int m = atoi(line + 4); osd_cpu = 0; for (int i = 1; i < 4; i++) if (m >= cpu_mhz[i]) osd_cpu = i; }
         if (!strncmp(line, "bar=", 4)) osd_bar = atoi(line + 4) != 0;
         if (!strncmp(line, "framerate=", 10) && dc_front_fps60 >= 0) dc_front_fps60 = atoi(line + 10) >= 60;
+        if (!strncmp(line, "halfrate=", 9)) osd_half = atoi(line + 9) != 0;
         if (!strncmp(line, "rumble_", 7) && line[7] >= 'a' && line[7] <= 'd' && line[8] == '=') osd_rumble[line[7] - 'a'] = atoi(line + 9) & 3;
     }
     if (f) fclose(f);
@@ -126,6 +127,7 @@ static void osd_save(void) {
     if (!f) return;
     fprintf(f, "scanlines=%d\nfps=%d\nbar=%d\naa=%d\nsharpen=%d\ncpu=%d\n", osd_scan, osd_fps, osd_bar, osd_aa, osd_sharp, cpu_mhz[osd_cpu]);
     if (dc_front_fps60 >= 0) fprintf(f, "framerate=%d\n", dc_front_fps60 ? 60 : 30);
+    else fprintf(f, "halfrate=%d\n", osd_half);
     for (int p = 0; p < 4; p++) fprintf(f, "rumble_%c=%d\n", 'a' + p, osd_rumble[p]);
     fclose(f);
 }
@@ -261,7 +263,7 @@ static const char *osd_label(int i, char *buf, size_t n) {
     case OI_FS: snprintf(buf, n, "FULLSCREEN    < %s >", cfg.fullscreen ? "ON" : "OFF"); return buf;
 #endif
     case OI_FRATE:                                               /* only for a port that offers both */
-        if (dc_front_fps60 < 0) return "";
+        if (dc_front_fps60 < 0) return osd_half ? "FRAME RATE    < 30 >" : "FRAME RATE    < FULL >";   /* drawing only: osd_half */
         snprintf(buf, n, "FRAME RATE    < %s >", dc_front_fps60 ? "60" : "30"); return buf;
     case OI_SPEED: snprintf(buf, n, "SPEED         < %gX >", (double)game_speed()); return buf;
     case OI_BAR: snprintf(buf, n, "CONTROLS BAR  < %s >", osd_bar ? "ON" : "OFF"); return buf;
@@ -622,6 +624,7 @@ static void osd_run(int port) {
             if (sel == OI_FS) { cfg.fullscreen = !cfg.fullscreen; SDL_SetWindowFullscreen(win, cfg.fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0); }
 #endif
             if (sel == OI_FRATE && dc_front_fps60 >= 0) { dc_front_fps60 = !dc_front_fps60; osd_save(); }
+            else if (sel == OI_FRATE) { osd_half = !osd_half; osd_save(); }
             if (sel == OI_SPEED) { speed_i += step; if (speed_i < 0) speed_i = SPEED_N - 1; if (speed_i >= SPEED_N) speed_i = 0; }
             if (sel == OI_BAR) { osd_bar = !osd_bar; osd_save(); }
 #ifdef __SWITCH__
