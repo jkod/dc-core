@@ -106,7 +106,7 @@ def localize_fp(lines):
     decl = "  float %s;" % ", ".join("f_%d = c->fr.f[%d]" % (n, n) for n in used)
     return out, flush, reload, decl
 
-def localize_regs(lines, fp=False):
+def localize_regs(lines, fp=False, fast_mem=False):
     fpl = localize_fp(lines) if fp else None
     fflush = freload = ""
     if fpl:
@@ -140,8 +140,14 @@ def localize_regs(lines, fp=False):
     # returns
     if flush:
         body = re.sub(r"\breturn ([^;]*);", lambda m: "{ %s return %s; }" % (flush, m.group(1)), body)
+    # memory accesses with RAM's base in a local, the RAM half always inline (sh4.h: dc_frd* / dc_fwr*)
+    mem = False
+    if fast_mem:
+        body, nmem = re.subn(r"\bdc_(rd|wr)(8|16|32)\(", r"dc_f\1\2(ram_, ", body)
+        mem = nmem > 0
     lines = body.split("\n")
     decls = []
+    if mem: decls.append("  uint8_t *const ram_ = dc_ram;")
     if used: decls.append("  uint32_t %s;" % ", ".join("r_%d = c->r[%d]" % (n, n) for n in used))
     if fpl: decls.append(fdecl)
     for k, l in enumerate(lines):                       # after the header and jt, before the entry check
@@ -175,6 +181,7 @@ class Translator:
         self.sparse_labels = False   # labels only at real entries (--sparse-labels; others: dc_mid_entry)
         self.fp_mode = True          # FP instructions in a known PR/SZ mode (fp_modes; --no-fp-mode)
         self.fp_locals = True        # FP registers as locals in the fast version (localize_fp; --no-fp-locals)
+        self.fast_mem = True         # the fast version's memory accesses inline, RAM's base a local (--no-fast-mem)
         self._fpmode = None
         self.extra_entries = set()   # mid-function entries seen at run time (--entries FILE)
         self.prefix = ""             # symbol prefix (a second executable: PREFIX_dc_fn_table, f_PREFIX_...)
@@ -503,7 +510,8 @@ class Translator:
         self._emit_function(start, end, known, out)
         self._fpmode = None
         if self.local_regs:
-            out[first:] = localize_regs(out[first:], fp=self.fp_mode and self.sparse_labels and self.fp_locals)
+            out[first:] = localize_regs(out[first:], fp=self.fp_mode and self.sparse_labels and self.fp_locals,
+                                        fast_mem=self.sparse_labels and self.fast_mem)
 
     # FP mode (--fp-mode, with --sparse-labels). Every FP instruction tested FPSCR.PR (single or double)
     # or FPSCR.SZ (32- or 64-bit moves) at run time. Games keep both 0 nearly everywhere and flip SZ
@@ -975,6 +983,7 @@ def main():
     ap.add_argument("--no-discover", action="store_true")
     ap.add_argument("--no-local-regs", action="store_true", help="keep every register access as c->r[n]")
     ap.add_argument("--sparse-labels", action="store_true", help="labels only at real entries (others run interpreted)")
+    ap.add_argument("--no-fast-mem", action="store_true", help="the fast version's memory accesses as everywhere else (see sh4.h dc_frd32)")
     ap.add_argument("--no-fp-locals", action="store_true", help="FP registers stay in the context (see localize_fp)")
     ap.add_argument("--no-fp-mode", action="store_true", help="FP instructions test FPSCR.PR/SZ at run time everywhere (see fp_modes)")
     ap.add_argument("--entries", help="file of mid-function entry addresses (hex, one a line) that keep their label")
@@ -993,6 +1002,7 @@ def main():
     tr.sparse_labels = args.sparse_labels or os.environ.get("DCCORE_SPARSE_LABELS", "0") == "1"
     tr.fp_mode = not args.no_fp_mode and os.environ.get("DCCORE_FP_MODE", "1") != "0"
     tr.fp_locals = not args.no_fp_locals and os.environ.get("DCCORE_FP_LOCALS", "1") != "0"
+    tr.fast_mem = not args.no_fast_mem and os.environ.get("DCCORE_FAST_MEM", "1") != "0"
     entries = args.entries or os.environ.get("DCCORE_ENTRIES")
     if entries and os.path.exists(entries):
         for l in open(entries):

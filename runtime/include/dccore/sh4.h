@@ -108,6 +108,23 @@ DC_FORCE_INLINE void dc_wr8 (uint32_t a, uint8_t v)  { if (DC_LIKELY(DC_IS_RAM(a
 DC_FORCE_INLINE void dc_wr16(uint32_t a, uint16_t v) { if (DC_LIKELY(DC_IS_RAM(a))) { DC_WATCHED(a, v, 2); memcpy(dc_ram + DC_RAM_OFS(a), &v, 2); return; } DC_URAM_INLINE_WR(a, v) dc_mem_wr16(a, v); }
 DC_FORCE_INLINE void dc_wr32(uint32_t a, uint32_t v) { if (DC_LIKELY(DC_IS_RAM(a))) { DC_WATCHED(a, v, 4); memcpy(dc_ram + DC_RAM_OFS(a), &v, 4); return; } DC_URAM_INLINE_WR(a, v) dc_mem_wr32(a, v); }
 
+/* The fast version's accesses (the recompiler's --sparse-labels code, unless --no-fast-mem): RAM's base
+ * is a local of the function (ram, read from dc_ram once: a store into RAM can't change it, where the
+ * global had to be read again after every store), and the RAM half is always inline (left to the
+ * compiler it stayed a call in the functions that access memory most: dc_rd32 alone was 3.5% of a
+ * Re-Volt frame on the Switch). Everything else as dc_rd* / dc_wr*. */
+#if defined(__GNUC__) || defined(__clang__)
+#define DC_ALWAYS_INLINE static inline __attribute__((always_inline))
+#else
+#define DC_ALWAYS_INLINE static inline
+#endif
+DC_ALWAYS_INLINE uint8_t  dc_frd8 (const uint8_t *ram, uint32_t a) { if (DC_LIKELY(DC_IS_RAM(a))) { DC_RWATCHED(a, 1); return ram[DC_RAM_OFS(a)]; } DC_URAM_INLINE_RD(a, uint8_t) return dc_mem_rd8(a); }
+DC_ALWAYS_INLINE uint16_t dc_frd16(const uint8_t *ram, uint32_t a) { if (DC_LIKELY(DC_IS_RAM(a))) { uint16_t v; DC_RWATCHED(a, 2); memcpy(&v, ram + DC_RAM_OFS(a), 2); return v; } DC_URAM_INLINE_RD(a, uint16_t) return dc_mem_rd16(a); }
+DC_ALWAYS_INLINE uint32_t dc_frd32(const uint8_t *ram, uint32_t a) { if (DC_LIKELY(DC_IS_RAM(a))) { uint32_t v; DC_RWATCHED(a, 4); memcpy(&v, ram + DC_RAM_OFS(a), 4); return v; } DC_URAM_INLINE_RD(a, uint32_t) return dc_mem_rd32(a); }
+DC_ALWAYS_INLINE void dc_fwr8 (uint8_t *ram, uint32_t a, uint8_t v)  { if (DC_LIKELY(DC_IS_RAM(a))) { DC_WATCHED(a, v, 1); ram[DC_RAM_OFS(a)] = v; return; } DC_URAM_INLINE_WR(a, v) dc_mem_wr8(a, v); }
+DC_ALWAYS_INLINE void dc_fwr16(uint8_t *ram, uint32_t a, uint16_t v) { if (DC_LIKELY(DC_IS_RAM(a))) { DC_WATCHED(a, v, 2); memcpy(ram + DC_RAM_OFS(a), &v, 2); return; } DC_URAM_INLINE_WR(a, v) dc_mem_wr16(a, v); }
+DC_ALWAYS_INLINE void dc_fwr32(uint8_t *ram, uint32_t a, uint32_t v) { if (DC_LIKELY(DC_IS_RAM(a))) { DC_WATCHED(a, v, 4); memcpy(ram + DC_RAM_OFS(a), &v, 4); return; } DC_URAM_INLINE_WR(a, v) dc_mem_wr32(a, v); }
+
 DC_FORCE_INLINE float dc_rdf(uint32_t a) { uint32_t u = dc_rd32(a); float f; memcpy(&f, &u, 4); return f; }
 DC_FORCE_INLINE void  dc_wrf(uint32_t a, float f) { uint32_t u; memcpy(&u, &f, 4); dc_wr32(a, u); }
 

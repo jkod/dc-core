@@ -622,7 +622,9 @@ uint32_t dc_sb_reg(uint32_t addr) { return SBR(addr & 0xFFFC); }
 
 /* the non-RAM half of dc_rd* / dc_wr* (sh4.h): a Windows CE game's user space, else hardware */
 #define MEM_RD(T, n) T dc_mem_rd##n(uint32_t a) { if (DC_IS_URAM(a)) { T v; memcpy(&v, dc_uram + DC_URAM_OFS(a), sizeof v); return v; } if (DC_IS_RAM(a)) { T v; memcpy(&v, dc_ram + DC_RAM_OFS(a), sizeof v); return v; } return dc_hw_rd##n(a); }
-#define MEM_WR(T, n) void dc_mem_wr##n(uint32_t a, T v) { if (DC_IS_URAM(a)) { memcpy(dc_uram + DC_URAM_OFS(a), &v, sizeof v); return; } if (DC_IS_RAM(a)) { memcpy(dc_ram + DC_RAM_OFS(a), &v, sizeof v); return; } dc_hw_wr##n(a, v); }
+/* a 32-bit store into a store queue (how games send every vertex to the tile accelerator) first: it went
+ * through three more calls to end in the same line of wr() */
+#define MEM_WR(T, n) void dc_mem_wr##n(uint32_t a, T v) { if (n == 32 && (a >> 26) == 0x38 && !nmaps && !user_ops.wr32) { sq[(a >> 5) & 1][(a >> 2) & 7] = (uint32_t)v; return; } if (DC_IS_URAM(a)) { memcpy(dc_uram + DC_URAM_OFS(a), &v, sizeof v); return; } if (DC_IS_RAM(a)) { memcpy(dc_ram + DC_RAM_OFS(a), &v, sizeof v); return; } dc_hw_wr##n(a, v); }
 MEM_RD(uint8_t, 8) MEM_RD(uint16_t, 16) MEM_RD(uint32_t, 32)
 MEM_WR(uint8_t, 8) MEM_WR(uint16_t, 16) MEM_WR(uint32_t, 32)
 
