@@ -120,6 +120,8 @@ class Translator:
         self.idle_loops = True       # poll loops get DC_IDLE (--no-idle-loops: plain DC_TICK)
         self.local_regs = True       # registers as locals (localize_regs; --no-local-regs: c->r everywhere)
         self.sparse_labels = False   # labels only at real entries (--sparse-labels; others: dc_mid_entry)
+        self.fp_mode = True          # FP instructions in a known PR/SZ mode (fp_modes; --no-fp-mode)
+        self._fpmode = None
         self.extra_entries = set()   # mid-function entries seen at run time (--entries FILE)
         self.prefix = ""             # symbol prefix (a second executable: PREFIX_dc_fn_table, f_PREFIX_...)
 
@@ -441,24 +443,102 @@ class Translator:
             self.sparse_labels, self.local_regs = sp, lr
             out[first] = out[first].replace("uint32_t f_", "static uint32_t fs_", 1)
         first = len(out)
+        self._fpmode = self.fp_modes(start, end) if self.sparse_labels and self.fp_mode else None
         self._emit_function(start, end, known, out)
+        self._fpmode = None
         if self.local_regs:
             out[first:] = localize_regs(out[first:])
+
+    # FP mode (--fp-mode, with --sparse-labels). Every FP instruction tested FPSCR.PR (single or double)
+    # or FPSCR.SZ (32- or 64-bit moves) at run time. Games keep both 0 nearly everywhere and flip SZ
+    # around pair moves with fschg, so the fast version (f_) assumes PR = SZ = 0 where it is entered at
+    # its start, follows fschg / fpchg through the function, and has the instructions in a known mode
+    # tested at compile time. Where it can't know (after lds to FPSCR, paths that disagree) the test
+    # stays. Entered in another mode -- at its start, back from a call, or at a label from outside --
+    # it goes on in the full version (fs_), which tests at run time as before.
+    FP_TEST = ("(c->fpscr & FPSCR_PR)", "(c->fpscr & FPSCR_SZ)")
+
+    def fp_modes(self, start, end):
+        """address -> (pr, sz) known there, or None; {} when the function has no mode-dependent code"""
+        insns = {a: self.decode(a) for a in range(start, end, 2)}
+        def code(i):
+            return i.code if i.kind in ("op", "bad") else ""
+        if not any(t in (insns[a].code or "") for a in insns for t in self.FP_TEST):
+            return {}
+        def step(st, i):                       # the mode after instruction i
+            if st is None or i is None: return st
+            c = i.code or ""
+            if i.kind not in ("op", "bad"): return st
+            if c.startswith("c->fpscr ^= FPSCR_SZ;"): return (st[0], st[1] ^ 1)
+            if c.startswith("c->fpscr ^= FPSCR_PR;"): return (st[0] ^ 1, st[1])
+            if "sh4_set_fpscr(c, " in c and "FPSCR_FR)" not in c: return None   # lds to FPSCR
+            return st
+        UNSEEN = "unseen"
+        mode = {a: UNSEEN for a in insns}
+        mode[start] = (0, 0)
+        work = [(start, (0, 0))]
+        def flow(a, st):
+            if start <= a < end and (a & 1) == 0:
+                old = mode[a]
+                new = st if old == UNSEEN else (old if old == st else None)
+                if new != old:
+                    mode[a] = new
+                    work.append((a, new))
+        while work:
+            a, _ = work.pop()
+            st = mode[a]
+            i = insns[a]
+            k = i.kind
+            if k in ("op", "bad"):
+                flow(a + 2, step(st, i)); continue
+            if k == "cbr" and not i.delayed:
+                flow(a + 2, st)
+                if i.target is not None: flow(i.target, st)
+                continue
+            after = step(st, insns.get(a + 2) or self.decode(a + 2))   # the delay slot runs first
+            flow(a + 2, st)                                            # the slot's own label
+            if k == "cbr":
+                flow(a + 4, after)
+                if i.target is not None: flow(i.target, after)
+            elif k == "bra":
+                if i.target is not None: flow(i.target, after)
+            elif k in ("bsr", "jsr", "bsrf"):
+                flow(a + 4, after)                                     # back from the call: checked there
+        return {a: (None if m == UNSEEN else m) for a, m in mode.items()}
+
+    def fp_fix(self, line, m):
+        """the instruction's code with FPSCR.PR / SZ tests decided by mode m"""
+        if m is None: return line
+        return line.replace(self.FP_TEST[0], "1" if m[0] else "0").replace(self.FP_TEST[1], "1" if m[1] else "0")
+
+    def fp_check(self, m):
+        return "(c->fpscr & (FPSCR_PR | FPSCR_SZ)) != %s" % ("(%s%s)" % ("FPSCR_PR" if m[0] else "0", " | FPSCR_SZ" if m[1] else " | 0"))
 
     def _emit_function(self, start, end, known, out):
         name = "f_%s%08X" % (self.prefix, start)
         first_line = len(out)
         out.append("uint32_t %s(sh4ctx *c) {" % name)
         out.append("  if (c->entry != %s) { jt = c->entry; goto local_jump; }" % h(start))
+        fpm = self._fpmode
+        full = "fs_%s%08X(c)" % (self.prefix, start)
+        if fpm:                                         # see fp_modes
+            out.append("  if (c->fpscr & (FPSCR_PR | FPSCR_SZ)) return %s;" % full)
         insns = {}
         a = start
         while a < end:
             insns[a] = self.decode(a); a += 2
         needs_local_jump = True   # computed jumps and mid-function entries both use the switch
+        calls_back = {a + 4 for a, i in insns.items() if i.kind in ("bsr", "jsr", "bsrf")}
         for a in range(start, end, 2):
             i = insns[a]
             out.append("L_%08X:" % a)
-            out.append("  " + self.emit_insn(i, insns, start, end) )
+            line = self.emit_insn(i, insns, start, end)
+            if fpm:
+                m = fpm.get(a)
+                line = self.fp_fix(line, m)
+                if m is not None and a in calls_back:   # the callee may have left another mode
+                    line = "if (%s) { c->entry = %s; return %s; } %s" % (self.fp_check(m), h(a), full, line)
+            out.append("  " + line)
         # falling off the end continues in the next function
         out.append("  return %s;" % h(end))
         keep = None
@@ -480,7 +560,11 @@ class Translator:
             out.append("  switch (jt) {")
             for a in range(start, end, 2):
                 if keep is None or a in keep:
-                    out.append("    case %s: goto L_%08X;" % (h(a), a))
+                    m = fpm.get(a) if fpm else None
+                    if m is not None:                   # from outside: only in the mode it was built for
+                        out.append("    case %s: if (%s) break; goto L_%08X;" % (h(a), self.fp_check(m), a))
+                    else:
+                        out.append("    case %s: goto L_%08X;" % (h(a), a))
             out.append("  }")
             out.append("  %s" % ("return jt;" if keep is None else
                        "c->entry = jt; return fs_%s%08X(c);" % (self.prefix, start)))
@@ -820,6 +904,7 @@ def main():
     ap.add_argument("--no-discover", action="store_true")
     ap.add_argument("--no-local-regs", action="store_true", help="keep every register access as c->r[n]")
     ap.add_argument("--sparse-labels", action="store_true", help="labels only at real entries (others run interpreted)")
+    ap.add_argument("--no-fp-mode", action="store_true", help="FP instructions test FPSCR.PR/SZ at run time everywhere (see fp_modes)")
     ap.add_argument("--entries", help="file of mid-function entry addresses (hex, one a line) that keep their label")
     ap.add_argument("--no-idle-loops", action="store_true", help="no DC_IDLE in poll loops (time doesn't jump ahead there)")
     ap.add_argument("--setjmp", action="append", default=[], type=lambda x: int(x, 0),
@@ -834,6 +919,7 @@ def main():
     tr.idle_loops = not args.no_idle_loops
     tr.local_regs = not args.no_local_regs and os.environ.get("DCCORE_LOCAL_REGS", "1") != "0"
     tr.sparse_labels = args.sparse_labels or os.environ.get("DCCORE_SPARSE_LABELS", "0") == "1"
+    tr.fp_mode = not args.no_fp_mode and os.environ.get("DCCORE_FP_MODE", "1") != "0"
     entries = args.entries or os.environ.get("DCCORE_ENTRIES")
     if entries and os.path.exists(entries):
         for l in open(entries):
