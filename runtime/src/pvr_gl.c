@@ -28,7 +28,6 @@
 /* ------------------------------------------------------------------ minimal GL binding */
 typedef unsigned int GLenum, GLuint, GLbitfield; typedef int GLint, GLsizei; typedef float GLfloat;
 typedef unsigned char GLboolean, GLubyte; typedef char GLchar; typedef ptrdiff_t GLsizeiptr, GLintptr; typedef double GLdouble;
-typedef struct __GLsync *GLsync; typedef unsigned long long GLuint64;
 #define GL_FALSE 0
 #define GL_TRUE 1
 #define GL_TRIANGLES 0x0004
@@ -83,12 +82,6 @@ typedef struct __GLsync *GLsync; typedef unsigned long long GLuint64;
 #define GL_DEPTH_STENCIL_ATTACHMENT 0x821A
 #define GL_DEPTH24_STENCIL8 0x88F0
 #define GL_MAX_SAMPLES 0x8D57
-#define GL_PIXEL_PACK_BUFFER 0x88EB
-#define GL_STREAM_READ 0x88E1
-#define GL_MAP_READ_BIT 0x0001
-#define GL_SYNC_GPU_COMMANDS_COMPLETE 0x9117
-#define GL_ALREADY_SIGNALED 0x911A
-#define GL_CONDITION_SATISFIED 0x911C
 #define GL_SAMPLE_ALPHA_TO_COVERAGE 0x809E
 #define GL_FRAMEBUFFER_COMPLETE 0x8CD5
 #define GL_COLOR_BUFFER_BIT 0x4000
@@ -139,9 +132,7 @@ typedef struct __GLsync *GLsync; typedef unsigned long long GLuint64;
     F(void, glEnableVertexAttribArray, (GLuint)) F(void, glDrawArrays, (GLenum, GLint, GLsizei)) \
     F(void, glReadPixels, (GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void *)) \
     F(void, glBlitFramebuffer, (GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum)) \
-    F(void, glPixelStorei, (GLenum, GLint)) F(GLenum, glGetError, (void)) \
-    F(void *, glMapBufferRange, (GLenum, GLintptr, GLsizeiptr, GLbitfield)) F(GLboolean, glUnmapBuffer, (GLenum)) \
-    F(GLsync, glFenceSync, (GLenum, GLbitfield)) F(GLenum, glClientWaitSync, (GLsync, GLbitfield, GLuint64)) F(void, glDeleteSync, (GLsync))
+    F(void, glPixelStorei, (GLenum, GLint)) F(GLenum, glGetError, (void))
 #define F(ret, name, args) static ret (*p_##name) args;
 GLFUNCS
 #undef F
@@ -188,7 +179,7 @@ static void verify_upload(const pvr_texinfo *ti, uint32_t tcw, uint32_t tsp) {
 static void *(*p_getproc_saved)(const char *);
 static void gl_debug_init(void *(*getproc)(const char *)) {
     p_getproc_saved = getproc;
-    { extern int dc_pvr_gl_async_readback; const char *a = getenv("DC_ASYNC_READBACK"); if (a) dc_pvr_gl_async_readback = *a == '1'; }
+    { extern int dc_pvr_gl_gpu_bars; const char *a = getenv("DC_GPU_BARS"); if (a) dc_pvr_gl_gpu_bars = *a == '1'; }
     const char *e = getenv("DC_GL_DEBUG");
     if (!e || *e != '1') return;
     dbg_log = fopen("dc_gl_debug.txt", "w");
@@ -1186,6 +1177,7 @@ int dc_pvr_gl_letterbox_zoom;
 int dc_pvr_gl_show_4_3;
 static GLuint bar_prog, edge_tex[2], edge_fbo[2];
 static GLint bar_x0, bar_x1, bar_tex, bar_flat, bar_col;
+static GLint bar_gpu, bar_side, bar_dec;
 static const char *bar_vs =
 "#version 330 core\n"
 "layout(location=0) in vec3 a_pos;\n"
@@ -1193,8 +1185,13 @@ static const char *bar_vs =
 "void main() { float t = (a_pos.x + 1.0) * 0.5; gl_Position = vec4(mix(u_x0, u_x1, t), a_pos.y, 0.0, 1.0); v_y = (a_pos.y + 1.0) * 0.5; }\n";
 static const char *bar_fs =
 "#version 330 core\n"
-"in float v_y; uniform sampler2D u_tex; uniform int u_flat; uniform vec3 u_col; out vec4 o_col;\n"
+"in float v_y; uniform sampler2D u_tex, u_dec; uniform int u_flat, u_gpu, u_side; uniform vec3 u_col; out vec4 o_col;\n"
 "void main() {\n"
+"  if (u_gpu != 0) {\n"                                /* gpu_bars_decide's verdict for this side */
+"    vec4 d = texelFetch(u_dec, ivec2(u_side, 0), 0);\n"
+"    if (d.r < 0.5) discard;\n"
+"    if (d.g > 0.5) { o_col = vec4(texelFetch(u_tex, ivec2(0), 0).rgb, 1.0); return; }\n"
+"  }\n"
 /* an edge of one flat colour (the white of Tecmo's logo screen, a plain backdrop) continues as
  * exactly that colour, so the bars don't show */
 "  if (u_flat != 0) { o_col = vec4(u_col, 1.0); return; }\n"
@@ -1218,6 +1215,7 @@ static void bars_init(void) {
     bar_x0 = p_glGetUniformLocation(bar_prog, "u_x0"); bar_x1 = p_glGetUniformLocation(bar_prog, "u_x1");
     bar_tex = p_glGetUniformLocation(bar_prog, "u_tex");
     bar_flat = p_glGetUniformLocation(bar_prog, "u_flat"); bar_col = p_glGetUniformLocation(bar_prog, "u_col");
+    bar_gpu = p_glGetUniformLocation(bar_prog, "u_gpu"); bar_side = p_glGetUniformLocation(bar_prog, "u_side"); bar_dec = p_glGetUniformLocation(bar_prog, "u_dec");
     for (int i = 0; i < 2; i++) {
         p_glGenTextures(1, &edge_tex[i]); p_glBindTexture(GL_TEXTURE_2D, edge_tex[i]);
         p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, EDGE_W, EDGE_H, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
@@ -1254,73 +1252,90 @@ static int column_empty(const uint8_t *col, int n) {      /* under 5% of the col
     for (int y = 0; y < n; y++) if (col[y * 4] + col[y * 4 + 1] + col[y * 4 + 2] > 24) lit++;
     return lit * 20 < n;
 }
-/* side bars' decisions read back from the GPU. glReadPixels straight into memory makes the CPU wait until
- * the GPU has finished the frame, so the two stop working side by side (on the Switch that cost menus and
- * the title screen a third of the frame; on PCs less, but the same stall). dc_pvr_gl_async_readback: read into pixel-pack buffers instead
- * and decide from the newest one the GPU has finished (a frame or two old). */
-int dc_pvr_gl_async_readback = 1;
-enum { PROBE_N = 3 };
-static struct { GLuint pbo; GLsync fence; size_t size; int n; } probe[PROBE_N];
-static int probe_next, probe_have, probe_fill[2], probe_flat[2]; static float probe_col[2][3];
-static void probe_collect(void) {                          /* the newest finished readback, if any */
-    for (int k = 1; k <= PROBE_N; k++) {
-        int i = (probe_next - k + PROBE_N) % PROBE_N;
-        if (!probe[i].fence) continue;
-        GLenum r = p_glClientWaitSync(probe[i].fence, 0, 0);
-        if (r != GL_ALREADY_SIGNALED && r != GL_CONDITION_SATISFIED) continue;
-        p_glBindBuffer(GL_PIXEL_PACK_BUFFER, probe[i].pbo);
-        const uint8_t *m = p_glMapBufferRange(GL_PIXEL_PACK_BUFFER, 0, (GLsizeiptr)probe[i].size, GL_MAP_READ_BIT);
-        if (m) {
-            int n = probe[i].n;
-            for (int sd = 0; sd < 2; sd++) {
-                probe_fill[sd] = column_empty(m + (size_t)sd * n * 4, n);
-                probe_flat[sd] = edge_is_flat(m + (size_t)2 * n * 4 + (size_t)sd * EDGE_W * EDGE_H * 4, probe_col[sd]);
-            }
-            p_glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
-            probe_have = 1;
-        }
-        p_glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
-        for (int j = 0; j < PROBE_N; j++)                  /* this one and any older: done with */
-            if (probe[j].fence && (j == i || (probe_next - 1 - j + PROBE_N) % PROBE_N > (probe_next - 1 - i + PROBE_N) % PROBE_N)) {
-                p_glDeleteSync(probe[j].fence); probe[j].fence = 0;
-            }
-        return;
+/* side bars decided on the GPU. Reading the checks back (glReadPixels) makes the CPU wait until the
+ * GPU has finished the frame, so the two stop working side by side; on the Switch that cost menus and the
+ * title screen a third of the frame (and pixel-pack buffers didn't help: Mesa waits there too). With
+ * dc_pvr_gl_gpu_bars the columns just outside the picture are copied into col_tex, a 2-texel pass
+ * (dec_prog) makes the same checks into dec_tex, and the bars' shader reads its side's verdict:
+ * the same bars, this very frame, with nothing coming back to the CPU. */
+int dc_pvr_gl_gpu_bars = 1;
+static GLuint col_tex, col_fbo, dec_tex, dec_fbo, dec_prog; static int col_h, gpu_bars_failed;
+static GLint dec_n, dec_e0, dec_e1, dec_c;
+static const char *dec_fs =
+"#version 330 core\n"
+"uniform sampler2D u_e0, u_e1, u_c; uniform int u_n; out vec4 o_col;\n"
+"void main() {\n"
+"  int sd = int(gl_FragCoord.x);\n"
+"  int lit = 0;\n"                                     /* the column past the picture: under 5% drawn is empty */
+"  for (int y = 0; y < u_n; y++) { vec3 c = floor(texelFetch(u_c, ivec2(sd, y), 0).rgb * 255.0 + 0.5); if (c.r + c.g + c.b > 24.0) lit++; }\n"
+"  float fill = lit * 20 < u_n ? 1.0 : 0.0;\n"
+"  float fl = 1.0;\n"                                /* the picture's edge one flat colour (within 8/255)? */
+"  vec3 c0 = floor((sd == 0 ? texelFetch(u_e0, ivec2(0), 0) : texelFetch(u_e1, ivec2(0), 0)).rgb * 255.0 + 0.5);\n"
+"  for (int k = 1; k < " "1024" " && fl > 0.5; k++) {\n"
+"    ivec2 q = ivec2(k % 16, k / 16);\n"
+"    vec3 c = floor((sd == 0 ? texelFetch(u_e0, q, 0) : texelFetch(u_e1, q, 0)).rgb * 255.0 + 0.5);\n"
+"    if (any(greaterThan(abs(c - c0), vec3(8.0)))) fl = 0.0;\n"
+"  }\n"
+"  o_col = vec4(fill, fl, 0.0, 1.0);\n"
+"}\n";
+static const char *dec_vs =
+"#version 330 core\n"
+"layout(location=0) in vec3 a_pos;\n"
+"void main() { gl_Position = vec4(a_pos.xy, 0.0, 1.0); }\n";
+static int gpu_bars_init(int h) {
+    if (gpu_bars_failed) return 0;
+    if (!dec_prog) {
+        dec_prog = p_glCreateProgram();
+        p_glAttachShader(dec_prog, compile(GL_VERTEX_SHADER, dec_vs)); p_glAttachShader(dec_prog, compile(GL_FRAGMENT_SHADER, dec_fs));
+        p_glLinkProgram(dec_prog);
+        GLint ok = 0; p_glGetProgramiv(dec_prog, GL_LINK_STATUS, &ok);
+        if (!ok) { dec_prog = 0; gpu_bars_failed = 1; fprintf(stderr, "pvr_gl: side bars decided on the CPU (shader)\n"); return 0; }
+        dec_n = p_glGetUniformLocation(dec_prog, "u_n"); dec_c = p_glGetUniformLocation(dec_prog, "u_c");
+        dec_e0 = p_glGetUniformLocation(dec_prog, "u_e0"); dec_e1 = p_glGetUniformLocation(dec_prog, "u_e1");
+        p_glGenTextures(1, &dec_tex); p_glBindTexture(GL_TEXTURE_2D, dec_tex);
+        p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 2, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        p_glGenFramebuffers(1, &dec_fbo); p_glBindFramebuffer(GL_FRAMEBUFFER, dec_fbo);
+        p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, dec_tex, 0);
     }
-}
-static void probe_drop(void) {                             /* side bars not in play: forget what was read */
-    if (!probe_have && !probe[0].fence && !probe[1].fence && !probe[2].fence) return;
-    for (int j = 0; j < PROBE_N; j++) if (probe[j].fence) { p_glDeleteSync(probe[j].fence); probe[j].fence = 0; }
-    probe_have = 0;
-}
-static void probe_issue(int cx0, int cx1, int y0, int y1) {  /* columns just outside the picture, and its edges */
-    int i = probe_next, n = y1 - y0;
-    if (probe[i].fence) { p_glDeleteSync(probe[i].fence); probe[i].fence = 0; }   /* never collected: overwrite */
-    size_t need = (size_t)2 * n * 4 + (size_t)2 * EDGE_W * EDGE_H * 4;
-    if (!probe[i].pbo) p_glGenBuffers(1, &probe[i].pbo);
-    p_glBindBuffer(GL_PIXEL_PACK_BUFFER, probe[i].pbo);
-    if (probe[i].size < need) { p_glBufferData(GL_PIXEL_PACK_BUFFER, (GLsizeiptr)need, NULL, GL_STREAM_READ); probe[i].size = need; }
-    p_glPixelStorei(GL_PACK_ALIGNMENT, 1);
-    p_glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo);
-    p_glReadPixels(cx0, y0, 1, n, GL_RGBA, GL_UNSIGNED_BYTE, (void *)0);
-    p_glReadPixels(cx1, y0, 1, n, GL_RGBA, GL_UNSIGNED_BYTE, (void *)(uintptr_t)((size_t)n * 4));
-    for (int sd = 0; sd < 2; sd++) {
-        p_glBindFramebuffer(GL_READ_FRAMEBUFFER, edge_fbo[sd]);
-        p_glReadPixels(0, 0, EDGE_W, EDGE_H, GL_RGBA, GL_UNSIGNED_BYTE, (void *)(uintptr_t)((size_t)2 * n * 4 + (size_t)sd * EDGE_W * EDGE_H * 4));
+    if (h > col_h) {
+        if (!col_tex) { p_glGenTextures(1, &col_tex); p_glGenFramebuffers(1, &col_fbo); }
+        p_glBindTexture(GL_TEXTURE_2D, col_tex);
+        p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 2, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        p_glBindFramebuffer(GL_FRAMEBUFFER, col_fbo);
+        p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, col_tex, 0);
+        col_h = h;
     }
-    p_glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
-    probe[i].n = n;
-    probe[i].fence = p_glFenceSync(GL_SYNC_GPU_COMMANDS_COMPLETE, 0);
-    probe_next = (i + 1) % PROBE_N;
+    return 1;
+}
+/* the checks, into dec_tex: (fill, flat) for the left and right side */
+static void gpu_bars_decide(int cx0, int cx1, int y0, int y1) {
+    int n = y1 - y0;
+    p_glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo); p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, col_fbo);
+    p_glBlitFramebuffer(cx0, y0, cx0 + 1, y1, 0, 0, 1, n, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    p_glBlitFramebuffer(cx1, y0, cx1 + 1, y1, 1, 0, 2, n, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    p_glBindFramebuffer(GL_FRAMEBUFFER, dec_fbo);
+    p_glViewport(0, 0, 2, 1);
+    p_glDisable(GL_SCISSOR_TEST); p_glDisable(GL_DEPTH_TEST); p_glDisable(GL_BLEND); p_glDisable(GL_STENCIL_TEST);
+    p_glUseProgram(dec_prog);
+    p_glActiveTexture((GL_TEXTURE0 + 1)); p_glBindTexture(GL_TEXTURE_2D, edge_tex[0]);
+    p_glActiveTexture((GL_TEXTURE0 + 2)); p_glBindTexture(GL_TEXTURE_2D, edge_tex[1]);
+    p_glActiveTexture((GL_TEXTURE0 + 3)); p_glBindTexture(GL_TEXTURE_2D, col_tex);
+    p_glActiveTexture(GL_TEXTURE0);
+    p_glUniform1i(dec_e0, 1); p_glUniform1i(dec_e1, 2); p_glUniform1i(dec_c, 3); p_glUniform1i(dec_n, n);
+    p_glBindVertexArray(vao);
+    p_glDrawArrays(GL_TRIANGLES, quad_first, 6);
+    p_glUseProgram(prog);
     p_glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+    p_glViewport(0, 0, fb_w, fb_h);
 }
-/* side = 0 left, 1 right; picture columns [px0, px1) of the FBO, rows [y0, y1). async: edge_tex already
- * holds this frame's edges, flat colours from the probe */
-static void draw_bars(int px0, int px1, int y0, int y1, int left, int right, int async) {
+/* side = 0 left, 1 right; picture columns [px0, px1) of the FBO, rows [y0, y1). gpu: edge_tex already
+ * holds this frame's edges and dec_tex the verdicts (both sides drawn, each keeps or drops itself) */
+static void draw_bars(int px0, int px1, int y0, int y1, int left, int right, int gpu) {
     if (!edges_ok(px0, px1, y0, y1)) return;
     int flat[2] = { 0, 0 }; float col[2][3] = { { 0 } };
-    if (async) {
-        for (int i = 0; i < 2; i++) { flat[i] = probe_flat[i]; memcpy(col[i], probe_col[i], sizeof col[i]); }
-    } else {
+    if (!gpu) {
         edge_blit(px0, px1, y0, y1);
         for (int i = 0; i < 2; i++) {
             static uint8_t px[EDGE_W * EDGE_H * 4];
@@ -1334,13 +1349,15 @@ static void draw_bars(int px0, int px1, int y0, int y1, int left, int right, int
     p_glEnable(GL_SCISSOR_TEST); p_glScissor(0, y0, fb_w, y1 - y0);
     p_glDisable(GL_DEPTH_TEST); p_glDisable(GL_BLEND); p_glDisable(GL_STENCIL_TEST);
     p_glUseProgram(bar_prog);
+    p_glUniform1i(bar_gpu, gpu); p_glUniform1i(bar_dec, 4);
+    if (gpu) { p_glActiveTexture((GL_TEXTURE0 + 4)); p_glBindTexture(GL_TEXTURE_2D, dec_tex); }
     p_glUniform1i(bar_tex, 0); p_glActiveTexture(GL_TEXTURE0);
     p_glBindVertexArray(vao);
     for (int i = 0; i < 2; i++) {
         if (!(i ? right : left)) continue;
         float a = i ? (float)(px1 - 1) : 0.f, b = i ? (float)fb_w : (float)(px0 + 1);   /* cover the edge pixel */
         p_glUniform1f(bar_x0, a / fb_w * 2.f - 1.f); p_glUniform1f(bar_x1, b / fb_w * 2.f - 1.f);
-        p_glUniform1i(bar_flat, flat[i]); p_glUniform3f(bar_col, col[i][0], col[i][1], col[i][2]);
+        p_glUniform1i(bar_flat, flat[i]); p_glUniform3f(bar_col, col[i][0], col[i][1], col[i][2]); p_glUniform1i(bar_side, i);
         p_glBindTexture(GL_TEXTURE_2D, edge_tex[i]);
         p_glDrawArrays(GL_TRIANGLES, quad_first, 6);
     }
@@ -2459,12 +2476,11 @@ void dc_pvr_gl_render(int scale) {
          * a bar: menus, the title, the panel beside Rush's split-screen views. One pixel column each,
          * just outside the picture. */
         int y0 = fb_h - (f.clip_y1 + 1) * scale, y1 = fb_h - f.clip_y0 * scale, fill[2] = { 0, 0 };
-        int async = dc_pvr_gl_async_readback && !capturing && edges_ok(px0, px1, y0, y1) && y1 > y0 && px0 > 4 && px1 < fb_w - 4;
-        if (async) {                                         /* see dc_pvr_gl_async_readback */
-            probe_collect();
+        int gpu = dc_pvr_gl_gpu_bars && edges_ok(px0, px1, y0, y1) && px0 > 4 && px1 < fb_w - 4 && gpu_bars_init(y1 - y0);
+        if (gpu) {                                           /* see dc_pvr_gl_gpu_bars */
             edge_blit(px0, px1, y0, y1);
-            probe_issue(px0 - 3, px1 + 2, y0, y1);
-            if (probe_have) { fill[0] = probe_fill[0]; fill[1] = probe_fill[1]; }
+            gpu_bars_decide(px0 - 3, px1 + 2, y0, y1);
+            fill[0] = fill[1] = 1;
         } else if (y1 > y0 && px0 > 4 && px1 < fb_w - 4) {
             static uint8_t *col; static int cap_col;
             if (y1 - y0 > cap_col) { cap_col = y1 - y0; col = realloc(col, (size_t)cap_col * 4); }
@@ -2474,9 +2490,8 @@ void dc_pvr_gl_render(int scale) {
                 fill[sd] = column_empty(col, y1 - y0);
             }
         }
-        if (fill[0] || fill[1]) draw_bars(px0, px1, y0, y1, fill[0], fill[1], async);
-        if (!async && !capturing) probe_drop();
-    } else if (!capturing) probe_drop();
+        if (fill[0] || fill[1]) draw_bars(px0, px1, y0, y1, fill[0], fill[1], gpu);
+    }
     pic_offy = ((float)(f.height - 1 - f.clip_y1) - (float)f.clip_y0) * 0.5f / (float)f.height;
     pic_y0 = fb_h - (f.clip_y1 + 1) * scale; pic_y1 = fb_h - f.clip_y0 * scale;
     /* odd clip or one band (a split-screen view, a loading screen's progress bar): the whole picture
