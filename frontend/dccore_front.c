@@ -398,6 +398,8 @@ int dc_front_fps60 = -1;
 /* libnx threads on the Switch (dccore_nxthread.c): an SDL thread crashed in SDL's clean-up when it ended */
 void *dc_nx_thread_start(int (*fn)(void *), void *arg, int core);
 void dc_nx_thread_join(void *t);
+void *dc_nx_pthread_start(int (*fn)(void *), void *arg, int core);
+void dc_nx_pthread_join(void *t);
 uint32_t dc_nx_thread_handle(void *t);
 static void *aica_thr;
 #else
@@ -587,7 +589,7 @@ static void rt_start(void) {
     rt_job = rt_busy = rt_quit = rt_want_present = 0;
     SDL_GL_MakeCurrent(win, NULL);                          /* the context moves to the thread */
 #ifdef __SWITCH__
-    rt_thr = dc_nx_thread_start(rt_main, NULL, 2);          /* core 2: game on 0, sound on 1 */
+    rt_thr = dc_nx_pthread_start(rt_main, NULL, 2);         /* core 2: game on 0, sound on 1 (a pthread: see there) */
 #else
     rt_thr = SDL_CreateThread(rt_main, "render", NULL);
 #endif
@@ -600,7 +602,7 @@ static void rt_stop(void) {
     rt_wait_idle();
     SDL_LockMutex(rt_mx); rt_quit = 1; SDL_CondBroadcast(rt_cv); SDL_UnlockMutex(rt_mx);
 #ifdef __SWITCH__
-    dc_nx_thread_join(rt_thr);
+    dc_nx_pthread_join(rt_thr);
 #else
     SDL_WaitThread(rt_thr, NULL);
 #endif

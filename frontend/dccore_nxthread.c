@@ -66,6 +66,36 @@ void *dc_nx_thread_start(int (*fn)(void *), void *arg, int core) {
 
 uint32_t dc_nx_thread_handle(void *p) { return p ? ((nx_thread *)p)->t.handle : 0; }
 
+/* The render thread calls into SDL's OpenGL functions, which keep the current context in SDL's thread-local
+ * storage: pthread keys, which a thread made with threadCreate doesn't have (it crashed at start). So it
+ * is a pthread, ended the same way (svcExitThread, skipping the clean-up), on the core asked for. */
+#include <pthread.h>
+typedef struct { pthread_t t; int (*fn)(void *); void *arg; int core; } nx_pthread;
+static void *pentry(void *p) {
+    nx_pthread *x = p;
+    if (x->core >= 0) svcSetThreadCoreMask(CUR_THREAD_HANDLE, x->core, 1u << x->core);
+    x->fn(x->arg);
+    svcExitThread();
+    return NULL;
+}
+void *dc_nx_pthread_start(int (*fn)(void *), void *arg, int core) {
+    nx_pthread *x = calloc(1, sizeof *x);
+    if (!x) return NULL;
+    x->fn = fn; x->arg = arg; x->core = core;
+    pthread_attr_t at; pthread_attr_init(&at);
+    pthread_attr_setstacksize(&at, 0x200000);
+    int r = pthread_create(&x->t, &at, pentry, x);
+    pthread_attr_destroy(&at);
+    if (r) { free(x); return NULL; }
+    return x;
+}
+void dc_nx_pthread_join(void *p) {
+    nx_pthread *x = p;
+    if (!x) return;
+    pthread_join(x->t, NULL);
+    free(x);
+}
+
 void dc_nx_thread_join(void *p) {
     nx_thread *x = p;
     if (!x) return;
