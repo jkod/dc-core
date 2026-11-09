@@ -425,14 +425,17 @@ static int ms_want(void) {
 }
 static int ensure_ms(void) {                     /* 1: draw into ms_fbo this frame */
     int n = ms_want();
-    if (n && ms_fbo && ms_n == n && ms_w == fb_w && ms_h == fb_h) return 1;
+    /* kept at the largest picture seen: games that switch sizes (Soulcalibur) remade it again and again */
+    if (n && ms_fbo && ms_n == n && ms_w >= fb_w && ms_h >= fb_h) return 1;
+    int want_w = fb_w > ms_w ? fb_w : ms_w, want_h = fb_h > ms_h ? fb_h : ms_h;
+    if (!n || ms_n != n) { want_w = fb_w; want_h = fb_h; }
     if (ms_fbo) { p_glDeleteFramebuffers(1, &ms_fbo); p_glDeleteRenderbuffers(1, &ms_col); p_glDeleteRenderbuffers(1, &ms_depth); ms_fbo = 0; }
     ms_n = 0;
     if (!n) return 0;
     p_glGenRenderbuffers(1, &ms_col); p_glBindRenderbuffer(GL_RENDERBUFFER, ms_col);
-    p_glRenderbufferStorageMultisample(GL_RENDERBUFFER, n, GL_RGBA8, fb_w, fb_h);
+    p_glRenderbufferStorageMultisample(GL_RENDERBUFFER, n, GL_RGBA8, want_w, want_h);
     p_glGenRenderbuffers(1, &ms_depth); p_glBindRenderbuffer(GL_RENDERBUFFER, ms_depth);
-    p_glRenderbufferStorageMultisample(GL_RENDERBUFFER, n, GL_DEPTH24_STENCIL8, fb_w, fb_h);
+    p_glRenderbufferStorageMultisample(GL_RENDERBUFFER, n, GL_DEPTH24_STENCIL8, want_w, want_h);
     p_glGenFramebuffers(1, &ms_fbo); p_glBindFramebuffer(GL_FRAMEBUFFER, ms_fbo);
     p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, ms_col);
     p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, ms_depth);
@@ -444,7 +447,7 @@ static int ensure_ms(void) {                     /* 1: draw into ms_fbo this fra
         ms_max = n - 1;                           /* try fewer next time */
         return 0;
     }
-    ms_n = n; ms_w = fb_w; ms_h = fb_h;
+    ms_n = n; ms_w = want_w; ms_h = want_h;
     fprintf(stderr, "pvr_gl: %dx anti-aliasing\n", n);
     return 1;
 }

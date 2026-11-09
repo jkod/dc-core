@@ -501,7 +501,14 @@ static int aica_audio_read(int16_t *dst, int frames);
 static void rt_present(void);
 static void present_gl(void);
 static void present_window(void) {
-    if (rt_on) { need_present = 0; rt_present(); return; }   /* on the render thread, when it is free */
+    if (rt_on) {                                            /* on the render thread, when it is free */
+        need_present = 0;
+        /* while the game draws, each frame is presented with its drawing (Show FPS and toasts with it): a
+         * present of its own between two frames waits for a vsync of the thread's, which held a 60 fps
+         * game to 30. Only when no frame came for a few vblanks (menu, pause, a still picture). */
+        if (!osd_open && (unsigned long)vblanks - last_render_frame < 4) return;
+        rt_present(); return;
+    }
     present_gl();
 }
 static void present_gl(void) {
