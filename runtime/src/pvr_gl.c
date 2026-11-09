@@ -2806,10 +2806,18 @@ void dc_pvr_gl_overlay(const uint8_t *rgba, int w, int h, int x, int y, int dw, 
     ov_begin(win_w, win_h);
     p_glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
     p_glActiveTexture(GL_TEXTURE0); p_glBindTexture(GL_TEXTURE_2D, ov_tex);
-    p_glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-    p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
-    p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-    p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    /* the same picture as last time (Show FPS changes twice a second): no upload. Uploading it every
+     * frame cost the Switch a new GPU buffer each time, ~2% of a race frame in the profile */
+    static uint8_t *ov_last; static int ov_w, ov_h;
+    size_t bytes = (size_t)w * h * 4;
+    if (!ov_last || ov_w != w || ov_h != h || memcmp(ov_last, rgba, bytes)) {
+        p_glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+        p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+        p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        uint8_t *n = realloc(ov_last, bytes);
+        if (n) { ov_last = n; memcpy(ov_last, rgba, bytes); ov_w = w; ov_h = h; } else { free(ov_last); ov_last = NULL; }
+    }
     p_glUseProgram(ov_prog);
     p_glUniform1i(ov_texloc, 0);
     /* x, y: top-left in window pixels (top row 0) */
