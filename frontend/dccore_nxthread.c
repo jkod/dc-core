@@ -99,7 +99,15 @@ void dc_nx_clear_tls(void) { memset((uint8_t *)armGetTls() + 0x180, 0, 0x1E0 - 0
  * current window in SDL's thread-local storage, which crashed in any thread but the main one here
  * (SDL_TLSGet, even with its TLS slots cleared), so the render thread doesn't call them: the main thread
  * hands over the display, surface and context SDL made, and the thread binds and swaps them. */
-#include <EGL/egl.h>
+/* EGL's few calls declared here (Mesa's EGL comes with SDL on the Switch; its header may not be installed) */
+typedef void *EGLDisplay, *EGLSurface, *EGLContext; typedef unsigned int EGLBoolean; typedef int EGLint;
+#define EGL_NO_DISPLAY ((EGLDisplay)0)
+#define EGL_NO_SURFACE ((EGLSurface)0)
+#define EGL_NO_CONTEXT ((EGLContext)0)
+#define EGL_TRUE 1
+#define EGL_DRAW 0x3059
+EGLDisplay eglGetCurrentDisplay(void); EGLSurface eglGetCurrentSurface(EGLint readdraw); EGLContext eglGetCurrentContext(void);
+EGLBoolean eglMakeCurrent(EGLDisplay, EGLSurface, EGLSurface, EGLContext); EGLBoolean eglSwapBuffers(EGLDisplay, EGLSurface);
 static EGLDisplay e_dpy = EGL_NO_DISPLAY; static EGLSurface e_surf = EGL_NO_SURFACE; static EGLContext e_ctx = EGL_NO_CONTEXT;
 int dc_nx_egl_grab(void) {
     e_dpy = eglGetCurrentDisplay(); e_surf = eglGetCurrentSurface(EGL_DRAW); e_ctx = eglGetCurrentContext();
