@@ -210,6 +210,9 @@ static inline void sh4_set_dr(sh4ctx *c, int n, double d) {
     uint64_t v; memcpy(&v, &d, 8); c->fr.u[n] = (uint32_t)(v >> 32); c->fr.u[n + 1] = (uint32_t)v;
 }
 /* 64-bit fmov register index: even -> DRn (bank 0), odd -> XDn-1 (bank 1) */
+/* the bits of a float and back (the recompiler's FP registers as locals: localize_fp) */
+static inline float dc_u2f(uint32_t u) { float f; memcpy(&f, &u, 4); return f; }
+static inline uint32_t dc_f2u(float f) { uint32_t u; memcpy(&u, &f, 4); return u; }
 static inline int sh4_xd(int n) { return (n & 1) ? 16 + (n & 0xE) : n; }
 
 /* ---------------- ALU helpers ---------------- */

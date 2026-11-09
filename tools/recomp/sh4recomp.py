@@ -40,6 +40,16 @@ SYNC_CALLS = ("dc_call", "dc_call_site", "DC_CALL_SETJMP", "DC_IDLE", "sh4_div1"
               "sh4_set_sr", "dc_trap")
 _reg_re = re.compile(r"c->r\[(\d+)\]")
 
+def _brace_end(text, i):
+    """index of the } that closes the { at text[i], or -1"""
+    depth = 0
+    for j in range(i, len(text)):
+        if text[j] == "{": depth += 1
+        elif text[j] == "}":
+            depth -= 1
+            if depth == 0: return j
+    return -1
+
 def _call_spans(text, name):
     """(start, end) of each `name(c...)` call in text, end just past its closing parenthesis"""
     spans, i = [], 0
@@ -59,15 +69,56 @@ def _call_spans(text, name):
         spans.append((m.start(), j + 1))
         i = j + 1
 
-def localize_regs(lines):
+_fr_re = re.compile(r"c->fr\.([fu])\[(\d+)\]")
+# what works on the FP registers in the context: helpers given c, an index that isn't a constant
+_fp_ctx_re = re.compile(r"c->fr\.[fu]\[(?!\d+\])|\bsh4_(?:fipr|ftrv|fsca|set_fpscr|get_dr|set_dr)\(c\b|&c->fr\b|c->fr\.[fu](?!\[)")
+_fr_wr_re = re.compile(r"c->fr\.u\[(\d+)\]\s*(=|\^=|&=|\|=)(?!=)\s*([^;]*);")
+
+def localize_fp(lines):
+    """FP registers as locals (with --sparse-labels: the fast version), like localize_regs does for
+    c->r: float f_N for each FR / XF register the function names by a constant index; the u32 view goes
+    through dc_f2u / dc_u2f (moves between the CPU's registers). An instruction that works on the
+    context's FP registers otherwise (fipr, ftrv, fsca, frchg, double precision, an index known only at
+    run time) runs with them written back before and read again after. Returns (lines, flush, reload,
+    declaration) for localize_regs, or None to leave the function as it is."""
+    body = "\n".join(lines)
+    used = sorted({int(m.group(2)) for m in _fr_re.finditer(body)})
+    if not used:
+        return None
+    written = {int(m.group(2)) for m in re.finditer(r"c->fr\.([fu])\[(\d+)\]\s*(?:[-+*/&|^]|<<|>>)?=(?!=)", body)}
+    flush = " ".join("c->fr.f[%d] = f_%d;" % (n, n) for n in sorted(written))
+    reload = " ".join("f_%d = c->fr.f[%d];" % (n, n) for n in used)
+    out = []
+    for l in lines:
+        if _fp_ctx_re.search(l):
+            if "goto" in l or "return" in l or l.rstrip().endswith(":"):
+                return None                             # no place for the reload after it
+            out.append("  { %s %s %s }" % (flush, l.strip(), reload))
+            continue
+        def wr(m):
+            n, op, rhs = m.group(1), m.group(2), m.group(3)
+            v = rhs if op == "=" else "dc_f2u(f_%s) %s (%s)" % (n, op[0], rhs)
+            return "f_%s = dc_u2f(%s);" % (n, v)
+        l = _fr_wr_re.sub(wr, l)
+        l = re.sub(r"c->fr\.u\[(\d+)\]", lambda m: "dc_f2u(f_%s)" % m.group(1), l)
+        l = re.sub(r"c->fr\.f\[(\d+)\]", lambda m: "f_%s" % m.group(1), l)
+        out.append(l)
+    decl = "  float %s;" % ", ".join("f_%d = c->fr.f[%d]" % (n, n) for n in used)
+    return out, flush, reload, decl
+
+def localize_regs(lines, fp=False):
+    fpl = localize_fp(lines) if fp else None
+    fflush = freload = ""
+    if fpl:
+        lines, fflush, freload, fdecl = fpl
     body = "\n".join(lines)
     used = sorted({int(n) for n in _reg_re.findall(body)})
-    if not used:
+    if not used and not fpl:
         return lines
     written = sorted({int(n) for n in re.findall(r"c->r\[(\d+)\]\s*(?:[-+*/&|^]|<<|>>)?=(?!=)", body)}
                      | {int(n) for n in re.findall(r"(?:\+\+|--)c->r\[(\d+)\]|c->r\[(\d+)\](?:\+\+|--)", body) for n in n if n})
-    flush = " ".join("c->r[%d] = r_%d;" % (n, n) for n in written)
-    reload = " ".join("r_%d = c->r[%d];" % (n, n) for n in used)
+    flush = " ".join(["c->r[%d] = r_%d;" % (n, n) for n in written] + ([fflush] if fflush else []))
+    reload = " ".join(["r_%d = c->r[%d];" % (n, n) for n in used] + ([freload] if freload else []))
     body = _reg_re.sub(lambda m: "r_%s" % m.group(1), body)
     # calls and helpers that see c->r: flush before, reload after (as statements)
     for name in SYNC_CALLS:
@@ -90,10 +141,12 @@ def localize_regs(lines):
     if flush:
         body = re.sub(r"\breturn ([^;]*);", lambda m: "{ %s return %s; }" % (flush, m.group(1)), body)
     lines = body.split("\n")
-    decl = "  uint32_t %s;" % ", ".join("r_%d = c->r[%d]" % (n, n) for n in used)
+    decls = []
+    if used: decls.append("  uint32_t %s;" % ", ".join("r_%d = c->r[%d]" % (n, n) for n in used))
+    if fpl: decls.append(fdecl)
     for k, l in enumerate(lines):                       # after the header and jt, before the entry check
         if l.startswith("  if (c->entry != "):
-            lines.insert(k, decl)
+            lines[k:k] = decls
             break
     return lines
 
@@ -121,6 +174,7 @@ class Translator:
         self.local_regs = True       # registers as locals (localize_regs; --no-local-regs: c->r everywhere)
         self.sparse_labels = False   # labels only at real entries (--sparse-labels; others: dc_mid_entry)
         self.fp_mode = True          # FP instructions in a known PR/SZ mode (fp_modes; --no-fp-mode)
+        self.fp_locals = True        # FP registers as locals in the fast version (localize_fp; --no-fp-locals)
         self._fpmode = None
         self.extra_entries = set()   # mid-function entries seen at run time (--entries FILE)
         self.prefix = ""             # symbol prefix (a second executable: PREFIX_dc_fn_table, f_PREFIX_...)
@@ -389,13 +443,15 @@ class Translator:
         if lo == 0x4: return e(dual("c->t = %s == %s;" % (FR(n), FR(m)), "c->t = sh4_get_dr(c, %d) == sh4_get_dr(c, %d);" % (n & 0xE, m & 0xE)), "fcmp/eq")
         if lo == 0x5: return e(dual("c->t = %s > %s;" % (FR(n), FR(m)), "c->t = sh4_get_dr(c, %d) > sh4_get_dr(c, %d);" % (n & 0xE, m & 0xE)), "fcmp/gt")
         # fmov family: SZ=0 -> 32-bit, SZ=1 -> 64-bit pair
-        xn, xm = "sh4_xd(%d)" % n, "sh4_xd(%d)" % m
+        # the pair's registers (sh4_xd: DRn, or XDn in the other bank), known here
+        xd = lambda r: 16 + (r & 0xE) if r & 1 else r
+        dn, dm = xd(n), xd(m)
         def ld(addr):
-            return ("if (%s) { int d = %s; uint32_t a_ = %s; c->fr.u[d] = dc_rd32(a_); c->fr.u[d+1] = dc_rd32(a_ + 4); } "
-                    "else { %s = dc_rd32(%s); }") % (SZ, xn, addr, FU(n), addr)
+            return ("if (%s) { uint32_t a_ = %s; %s = dc_rd32(a_); %s = dc_rd32(a_ + 4); } "
+                    "else { %s = dc_rd32(%s); }") % (SZ, addr, FU(dn), FU(dn + 1), FU(n), addr)
         def st(addr):
-            return ("if (%s) { int s_ = %s; uint32_t a_ = %s; dc_wr32(a_, c->fr.u[s_]); dc_wr32(a_ + 4, c->fr.u[s_+1]); } "
-                    "else { dc_wr32(%s, %s); }") % (SZ, xm, addr, addr, FU(m))
+            return ("if (%s) { uint32_t a_ = %s; dc_wr32(a_, %s); dc_wr32(a_ + 4, %s); } "
+                    "else { dc_wr32(%s, %s); }") % (SZ, addr, FU(dm), FU(dm + 1), addr, FU(m))
         if lo == 0x6: return e(ld("%s + %s" % (R(m), R(0))), "fmov @(r0,rm)")
         if lo == 0x7: return e(st("%s + %s" % (R(n), R(0))), "fmov ->@(r0,rn)")
         if lo == 0x8: return e(ld(R(m)), "fmov @rm")
@@ -405,8 +461,8 @@ class Translator:
         if lo == 0xB:
             return e(("{ %s -= (%s) ? 8 : 4; uint32_t a0 = %s; " % (R(n), SZ, R(n))) + st("a0") + " }", "fmov ->@-rn")
         if lo == 0xC:
-            return e("if (%s) { int d = %s, s_ = %s; uint32_t x0 = c->fr.u[s_], x1 = c->fr.u[s_+1]; c->fr.u[d] = x0; c->fr.u[d+1] = x1; } else { %s = %s; }"
-                     % (SZ, xn, xm, FU(n), FU(m)), "fmov")
+            return e("if (%s) { uint32_t x0 = %s, x1 = %s; %s = x0; %s = x1; } else { %s = %s; }"
+                     % (SZ, FU(dm), FU(dm + 1), FU(dn), FU(dn + 1), FU(n), FU(m)), "fmov")
         if lo == 0xE: return e("%s = fmaf(%s, %s, %s);" % (FR(n), FR(0), FR(m), FR(n)), "fmac (fused)")
         if lo == 0xD:
             if m == 0x0: return e("%s = c->fpul;" % FU(n), "fsts")
@@ -447,7 +503,7 @@ class Translator:
         self._emit_function(start, end, known, out)
         self._fpmode = None
         if self.local_regs:
-            out[first:] = localize_regs(out[first:])
+            out[first:] = localize_regs(out[first:], fp=self.fp_mode and self.sparse_labels and self.fp_locals)
 
     # FP mode (--fp-mode, with --sparse-labels). Every FP instruction tested FPSCR.PR (single or double)
     # or FPSCR.SZ (32- or 64-bit moves) at run time. Games keep both 0 nearly everywhere and flip SZ
@@ -507,9 +563,24 @@ class Translator:
         return {a: (None if m == UNSEEN else m) for a, m in mode.items()}
 
     def fp_fix(self, line, m):
-        """the instruction's code with FPSCR.PR / SZ tests decided by mode m"""
+        """the instruction's code with FPSCR.PR / SZ tests decided by mode m: `if (TEST) { A } else { B }`
+        becomes `{ A }` or `{ B }`; a test anywhere else becomes 1 or 0"""
         if m is None: return line
-        return line.replace(self.FP_TEST[0], "1" if m[0] else "0").replace(self.FP_TEST[1], "1" if m[1] else "0")
+        for test, v in zip(self.FP_TEST, m):
+            pat = "if (%s) {" % test
+            while True:
+                k = line.find(pat)
+                if k < 0: break
+                a0 = k + len(pat) - 1                  # the then-block's {
+                a1 = _brace_end(line, a0)
+                if a1 < 0 or not line.startswith(" else {", a1 + 1): break
+                b0 = a1 + len(" else ")
+                b1 = _brace_end(line, b0)
+                if b1 < 0: break
+                keep = line[a0:a1 + 1] if v else line[b0:b1 + 1]
+                line = line[:k] + keep + line[b1 + 1:]
+            line = line.replace(test, "1" if v else "0")
+        return line
 
     def fp_check(self, m):
         return "(c->fpscr & (FPSCR_PR | FPSCR_SZ)) != %s" % ("(%s%s)" % ("FPSCR_PR" if m[0] else "0", " | FPSCR_SZ" if m[1] else " | 0"))
@@ -904,6 +975,7 @@ def main():
     ap.add_argument("--no-discover", action="store_true")
     ap.add_argument("--no-local-regs", action="store_true", help="keep every register access as c->r[n]")
     ap.add_argument("--sparse-labels", action="store_true", help="labels only at real entries (others run interpreted)")
+    ap.add_argument("--no-fp-locals", action="store_true", help="FP registers stay in the context (see localize_fp)")
     ap.add_argument("--no-fp-mode", action="store_true", help="FP instructions test FPSCR.PR/SZ at run time everywhere (see fp_modes)")
     ap.add_argument("--entries", help="file of mid-function entry addresses (hex, one a line) that keep their label")
     ap.add_argument("--no-idle-loops", action="store_true", help="no DC_IDLE in poll loops (time doesn't jump ahead there)")
@@ -920,6 +992,7 @@ def main():
     tr.local_regs = not args.no_local_regs and os.environ.get("DCCORE_LOCAL_REGS", "1") != "0"
     tr.sparse_labels = args.sparse_labels or os.environ.get("DCCORE_SPARSE_LABELS", "0") == "1"
     tr.fp_mode = not args.no_fp_mode and os.environ.get("DCCORE_FP_MODE", "1") != "0"
+    tr.fp_locals = not args.no_fp_locals and os.environ.get("DCCORE_FP_LOCALS", "1") != "0"
     entries = args.entries or os.environ.get("DCCORE_ENTRIES")
     if entries and os.path.exists(entries):
         for l in open(entries):
