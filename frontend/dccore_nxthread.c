@@ -95,6 +95,23 @@ void *dc_nx_pthread_start(int (*fn)(void *), void *arg, int core) {
  * ended: the render thread found an old pointer there and crashed in SDL_TLSGet. Called first thing in
  * each thread of ours. */
 void dc_nx_clear_tls(void) { memset((uint8_t *)armGetTls() + 0x180, 0, 0x1E0 - 0x180); }
+/* The render thread's OpenGL context, through EGL itself. SDL_GL_MakeCurrent / SwapWindow look up the
+ * current window in SDL's thread-local storage, which crashed in any thread but the main one here
+ * (SDL_TLSGet, even with its TLS slots cleared), so the render thread doesn't call them: the main thread
+ * hands over the display, surface and context SDL made, and the thread binds and swaps them. */
+#include <EGL/egl.h>
+static EGLDisplay e_dpy = EGL_NO_DISPLAY; static EGLSurface e_surf = EGL_NO_SURFACE; static EGLContext e_ctx = EGL_NO_CONTEXT;
+int dc_nx_egl_grab(void) {
+    e_dpy = eglGetCurrentDisplay(); e_surf = eglGetCurrentSurface(EGL_DRAW); e_ctx = eglGetCurrentContext();
+    return e_dpy != EGL_NO_DISPLAY && e_surf != EGL_NO_SURFACE && e_ctx != EGL_NO_CONTEXT;
+}
+int dc_nx_egl_current(int on) {
+    if (e_dpy == EGL_NO_DISPLAY) return 0;
+    return on ? eglMakeCurrent(e_dpy, e_surf, e_surf, e_ctx) == EGL_TRUE
+              : eglMakeCurrent(e_dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, EGL_NO_CONTEXT) == EGL_TRUE;
+}
+void dc_nx_egl_swap(void) { eglSwapBuffers(e_dpy, e_surf); }
+
 /* the calling thread onto one core; and its end without the C library's clean-up (which crashes) */
 void dc_nx_set_core(int core) { svcSetThreadCoreMask(CUR_THREAD_HANDLE, core, 1u << core); }
 void dc_nx_exit_thread(void) { svcExitThread(); }

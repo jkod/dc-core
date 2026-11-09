@@ -400,11 +400,17 @@ void *dc_nx_thread_start(int (*fn)(void *), void *arg, int core);
 void dc_nx_thread_join(void *t);
 void dc_nx_set_core(int core);
 void dc_nx_clear_tls(void);
+int dc_nx_egl_grab(void);
+int dc_nx_egl_current(int on);
+void dc_nx_egl_swap(void);
 void dc_nx_exit_thread(void);
 uint32_t dc_nx_thread_handle(void *t);
 static void *aica_thr;
+/* the render thread's GL context: EGL straight on the Switch (see dccore_nxthread.c), SDL elsewhere */
+#define RT_CURRENT(on) dc_nx_egl_current(on)
 #else
 static SDL_Thread *aica_thr;                               /* the sound chip's thread (below) */
+#define RT_CURRENT(on) (SDL_GL_MakeCurrent(win, (on) ? glc : NULL) == 0)
 #endif
 static Uint64 prof_wait;                                    /* the game waiting for it */
 static int osd_open, osd_req;                              /* the on-screen menu (dccore_osd.inc.c) */
@@ -506,6 +512,9 @@ static void present_gl(void) {
     dc_pvr_gl_present(dw, dh, 0);
     osd_overlays(dw, dh);
     if (shot_window() && dw * dh <= 1920 * 1080 * 4) { dc_pvr_gl_read_window(win_rgb, dw, dh); win_rgb_w = dw; win_rgb_h = dh; }
+#ifdef __SWITCH__
+    if (rt_on) dc_nx_egl_swap(); else
+#endif
     SDL_GL_SwapWindow(win);
     need_present = 0;
     prof_present += SDL_GetPerformanceCounter() - pt;
@@ -529,7 +538,7 @@ static int rt_main(void *u) {
     dc_nx_clear_tls();                                      /* before any SDL call: see there */
     dc_nx_set_core(2);                                      /* game on 0, sound on 1 */
 #endif
-    SDL_GL_MakeCurrent(win, glc);
+    RT_CURRENT(1);
     SDL_LockMutex(rt_mx);
     for (;;) {
         while (!rt_job && !rt_want_present && !rt_quit) SDL_CondWait(rt_cv, rt_mx);
@@ -550,7 +559,7 @@ static int rt_main(void *u) {
         SDL_CondBroadcast(rt_done_cv);
     }
     SDL_UnlockMutex(rt_mx);
-    SDL_GL_MakeCurrent(win, NULL);
+    RT_CURRENT(0);
 #ifdef __SWITCH__
     dc_nx_exit_thread();                                    /* SDL's thread clean-up crashes on the Switch */
 #endif
@@ -595,10 +604,13 @@ static void rt_start(void) {
     if (!rt_mx) { rt_mx = SDL_CreateMutex(); rt_cv = SDL_CreateCond(); rt_done_cv = SDL_CreateCond(); }
     if (!rt_mx || !rt_cv || !rt_done_cv) return;
     rt_job = rt_busy = rt_quit = rt_want_present = 0;
-    SDL_GL_MakeCurrent(win, NULL);                          /* the context moves to the thread */
+#ifdef __SWITCH__
+    if (!dc_nx_egl_grab()) { fprintf(stderr, "render thread: no EGL context to hand over\n"); return; }
+#endif
+    RT_CURRENT(0);                                          /* the context moves to the thread */
     /* SDL keeps the current GL context in thread-local storage (pthread keys); 2 MB of stack for Mesa */
     rt_thr = SDL_CreateThreadWithStackSize(rt_main, "render", 0x200000, NULL);
-    if (!rt_thr) { SDL_GL_MakeCurrent(win, glc); return; }
+    if (!rt_thr) { RT_CURRENT(1); return; }
     rt_on = 1;
     fprintf(stderr, "drawing on its own thread\n");
 }
@@ -608,7 +620,7 @@ static void rt_stop(void) {
     SDL_LockMutex(rt_mx); rt_quit = 1; SDL_CondBroadcast(rt_cv); SDL_UnlockMutex(rt_mx);
     SDL_WaitThread(rt_thr, NULL);
     rt_thr = NULL; rt_on = 0;
-    SDL_GL_MakeCurrent(win, glc);
+    RT_CURRENT(1);
 }
 static uint8_t sw_rgb[1280 * 1024 * 3];
 static void job_sw_render(void *u) {
