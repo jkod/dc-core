@@ -2,6 +2,7 @@
  * SDL made crashed in SDL's thread clean-up when it ended, and they have to end: on Reset and Quit the
  * homebrew loader takes over the same process, so anything still running would run unloaded code. */
 #include <switch.h>
+#include <string.h>
 #include <stdlib.h>
 
 typedef struct { Thread t; int (*fn)(void *); void *arg; } nx_thread;
@@ -52,7 +53,8 @@ int dc_nx_set_cpu_mhz(int mhz) {
 /* The thread ends with svcExitThread right away: returning into libnx (threadExit and the C library's
  * per-thread clean-up) crashed on a garbage pointer at Quit, with SDL's threads and libnx's alike. The
  * handle still signals, so dc_nx_thread_join works; the thread's small C-library block is not freed. */
-static void entry(void *p) { nx_thread *x = p; x->fn(x->arg); svcExitThread(); }
+void dc_nx_clear_tls(void);
+static void entry(void *p) { nx_thread *x = p; dc_nx_clear_tls(); x->fn(x->arg); svcExitThread(); }
 
 void *dc_nx_thread_start(int (*fn)(void *), void *arg, int core) {
     nx_thread *x = calloc(1, sizeof *x);
@@ -66,13 +68,12 @@ void *dc_nx_thread_start(int (*fn)(void *), void *arg, int core) {
 
 uint32_t dc_nx_thread_handle(void *p) { return p ? ((nx_thread *)p)->t.handle : 0; }
 
-/* The render thread calls into SDL's OpenGL functions, which keep the current context in SDL's thread-local
- * storage: pthread keys, which a thread made with threadCreate doesn't have (it crashed at start). So it
- * is a pthread, ended the same way (svcExitThread, skipping the clean-up), on the core asked for. */
+/* a pthread on a given core (unused for now: the render thread is an SDL thread) */
 #include <pthread.h>
 typedef struct { pthread_t t; int (*fn)(void *); void *arg; int core; } nx_pthread;
 static void *pentry(void *p) {
     nx_pthread *x = p;
+    dc_nx_clear_tls();
     if (x->core >= 0) svcSetThreadCoreMask(CUR_THREAD_HANDLE, x->core, 1u << x->core);
     x->fn(x->arg);
     svcExitThread();
@@ -89,6 +90,14 @@ void *dc_nx_pthread_start(int (*fn)(void *), void *arg, int core) {
     if (r) { free(x); return NULL; }
     return x;
 }
+/* A new thread's user TLS slots (TLS + 0x180 .. the ThreadVars at 0x1E0: pthread keys, so SDL's
+ * thread-local storage) aren't cleared by libnx, and the kernel hands out TLS pages of threads that
+ * ended: the render thread found an old pointer there and crashed in SDL_TLSGet. Called first thing in
+ * each thread of ours. */
+void dc_nx_clear_tls(void) { memset((uint8_t *)armGetTls() + 0x180, 0, 0x1E0 - 0x180); }
+/* the calling thread onto one core; and its end without the C library's clean-up (which crashes) */
+void dc_nx_set_core(int core) { svcSetThreadCoreMask(CUR_THREAD_HANDLE, core, 1u << core); }
+void dc_nx_exit_thread(void) { svcExitThread(); }
 void dc_nx_pthread_join(void *p) {
     nx_pthread *x = p;
     if (!x) return;

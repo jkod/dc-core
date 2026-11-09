@@ -398,8 +398,9 @@ int dc_front_fps60 = -1;
 /* libnx threads on the Switch (dccore_nxthread.c): an SDL thread crashed in SDL's clean-up when it ended */
 void *dc_nx_thread_start(int (*fn)(void *), void *arg, int core);
 void dc_nx_thread_join(void *t);
-void *dc_nx_pthread_start(int (*fn)(void *), void *arg, int core);
-void dc_nx_pthread_join(void *t);
+void dc_nx_set_core(int core);
+void dc_nx_clear_tls(void);
+void dc_nx_exit_thread(void);
 uint32_t dc_nx_thread_handle(void *t);
 static void *aica_thr;
 #else
@@ -518,12 +519,16 @@ static void present_gl(void) {
  * a texture, the software renderer, CPU-drawn pictures, screenshots) runs there with the game waiting
  * (rt_call). Presenting without a new frame (menu, toasts, Show FPS) is asked for and done when the
  * thread is free. Default on the Switch; DC_RENDER_THREAD=1 / 0 elsewhere / to turn it off. */
-static void *rt_thr;
+static SDL_Thread *rt_thr;
 static SDL_mutex *rt_mx; static SDL_cond *rt_cv, *rt_done_cv;
 static int rt_job, rt_busy, rt_quit, rt_want_present, rt_scale;   /* under rt_mx; job: 1 render, 2 call */
 static void (*rt_fn)(void *); static void *rt_arg;
 static int rt_main(void *u) {
     (void)u;
+#ifdef __SWITCH__
+    dc_nx_clear_tls();                                      /* before any SDL call: see there */
+    dc_nx_set_core(2);                                      /* game on 0, sound on 1 */
+#endif
     SDL_GL_MakeCurrent(win, glc);
     SDL_LockMutex(rt_mx);
     for (;;) {
@@ -546,6 +551,9 @@ static int rt_main(void *u) {
     }
     SDL_UnlockMutex(rt_mx);
     SDL_GL_MakeCurrent(win, NULL);
+#ifdef __SWITCH__
+    dc_nx_exit_thread();                                    /* SDL's thread clean-up crashes on the Switch */
+#endif
     return 0;
 }
 static void rt_wait_idle(void) {
@@ -588,11 +596,8 @@ static void rt_start(void) {
     if (!rt_mx || !rt_cv || !rt_done_cv) return;
     rt_job = rt_busy = rt_quit = rt_want_present = 0;
     SDL_GL_MakeCurrent(win, NULL);                          /* the context moves to the thread */
-#ifdef __SWITCH__
-    rt_thr = dc_nx_pthread_start(rt_main, NULL, 2);         /* core 2: game on 0, sound on 1 (a pthread: see there) */
-#else
-    rt_thr = SDL_CreateThread(rt_main, "render", NULL);
-#endif
+    /* SDL keeps the current GL context in thread-local storage (pthread keys); 2 MB of stack for Mesa */
+    rt_thr = SDL_CreateThreadWithStackSize(rt_main, "render", 0x200000, NULL);
     if (!rt_thr) { SDL_GL_MakeCurrent(win, glc); return; }
     rt_on = 1;
     fprintf(stderr, "drawing on its own thread\n");
@@ -601,11 +606,7 @@ static void rt_stop(void) {
     if (!rt_thr) return;
     rt_wait_idle();
     SDL_LockMutex(rt_mx); rt_quit = 1; SDL_CondBroadcast(rt_cv); SDL_UnlockMutex(rt_mx);
-#ifdef __SWITCH__
-    dc_nx_pthread_join(rt_thr);
-#else
     SDL_WaitThread(rt_thr, NULL);
-#endif
     rt_thr = NULL; rt_on = 0;
     SDL_GL_MakeCurrent(win, glc);
 }
