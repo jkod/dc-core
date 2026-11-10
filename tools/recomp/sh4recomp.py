@@ -178,9 +178,11 @@ class Translator:
         self.setjmp = set()          # the game's setjmp routine(s): calls get DC_CALL_SETJMP
         self.idle_loops = True       # poll loops get DC_IDLE (--no-idle-loops: plain DC_TICK)
         self.local_regs = True       # registers as locals (localize_regs; --no-local-regs: c->r everywhere)
+        self.pieces = {}             # merged functions: the starts of the functions taken in (merge_ranges)
         self.sparse_labels = False   # labels only at real entries (--sparse-labels; others: dc_mid_entry)
         self.fp_mode = True          # FP instructions in a known PR/SZ mode (fp_modes; --no-fp-mode)
         self.fp_locals = True        # FP registers as locals in the fast version (localize_fp; --no-fp-locals)
+        self.fs_trace = False        # --fs-trace: dc_fs_trace() wherever the fast version hands over to the full one
         self.fast_mem = True         # the fast version's memory accesses inline, RAM's base a local (--no-fast-mem)
         self._fpmode = None
         self.extra_entries = set()   # mid-function entries seen at run time (--entries FILE)
@@ -600,16 +602,22 @@ class Translator:
         out.append("  if (c->entry != %s) { jt = c->entry; goto local_jump; }" % h(start))
         fpm = self._fpmode
         full = "fs_%s%08X(c)" % (self.prefix, start)
+        if self.fs_trace:                               # --fs-trace: count what leaves the fast version
+            full = "(dc_fs_trace(c, %s), %s)" % (h(start), full)
         if fpm:                                         # see fp_modes
             out.append("  if (c->fpscr & (FPSCR_PR | FPSCR_SZ)) return %s;" % full)
         insns = {}
         a = start
         while a < end:
             insns[a] = self.decode(a); a += 2
+        self._bounds = self.pieces.get(start, [])
+        bset = self._bset = set(self._bounds)
         needs_local_jump = True   # computed jumps and mid-function entries both use the switch
         calls_back = {a + 4 for a, i in insns.items() if i.kind in ("bsr", "jsr", "bsrf")}
         for a in range(start, end, 2):
             i = insns[a]
+            if a in bset:                               # running on into the next function: see _hop
+                out.append("  if (DC_HLE_HIT(%s)) return %s; DC_TICK(c, dc_call_cost);" % (h(a), h(a)))
             out.append("L_%08X:" % a)
             line = self.emit_insn(i, insns, start, end)
             if fpm:
@@ -646,7 +654,7 @@ class Translator:
                         out.append("    case %s: goto L_%08X;" % (h(a), a))
             out.append("  }")
             out.append("  %s" % ("return jt;" if keep is None else
-                       "c->entry = jt; return fs_%s%08X(c);" % (self.prefix, start)))
+                       "c->entry = jt; return %sfs_%s%08X(c)%s;" % ("(dc_fs_trace(c, %s), " % h(start) if self.fs_trace else "", self.prefix, start, ")" if self.fs_trace else "")))
         out.append("}")
         # declare jt at top if needed
         if needs_local_jump:
@@ -713,8 +721,34 @@ class Translator:
             loads += ld
         return loads > 0
 
+    def _hop(self, a, t):
+        """In a merged function: going from a to t crosses into another of the functions it is made
+        of. That was a jump through the dispatcher, and is charged the same time (dc_call_cost) so
+        that a merged build keeps the timing of one that is not."""
+        b = self._bounds
+        return bool(b) and bisect.bisect_right(b, a) != bisect.bisect_right(b, t)
+
+    def _hop_jt(self, a, start, end):
+        """The same for a computed jump: charged when jt is in the function but not in a's part."""
+        b = self._bounds
+        if not b: return ""
+        k = bisect.bisect_right(b, a)
+        lo, hi = (b[k - 1] if k else start), (b[k] if k < len(b) else end)
+        return "if (jt - %s < %s && jt - %s >= %s) { if (DC_HLE_HIT(jt)) return jt; DC_TICK(c, dc_call_cost); } " % (h(start), h(end - start), h(lo), h(hi - lo))
+
+    def _goto(self, a, t):
+        if self._hop(a, t):
+            return "{ %sDC_TICK(c, dc_call_cost); goto L_%08X; }" % (self._hle(t), t)
+        return "goto L_%08X;" % t
+
+    def _hle(self, t):
+        """Into the start of one of the functions merged in: not if something overrides it."""
+        return "if (DC_HLE_HIT(%s)) return %s; " % (h(t), h(t)) if t in self._bset else ""
+
     def goto_or_call(self, t, start, end, here=None, idle=False):
         if start <= t < end and (t & 1) == 0:
+            if self._hop(self._cur, t):
+                return "{ %sDC_TICK(c, dc_call_cost); goto L_%08X; }" % (self._hle(t), t)
             if here is not None and t <= here:          # loop: let time pass / interrupts in
                 if idle:                                # a poll loop: time may jump ahead (DC_IDLE)
                     return "{ DC_IDLE(c); goto L_%08X; }" % t
@@ -728,14 +762,15 @@ class Translator:
             return i.code + ((" /* %s */" % i.text) if i.text else "")
         a = i.addr
         nxt = a + 4
+        self._cur = a
         if k == "cbr":
             if not i.delayed:
                 idle = self.idle_loops and i.target <= a and self.idle_loop(i.target, a)
                 return "if (%s) %s" % (i.cond, self.goto_or_call(i.target, start, end, a, idle))
             slot = self.slot_code(i, insns)
-            return "{ int cc = %s; %s if (cc) %s goto L_%08X; }" % (
-                i.cond, slot, self.goto_or_call(i.target, start, end, a),
-                nxt) if nxt < end else "{ int cc = %s; %s if (cc) %s return %s; }" % (
+            return "{ int cc = %s; %s if (cc) %s %s }" % (
+                i.cond, slot, self.goto_or_call(i.target, start, end, None if self._hop(a, nxt) else a),
+                self._goto(a, nxt)) if nxt < end else "{ int cc = %s; %s if (cc) %s return %s; }" % (
                 i.cond, slot, self.goto_or_call(i.target, start, end), h(nxt))
         slot = self.slot_code(i, insns)
         if k == "bra":
@@ -761,9 +796,9 @@ class Translator:
             # interrupts/exceptions are entered as calls from dc_events, so rte = restore SR + return
             return "{ sh4_set_sr(c, c->ssr); %s return 0; }" % slot
         if k == "jmp":
-            return "{ jt = %s; %s goto local_jump; }" % (R(i.reg), slot)
+            return "{ jt = %s; %s %sgoto local_jump; }" % (R(i.reg), slot, self._hop_jt(a, start, end))
         if k == "braf":
-            return "{ jt = %s + %s; %s goto local_jump; }" % (R(i.reg), h(nxt), slot)
+            return "{ jt = %s + %s; %s %sgoto local_jump; }" % (R(i.reg), h(nxt), slot, self._hop_jt(a, start, end))
         raise ValueError(k)
 
     def _reg_const(self, insns, a, reg, start):
@@ -782,7 +817,7 @@ class Translator:
         return None
 
     def _after_call(self, nxt, end):
-        return "goto L_%08X;" % nxt if nxt < end else "return %s;" % h(nxt)
+        return self._goto(nxt - 4, nxt) if nxt < end else "return %s;" % h(nxt)
 
 
 def flow_end(tr, s, cap=0x4000):
@@ -804,6 +839,84 @@ def flow_end(tr, s, cap=0x4000):
         a += 2
     return a
 
+
+def merge_ranges(tr, ranges, cap):
+    """The fast version of a function also takes in the functions after it that loop back into it
+    (--merge-bytes, with --sparse-labels). Function starts come from wherever a call, a table or a
+    jump was seen, so one real function is often several here, and a loop that spans them left its
+    function on every pass: a return to the dispatcher, a lookup, and every register written back and
+    read again (Re-Volt made 11,000 such hops a frame). From a function's start, control flow is
+    followed through the code after it (within `cap` bytes, code only); where an instruction reached
+    that way, past the function's end, branches back into the function, the function is extended to
+    the end of the one holding that instruction. Those stay functions of their own for entries from
+    elsewhere."""
+    if cap <= 0:
+        return ranges
+    n = len(ranges)
+    nat = [min(e, ranges[k + 1][0]) if k + 1 < n and e > ranges[k + 1][0] else e for k, (_, e) in enumerate(ranges)]
+    out = []
+    for k, (s, e) in enumerate(ranges):
+        if e != nat[k] or e - s >= cap:                 # already extended (setjmp), or long as it is
+            out.append((s, e)); continue
+        j = k                                           # the contiguous code after it, within cap
+        while j + 1 < n and ranges[j + 1][0] == nat[j] and nat[j + 1] - s <= cap:
+            j += 1
+        limit = nat[j]
+        if limit == e:
+            out.append((s, e)); continue
+        seen, work, back = set(), [s], []
+        while work:
+            a = work.pop()
+            while s <= a < limit and a not in seen:
+                seen.add(a)
+                i = tr.decode(a)
+                kd = i.kind
+                if kd in ("op", "bad"):
+                    if kd == "bad": break
+                    a += 2; continue
+                if kd in ("cbr", "bra") and i.target is not None:
+                    if a >= e and s <= i.target < a:
+                        back.append((a, i.target))      # backwards, from past the function's end
+                    if s <= i.target < limit:
+                        work.append(i.target)
+                if kd == "cbr":
+                    a += 4 if i.delayed else 2; continue
+                if kd in ("bsr", "jsr", "bsrf"):
+                    a += 4; continue
+                break                                   # bra, jmp, rts, rte, braf
+        end, m = e, k
+        grew = True
+        while grew:                                     # a branch back into what the function has so far
+            grew = False
+            for a, t in back:
+                if a >= end and t < end:
+                    while m < j and nat[m] < a + 4: m += 1
+                    if nat[m] > end: end = nat[m]; grew = True
+        out.append((s, end))
+        if end > e:                                     # where the other functions start: see _hop
+            tr.pieces[s] = [nat[q] for q in range(k, m)]
+    return out
+
+def cross_entries(tr, ranges):
+    """addresses inside a function that another one branches to or runs into: they keep their label
+    in the fast version (it handed over to the full one there, for a whole loop at times)"""
+    starts = {s for s, _ in ranges}
+    found = set()
+    for s, e in ranges:
+        a = s
+        while a < e:
+            i = tr.decode(a)
+            if i.kind in ("cbr", "bra") and i.target is not None and not (s <= i.target < e) and i.target not in starts:
+                found.add(i.target)
+            t = None                                    # a call's target that isn't a function start
+            if i.kind == "bsr": t = i.target
+            elif i.kind == "jsr": t = tr._reg_const(None, a, i.reg, s)
+            if t is not None and tr.base <= t < tr.end and t not in starts:
+                found.add(t)
+            a += 2
+        if e not in starts:
+            found.add(e)
+    return found
 
 def extend_setjmp_callers(tr, ranges):
     """A function that calls the game's setjmp must stay one host function until it returns: the
@@ -983,6 +1096,9 @@ def main():
     ap.add_argument("--no-discover", action="store_true")
     ap.add_argument("--no-local-regs", action="store_true", help="keep every register access as c->r[n]")
     ap.add_argument("--sparse-labels", action="store_true", help="labels only at real entries (others run interpreted)")
+    ap.add_argument("--merge-bytes", type=lambda x: int(x, 0), default=int(os.environ.get("DCCORE_MERGE_BYTES", "0x1000"), 0),
+                    help="fast version: a function takes in the code after it that it branches or runs into, up to this many bytes (0: off)")
+    ap.add_argument("--fs-trace", action="store_true", help="count the fast versions' hand-overs to the full ones (printed at exit)")
     ap.add_argument("--no-fast-mem", action="store_true", help="the fast version's memory accesses as everywhere else (see sh4.h dc_frd32)")
     ap.add_argument("--no-fp-locals", action="store_true", help="FP registers stay in the context (see localize_fp)")
     ap.add_argument("--no-fp-mode", action="store_true", help="FP instructions test FPSCR.PR/SZ at run time everywhere (see fp_modes)")
@@ -1002,6 +1118,7 @@ def main():
     tr.sparse_labels = args.sparse_labels or os.environ.get("DCCORE_SPARSE_LABELS", "0") == "1"
     tr.fp_mode = not args.no_fp_mode and os.environ.get("DCCORE_FP_MODE", "1") != "0"
     tr.fp_locals = not args.no_fp_locals and os.environ.get("DCCORE_FP_LOCALS", "1") != "0"
+    tr.fs_trace = args.fs_trace or os.environ.get("DCCORE_FS_TRACE", "0") == "1"
     tr.fast_mem = not args.no_fast_mem and os.environ.get("DCCORE_FAST_MEM", "1") != "0"
     entries = args.entries or os.environ.get("DCCORE_ENTRIES")
     if entries and os.path.exists(entries):
@@ -1051,6 +1168,12 @@ def main():
                 e = known[j][1]
         ranges.append((s, e))
     ranges = extend_setjmp_callers(tr, ranges)
+    if tr.sparse_labels:
+        n0 = sum(e - s for s, e in ranges)
+        ranges = merge_ranges(tr, ranges, args.merge_bytes)
+        more = cross_entries(tr, ranges) - tr.extra_entries
+        tr.extra_entries |= more
+        print("merged: %d -> %d bytes of code in functions; %d entries kept from other functions' branches" % (n0, sum(e - s for s, e in ranges), len(more)))
     # one file per 16 KB of address space: adding a function only changes its own file,
     # and files whose text is unchanged are not rewritten (incremental builds stay fast)
     files = []

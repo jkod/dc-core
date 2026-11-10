@@ -123,7 +123,10 @@ DC_ALWAYS_INLINE uint16_t dc_frd16(const uint8_t *ram, uint32_t a) { if (DC_LIKE
 DC_ALWAYS_INLINE uint32_t dc_frd32(const uint8_t *ram, uint32_t a) { if (DC_LIKELY(DC_IS_RAM(a))) { uint32_t v; DC_RWATCHED(a, 4); memcpy(&v, ram + DC_RAM_OFS(a), 4); return v; } DC_URAM_INLINE_RD(a, uint32_t) return dc_mem_rd32(a); }
 DC_ALWAYS_INLINE void dc_fwr8 (uint8_t *ram, uint32_t a, uint8_t v)  { if (DC_LIKELY(DC_IS_RAM(a))) { DC_WATCHED(a, v, 1); ram[DC_RAM_OFS(a)] = v; return; } DC_URAM_INLINE_WR(a, v) dc_mem_wr8(a, v); }
 DC_ALWAYS_INLINE void dc_fwr16(uint8_t *ram, uint32_t a, uint16_t v) { if (DC_LIKELY(DC_IS_RAM(a))) { DC_WATCHED(a, v, 2); memcpy(ram + DC_RAM_OFS(a), &v, 2); return; } DC_URAM_INLINE_WR(a, v) dc_mem_wr16(a, v); }
-DC_ALWAYS_INLINE void dc_fwr32(uint8_t *ram, uint32_t a, uint32_t v) { if (DC_LIKELY(DC_IS_RAM(a))) { DC_WATCHED(a, v, 4); memcpy(ram + DC_RAM_OFS(a), &v, 4); return; } DC_URAM_INLINE_WR(a, v) dc_mem_wr32(a, v); }
+/* a store queue next (0xE0000000..: every vertex goes to the tile accelerator through them, eight stores each) */
+extern uint32_t dc_sq[2][8]; extern int dc_sq_direct;
+DC_ALWAYS_INLINE void dc_fwr32(uint8_t *ram, uint32_t a, uint32_t v) { if (DC_LIKELY(DC_IS_RAM(a))) { DC_WATCHED(a, v, 4); memcpy(ram + DC_RAM_OFS(a), &v, 4); return; }
+    if ((a >> 26) == 0x38 && dc_sq_direct) { dc_sq[(a >> 5) & 1][(a >> 2) & 7] = v; return; } DC_URAM_INLINE_WR(a, v) dc_mem_wr32(a, v); }
 
 DC_FORCE_INLINE float dc_rdf(uint32_t a) { uint32_t u = dc_rd32(a); float f; memcpy(&f, &u, 4); return f; }
 DC_FORCE_INLINE void  dc_wrf(uint32_t a, float f) { uint32_t u; memcpy(&u, &f, 4); dc_wr32(a, u); }
@@ -197,6 +200,8 @@ extern uint64_t dc_idle_skipped;
 #define DC_IDLE(c) do { uint64_t t_ = (c)->cycles + dc_idle_step; if (t_ > dc_next_event) t_ = dc_next_event; \
     if (t_ > (c)->cycles) { dc_idle_skipped += t_ - (c)->cycles; (c)->cycles = t_; } DC_TICK(c, dc_loop_cost); } while (0)
 extern uint32_t dc_call_cost;
+extern uint8_t dc_hle_bits[8192];       /* dispatch.c: addresses that only the dispatcher may enter */
+#define DC_HLE_HIT(a) (dc_hle_bits[(((a) >> 1) & 0xFFFF) >> 3] & (1u << (((a) >> 1) & 7)))
 /* save states (reset.h): a save waits for the next call from recompiled code, where the callee's address
  * is an exact place to go on from and every register is in the context */
 extern volatile int dc_state_req;
@@ -227,6 +232,9 @@ static inline void sh4_set_dr(sh4ctx *c, int n, double d) {
     uint64_t v; memcpy(&v, &d, 8); c->fr.u[n] = (uint32_t)(v >> 32); c->fr.u[n + 1] = (uint32_t)v;
 }
 /* 64-bit fmov register index: even -> DRn (bank 0), odd -> XDn-1 (bank 1) */
+/* the recompiler's --fs-trace: a fast version (f_) handing over to its full one (fs_); counted by
+ * function, entry and FP mode, the most frequent printed at exit */
+void dc_fs_trace(sh4ctx *c, uint32_t fn);
 /* the bits of a float and back (the recompiler's FP registers as locals: localize_fp) */
 static inline float dc_u2f(uint32_t u) { float f; memcpy(&f, &u, 4); return f; }
 static inline uint32_t dc_f2u(float f) { uint32_t u; memcpy(&u, &f, 4); return u; }

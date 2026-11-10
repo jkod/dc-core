@@ -56,12 +56,15 @@ int dc_nx_set_cpu_mhz(int mhz) {
 void dc_nx_clear_tls(void);
 static void entry(void *p) { nx_thread *x = p; dc_nx_clear_tls(); x->fn(x->arg); svcExitThread(); }
 
-void *dc_nx_thread_start(int (*fn)(void *), void *arg, int core) {
+void *dc_nx_thread_start_prio(int (*fn)(void *), void *arg, int core, int prio);
+void *dc_nx_thread_start(int (*fn)(void *), void *arg, int core) { return dc_nx_thread_start_prio(fn, arg, core, 0x2C); }
+/* prio: 0x2C is the game's; a smaller number runs first (the profiler, to interrupt what it samples) */
+void *dc_nx_thread_start_prio(int (*fn)(void *), void *arg, int core, int prio) {
     nx_thread *x = calloc(1, sizeof *x);
     if (!x) return NULL;
     x->fn = fn; x->arg = arg;
     /* 2 MB: the render thread runs Mesa, whose shader compiler (variants built at draw time) recurses deep */
-    if (R_FAILED(threadCreate(&x->t, entry, x, NULL, 0x200000, 0x2C, core))) { free(x); return NULL; }
+    if (R_FAILED(threadCreate(&x->t, entry, x, NULL, 0x200000, prio, core))) { free(x); return NULL; }
     if (R_FAILED(threadStart(&x->t))) { threadClose(&x->t); free(x); return NULL; }
     return x;
 }

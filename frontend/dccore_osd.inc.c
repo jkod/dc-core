@@ -232,7 +232,9 @@ static void prof_start(void) {
     if (prof_state == 1) return;
     prof_sampling = 0; prof_state = 1;
     /* core 1, beside the sound thread: on the game's core it only caught it waiting, and core 2 draws */
-    if (!prof_thr) prof_thr = dc_nx_thread_start(prof_main, NULL, 1);
+    /* above the others' priority: at theirs it ran only when its core's thread (the sound's) was waiting,
+     * and every sample of that thread showed it waiting */
+    if (!prof_thr) prof_thr = dc_nx_thread_start_prio(prof_main, NULL, 1, 0x28);
     if (!prof_thr) prof_state = 3;
 }
 static void prof_stop(void) { if (prof_thr) { prof_quit = 1; dc_nx_thread_join(prof_thr); prof_thr = NULL; prof_quit = 0; } }

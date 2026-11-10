@@ -25,8 +25,9 @@ uint64_t dc_next_event = ~0ull;
 dc_hw_hooks dc_hw;                   /* optional observers (renderer, sound, input) */
 extern sh4ctx *dc_current_ctx;
 
+static void sq_direct_update(void);
 static dc_hw_ops user_ops;
-void dc_set_hw(const dc_hw_ops *ops) { if (ops) user_ops = *ops; else memset(&user_ops, 0, sizeof user_ops); }
+void dc_set_hw(const dc_hw_ops *ops) { if (ops) user_ops = *ops; else memset(&user_ops, 0, sizeof user_ops); sq_direct_update(); }
 
 /* ---------------------------------------------------------------- storage */
 static uint32_t sb[0x800];           /* 0x005F6800..0x005F7FFF, word index */
@@ -53,7 +54,9 @@ int dc_pvr_clip_written;              /* the game has set FB_X_CLIP / FB_Y_CLIP 
 uint32_t dc_vram32_gen[0x800];       /* per 4 KB of the 32-bit area: bumped on writes through it (framebuffers) */
 #define VRAM32_TOUCH(o) (dc_vram32_gen[((o) & 0x7FFFFF) >> 12]++)
 static uint32_t p4[32][64];          /* SH-4 on-chip registers, by module */
-static uint32_t sq[2][8];            /* store queues */
+uint32_t dc_sq[2][8];                /* store queues (sh4.h: the fast code stores into them itself) */
+#define sq dc_sq
+int dc_sq_direct = 1;                /* nothing remaps or intercepts 32-bit stores: sq_direct_update */
 static uint8_t  ocram[0x2000];
 static uint32_t ta_blk[8]; static int ta_nb;        /* a 32-byte TA FIFO block being written */
 
@@ -600,6 +603,7 @@ static int nmaps, map_last;
 void dc_hw_map(uint32_t va, uint32_t to, uint32_t len) {
     for (int i = 0; i < nmaps; i++) if (maps[i].va == va) { if (len) { maps[i].len = len; maps[i].to = to; } else maps[i] = maps[--nmaps]; map_last = 0; return; }
     if (len && nmaps < MAX_MAPS) { maps[nmaps].va = va; maps[nmaps].len = len; maps[nmaps].to = to; nmaps++; }
+    sq_direct_update();
     map_last = 0;
 }
 static int map_find(uint32_t a, uint32_t *to) {
@@ -624,6 +628,7 @@ uint32_t dc_sb_reg(uint32_t addr) { return SBR(addr & 0xFFFC); }
 #define MEM_RD(T, n) T dc_mem_rd##n(uint32_t a) { if (DC_IS_URAM(a)) { T v; memcpy(&v, dc_uram + DC_URAM_OFS(a), sizeof v); return v; } if (DC_IS_RAM(a)) { T v; memcpy(&v, dc_ram + DC_RAM_OFS(a), sizeof v); return v; } return dc_hw_rd##n(a); }
 /* a 32-bit store into a store queue (how games send every vertex to the tile accelerator) first: it went
  * through three more calls to end in the same line of wr() */
+static void sq_direct_update(void) { dc_sq_direct = !nmaps && !user_ops.wr32; }
 #define MEM_WR(T, n) void dc_mem_wr##n(uint32_t a, T v) { if (n == 32 && (a >> 26) == 0x38 && !nmaps && !user_ops.wr32) { sq[(a >> 5) & 1][(a >> 2) & 7] = (uint32_t)v; return; } if (DC_IS_URAM(a)) { memcpy(dc_uram + DC_URAM_OFS(a), &v, sizeof v); return; } if (DC_IS_RAM(a)) { memcpy(dc_ram + DC_RAM_OFS(a), &v, sizeof v); return; } dc_hw_wr##n(a, v); }
 MEM_RD(uint8_t, 8) MEM_RD(uint16_t, 16) MEM_RD(uint32_t, 32)
 MEM_WR(uint8_t, 8) MEM_WR(uint16_t, 16) MEM_WR(uint32_t, 32)
@@ -640,7 +645,7 @@ void dc_hw_state(dc_state_fn f) {
     f(&dc_next_event, sizeof dc_next_event); f(&dc_pvr_clip_written, sizeof dc_pvr_clip_written);
     f(dc_vram, sizeof dc_vram);
 }
-void dc_hw_invalidate_caches(void) {
+void dc_hw_invalidate_caches(void) { sq_direct_update();
     for (size_t i = 0; i < sizeof dc_vram_gen / sizeof *dc_vram_gen; i++) dc_vram_gen[i] += 0x10000u;
     for (size_t i = 0; i < sizeof dc_vram32_gen / sizeof *dc_vram32_gen; i++) dc_vram32_gen[i] += 0x10000u;
     dc_pal_gen += 0x10000u;

@@ -30,9 +30,15 @@ uint64_t dc_idle_skipped;
 uint32_t dc_dispatch_gen = 1;                 /* call sites (dc_site) resolve again when it changes */
 static void lcache_clear(void) { memset(lcache, 0, sizeof lcache); dc_dispatch_gen++; }
 
+/* addresses that must be entered through the dispatcher (an override, a call hook): merged functions
+ * (sh4recomp.py merge_ranges) test this before going on into what was another function. Hashed, and
+ * only ever set: a false hit just costs the trip through the dispatcher. */
+uint8_t dc_hle_bits[8192];
+static void hle_mark(uint32_t addr) { uint32_t k = (addr >> 1) & 0xFFFF; dc_hle_bits[k >> 3] |= (uint8_t)(1u << (k & 7)); }
 void dc_hle_register(uint32_t addr, sh4fn fn) {
     lcache_clear();
     addr = (addr & 0x1FFFFFFFu) | 0x80000000u;
+    hle_mark(addr);
     for (int i = 0; i < hle_n; i++) if (hle[i].addr == addr) {
         if (fn) hle[i].fn = fn; else hle[i] = hle[--hle_n];      /* NULL: remove the override */
         return;
@@ -47,6 +53,8 @@ static int hle_range_n;
 void dc_hle_register_range(uint32_t lo, uint32_t hi, sh4fn fn) {
     lcache_clear();
     lo = (lo & 0x1FFFFFFFu) | 0x80000000u; hi = ((hi - 1) & 0x1FFFFFFFu) | 0x80000000u;
+    if (hi - lo >= 0x20000) memset(dc_hle_bits, 0xFF, sizeof dc_hle_bits);
+    else for (uint32_t a = lo & ~1u; a <= hi; a += 2) hle_mark(a);
     if (hle_range_n < MAX_HLE_RANGE) { hle_range[hle_range_n].lo = lo; hle_range[hle_range_n].hi = hi; hle_range[hle_range_n].fn = fn; hle_range_n++; }
 }
 static sh4fn lookup_range(uint32_t addr) {
@@ -55,7 +63,7 @@ static sh4fn lookup_range(uint32_t addr) {
 }
 void dc_set_miss_handler(dc_miss_fn f) { miss_handler = f; }
 void dc_set_trap_handler(dc_trap_fn f) { trap_handler = f; }
-void dc_set_call_hook(dc_call_hook f) { call_hook = f; dc_dispatch_gen++; }
+void dc_set_call_hook(dc_call_hook f) { call_hook = f; dc_dispatch_gen++; if (f) memset(dc_hle_bits, 0xFF, sizeof dc_hle_bits); }
 
 /* ---- runtime-copied code: RAM ranges that hold a copy of code from the executable ---- */
 #define MAX_ALIAS 64
@@ -276,4 +284,33 @@ void dc_init(sh4ctx *c) {
     dc_dispatch_gen++;
     { const char *e = getenv("DC_INTERP"); if (e && *e == '0') dc_interp_enabled = 0; }
     { const char *e = getenv("DC_FOUND_FUNCS"); if (e && *e) dc_found_funcs_path = e; }
+}
+
+/* --fs-trace (sh4.h) */
+static struct { uint32_t fn, entry, mode; unsigned long n; } fst[4096]; static int fst_n, fst_hooked;
+static void fst_report(void) {
+    const char *of = getenv("DC_FS_TRACE_OUT");               /* an ENTRIES file: what was entered 100 times or more */
+    FILE *f = of && *of ? fopen(of, "w") : NULL;
+    if (f) {
+        fprintf(f, "# entries inside functions, from a --fs-trace run (dc-core: dccore_add_recomp ENTRIES)\n");
+        for (int i = 0; i < fst_n; i++) if (fst[i].n >= 100 && !fst[i].mode) {
+            int dup = 0;
+            for (int j = 0; j < i && !dup; j++) dup = fst[j].entry == fst[i].entry && fst[j].n >= 100 && !fst[j].mode;
+            if (!dup) fprintf(f, "%08x  # %lu\n", fst[i].entry, fst[i].n);
+        }
+        fclose(f);
+    }
+    for (int k = 0; k < 30; k++) {
+        int best = -1;
+        for (int i = 0; i < fst_n; i++) if (fst[i].n && (best < 0 || fst[i].n > fst[best].n)) best = i;
+        if (best < 0) break;
+        fprintf(stderr, "fs-trace: %9lu  f_%08X entered at %08X, fpscr PR|SZ %06X\n", fst[best].n, fst[best].fn, fst[best].entry, fst[best].mode);
+        fst[best].n = 0;
+    }
+}
+void dc_fs_trace(sh4ctx *c, uint32_t fn) {
+    uint32_t mode = c->fpscr & (FPSCR_PR | FPSCR_SZ);
+    if (!fst_hooked) { fst_hooked = 1; atexit(fst_report); }
+    for (int i = 0; i < fst_n; i++) if (fst[i].fn == fn && fst[i].entry == c->entry && fst[i].mode == mode) { fst[i].n++; return; }
+    if (fst_n < 4096) { fst[fst_n].fn = fn; fst[fst_n].entry = c->entry; fst[fst_n].mode = mode; fst[fst_n].n = 1; fst_n++; }
 }

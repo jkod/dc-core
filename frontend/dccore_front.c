@@ -409,6 +409,7 @@ int dc_front_fps60 = -1;
 #ifdef __SWITCH__
 /* libnx threads on the Switch (dccore_nxthread.c): an SDL thread crashed in SDL's clean-up when it ended */
 void *dc_nx_thread_start(int (*fn)(void *), void *arg, int core);
+void *dc_nx_thread_start_prio(int (*fn)(void *), void *arg, int core, int prio);
 void dc_nx_thread_join(void *t);
 void dc_nx_set_core(int core);
 void dc_nx_clear_tls(void);
@@ -571,11 +572,14 @@ static int rt_main(void *u) {
             Uint64 t = SDL_GetPerformanceCounter();
             dc_pvr_gl_render(rt_scale);
             prof_render += SDL_GetPerformanceCounter() - t;
+            /* drawn: the frame taken at prepare is free, and the game may hand over the next one while this
+             * one waits for the screen (the swap was a quarter of the game thread's time, spent waiting) */
+            SDL_LockMutex(rt_mx); rt_job = 0; SDL_CondBroadcast(rt_done_cv); SDL_UnlockMutex(rt_mx);
             present_gl();
         } else if (job == 2) rt_fn(rt_arg);
         else present_gl();
         SDL_LockMutex(rt_mx);
-        if (job) rt_job = 0;
+        if (job == 2) rt_job = 0;
         rt_busy = 0;
         SDL_CondBroadcast(rt_done_cv);
     }
@@ -592,7 +596,12 @@ static void rt_wait_idle(void) {
     while (rt_job || rt_busy) SDL_CondWait(rt_done_cv, rt_mx);
     SDL_UnlockMutex(rt_mx);
 }
-static void rt_post(int job) {                             /* the thread is idle (rt_wait_idle) */
+static void rt_wait_drawn(void) {                          /* no frame waiting to be drawn or being drawn */
+    SDL_LockMutex(rt_mx);
+    while (rt_job) SDL_CondWait(rt_done_cv, rt_mx);
+    SDL_UnlockMutex(rt_mx);
+}
+static void rt_post(int job) {                             /* no job waiting (rt_wait_idle / rt_wait_drawn) */
     SDL_LockMutex(rt_mx); rt_job = job; SDL_CondSignal(rt_cv); SDL_UnlockMutex(rt_mx);
 }
 static void rt_call(void (*fn)(void *), void *arg) {
@@ -603,7 +612,7 @@ static void rt_call(void (*fn)(void *), void *arg) {
 }
 static void job_render_sync(void *u) { (void)u; Uint64 t = SDL_GetPerformanceCounter(); dc_pvr_gl_render(rt_scale); prof_render += SDL_GetPerformanceCounter() - t; present_gl(); }
 static void rt_render(int scale) {
-    rt_wait_idle();                                         /* the last frame drawn: its snapshot is free */
+    rt_wait_drawn();                                        /* the last frame drawn (maybe not yet on screen): its snapshot is free */
     rt_scale = scale;
     if (dc_pvr_gl_prepare()) rt_post(1);                    /* the game goes on meanwhile */
     else rt_call(job_render_sync, NULL);                    /* too much to take: drawn reading the console, the game waits */
