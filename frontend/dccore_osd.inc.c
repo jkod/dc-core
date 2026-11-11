@@ -71,7 +71,7 @@ enum { OI_RESUME, OI_RESET, OI_SAVE, OI_LOAD, OI_RES, OI_AA, OI_SHARP, OI_ASPECT
 static int osd_scan, osd_fps;
 /* Switch: CPU CLOCK. 1224 MHz by default, the smallest step over the system's 1020 */
 static const int cpu_mhz[4] = { 0, 1224, 1581, 1785 };
-static int osd_cpu = 1;
+static int osd_cpu = 0;                  /* stock: with 1.5X and no anti-aliasing or sharpening Re-Volt holds 60 fps there */
 static const int gpu_mhz[3] = { 0, 384, 460 };   /* handheld only: see dc_nx_set_gpu_mhz */
 static int osd_gpu = 0;
 int osd_bar;                                 /* the controls bar */
@@ -93,7 +93,11 @@ static int osd_aa = 0;                  /* anti-aliasing (MSAA samples; 0 off): 
 #else
 static int osd_aa = 4;
 #endif
-static int osd_sharp = 1;                /* sharpen: off, low, medium, high */
+#ifdef __SWITCH__
+static int osd_sharp = 0;                /* sharpen: off, low, medium, high (off: the Switch's GPU is the limit) */
+#else
+static int osd_sharp = 1;
+#endif
 static const float sharp_amount[4] = { 0.f, 0.35f, 0.65f, 1.f };
 static void osd_load(void) {
     char *dir = SDL_GetPrefPath("dc-core", cfg.save_name ? cfg.save_name : "default");
