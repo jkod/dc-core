@@ -14,17 +14,56 @@ typedef struct { Thread t; int (*fn)(void *); void *arg; } nx_thread;
  * when Horizon OC's own clock service runs: its profile decides. Returns the clock now, in MHz. */
 static ClkrstSession clk_s; static int clk_open, clk_inited, clk_hooked; static u32 clk_old, clk_set;
 static AppletHookCookie clk_cookie;
+void dc_nx_gpu_check(void);
 static int service_running(const char *name) {
     Handle h;
     Result rc = smRegisterService(&h, smEncodeName(name), false, 1);
     if (R_SUCCEEDED(rc)) { smUnregisterService(smEncodeName(name)); svcCloseHandle(h); return 0; }
     return rc == MAKERESULT(21, 4);                         /* already registered */
 }
+/* The GPU clock (GPU CLOCK in the menu), the same way, for handheld play only: undocked the system
+ * runs the GPU at 307 or 384 MHz to save the battery, docked at 768 MHz. 384 and 460 MHz are the
+ * handheld steps (460 the highest the battery is rated to feed); docked the system's rate stays.
+ * The system sets its own rate again when the console is docked, undocked or woken, possibly after
+ * the applet hook has run, so the frontend also calls dc_nx_gpu_check now and then. */
+static ClkrstSession gpu_s; static int gpu_open; static u32 gpu_want, gpu_sys;
+void dc_nx_gpu_check(void) {
+    if (!gpu_open || !gpu_want) return;
+    if (appletGetOperationMode() != AppletOperationMode_Handheld) return;   /* docked: the system's 768 MHz */
+    if (appletGetFocusState() != AppletFocusState_InFocus) return;
+    u32 now = 0;
+    if (R_FAILED(clkrstGetClockRate(&gpu_s, &now)) || !now || now >= gpu_want) return;
+    gpu_sys = now;
+    clkrstSetClockRate(&gpu_s, gpu_want);
+}
+int dc_nx_set_gpu_mhz(int mhz) {
+    if (!gpu_open) {
+        if (!mhz) return 0;
+        if (service_running("hoc:clk")) return -1;          /* Horizon OC */
+        if (!clk_inited) { if (!hosversionAtLeast(8, 0, 0) || R_FAILED(clkrstInitialize())) return -2; clk_inited = 1; }
+        if (R_FAILED(clkrstOpenSession(&gpu_s, PcvModuleId_GPU, 3))) return -3;
+        gpu_open = 1;
+        if (!clk_hooked) { appletHook(&clk_cookie, clk_hook, NULL); clk_hooked = 1; }
+    }
+    u32 now = 0;
+    if (!mhz) {                                             /* back to the system's, if it is ours that is set */
+        clkrstGetClockRate(&gpu_s, &now);
+        if (gpu_want && gpu_sys && now == gpu_want && appletGetOperationMode() == AppletOperationMode_Handheld)
+            clkrstSetClockRate(&gpu_s, gpu_sys);
+        gpu_want = 0;
+    } else {
+        gpu_want = (u32)mhz * 1000000u;
+        dc_nx_gpu_check();
+    }
+    clkrstGetClockRate(&gpu_s, &now);
+    return (int)(now / 1000000u);
+}
 static void clk_hook(AppletHookType hook, void *u) {
     (void)u;
     if (hook != AppletHookType_OnFocusState && hook != AppletHookType_OnOperationMode &&
         hook != AppletHookType_OnPerformanceMode && hook != AppletHookType_OnResume) return;
     if (clk_open && clk_set && appletGetFocusState() == AppletFocusState_InFocus) clkrstSetClockRate(&clk_s, clk_set);
+    dc_nx_gpu_check();
 }
 int dc_nx_set_cpu_mhz(int mhz) {
     if (!clk_open) {

@@ -96,6 +96,14 @@ static void set_cpu_clock(int mhz) {
     else if (r < 0) fprintf(stderr, "CPU clock: can't be set here (%d)\n", r);
     else fprintf(stderr, "CPU clock %d MHz\n", r);
 }
+int dc_nx_set_gpu_mhz(int mhz);
+void dc_nx_gpu_check(void);
+static void set_gpu_clock(int mhz) {
+    int r = dc_nx_set_gpu_mhz(mhz);
+    if (r == -1) fprintf(stderr, "GPU clock: Horizon OC's profile decides\n");
+    else if (r < 0) fprintf(stderr, "GPU clock: can't be set here (%d)\n", r);
+    else fprintf(stderr, "GPU clock %d MHz\n", r);
+}
 #else
 /* a joystick SDL has no gamepad mapping for: buttons 0-3 = A B X Y, 7 or 9 = Start, axes 0/1 = stick,
  * axes 2/5 or 4/5 = triggers, hat 0 = d-pad (the usual XInput/DirectInput layout); it drives the
@@ -743,6 +751,9 @@ static void rumble_tick(void) {
 /* ------------------------------------------------------------------ per field */
 static void on_vblank(uint64_t f) {
     vblanks = f;
+#ifdef __SWITCH__
+    if (!(f & 127)) dc_nx_gpu_check();                      /* the system put its own GPU clock back (undocked, woken) */
+#endif
     if (!cfg.no_rumble) rumble_tick();
     if (vblanks - last_render_frame > 3 && !shows_render()) {   /* nothing drawn by the PVR: show the framebuffer */
         static uint8_t rgb[1280 * 1024 * 3]; int w, h;
@@ -1088,6 +1099,7 @@ void dc_front_close(void) {
     if (joy) SDL_JoystickClose(joy);
     joy = NULL;
     set_cpu_clock(0);
+    set_gpu_clock(0);
 #endif
     /* the on-screen menu (and the focus pause) leave the device paused; on the Switch, closing a paused
      * device crashed SDL's audio thread (Reset / Quit from the menu): empty it and let it run first */
