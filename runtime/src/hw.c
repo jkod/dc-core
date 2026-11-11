@@ -81,8 +81,13 @@ static void dmac_check(void);
 #define TSTR   (*(uint8_t *)p4reg(0xFFD80004u))
 
 /* ---------------------------------------------------------------- video timing */
+/* dc_refresh_hz: fields (vblanks) a second in place of the console's 60 or 50, for a game that takes
+ * its time step from a timer and so plays at the same speed with more frames (Re-Volt at 120). Only
+ * the video timing changes: the CPU clock, the timers and the sound chip keep real time. */
+int dc_refresh_hz;
 static uint64_t field_cycles(void) {
     uint32_t lines = (PVR(0x0D8) >> 16 & 0x3FF) + 1;
+    if (dc_refresh_hz > 0) return CPU_HZ / (uint32_t)dc_refresh_hz;
     return CPU_HZ / (lines > 600 ? 50 : 60);
 }
 static uint32_t total_lines(void) { uint32_t l = (PVR(0x0D8) >> 16 & 0x3FF) + 1; return l > 1 ? l : 525; }

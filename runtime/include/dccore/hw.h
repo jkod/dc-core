@@ -5,6 +5,7 @@
 extern "C" {
 #endif
 /* Observers for the hardware model; a renderer / sound / input backend fills these in. */
+extern int dc_refresh_hz;      /* vblanks a second in place of the console's 60 or 50 (0): hw.c */
 typedef struct dc_hw_hooks {
     void (*on_vblank)(uint64_t frame);
     void (*on_irq)(uint32_t intevt);

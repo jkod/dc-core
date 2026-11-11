@@ -66,12 +66,17 @@ static const struct { char c; uint8_t r[7]; } osd_font[] = {
 };
 #define OSD_W 200
 /* the items, top to bottom */
-enum { OI_RESUME, OI_RESET, OI_SAVE, OI_LOAD, OI_RES, OI_AA, OI_SHARP, OI_ASPECT, OI_SCAN, OI_FPS, OI_RUMBLE, OI_FS, OI_GPU, OI_FRATE,
+enum { OI_RESUME, OI_RESET, OI_SAVE, OI_LOAD, OI_RES, OI_AA, OI_SHARP, OI_ASPECT, OI_SCAN, OI_FPS, OI_RUMBLE, OI_FS, OI_GPU, OI_FRATE, OI_REFRESH,
        OI_SPEED, OI_BAR, OI_PROF, OI_QUIT, OSD_ITEMS };
 static int osd_scan, osd_fps;
 /* Switch: CPU CLOCK. 1224 MHz by default, the smallest step over the system's 1020 */
 static const int cpu_mhz[4] = { 0, 1224, 1581, 1785 };
 static int osd_cpu = 0;                  /* stock: with 1.5X and no anti-aliasing or sharpening Re-Volt holds 60 fps there */
+/* REFRESH RATE (dc_front_refresh_ok): 0 = the console's own */
+static const int refresh_hz[] = { 0, 75, 90, 100, 120, 144, 165, 240 };
+#define REFRESH_N ((int)(sizeof refresh_hz / sizeof refresh_hz[0]))
+static int osd_refresh, display_hz;
+static void refresh_apply(void) { dc_refresh_hz = dc_front_refresh_ok ? refresh_hz[osd_refresh] : 0; }
 static const int gpu_mhz[3] = { 0, 384, 460 };   /* handheld only: see dc_nx_set_gpu_mhz */
 static int osd_gpu = 0;
 int osd_bar;                                 /* the controls bar */
@@ -119,6 +124,7 @@ static void osd_load(void) {
         if (!strncmp(line, "boost=", 6) && atoi(line + 6)) osd_cpu = 3;    /* CPU BOOST ON, before CPU CLOCK */
         if (!strncmp(line, "cpu=", 4)) { int m = atoi(line + 4); osd_cpu = 0; for (int i = 1; i < 4; i++) if (m >= cpu_mhz[i]) osd_cpu = i; }
         if (!strncmp(line, "gpu=", 4)) { int m = atoi(line + 4); osd_gpu = m >= 460 ? 2 : m >= 384 ? 1 : 0; }
+        if (!strncmp(line, "refresh=", 8)) { int m = atoi(line + 8); osd_refresh = 0; for (int i = 1; i < REFRESH_N; i++) if (m == refresh_hz[i]) osd_refresh = i; }
         if (!strncmp(line, "bar=", 4)) osd_bar = atoi(line + 4) != 0;
         if (!strncmp(line, "framerate=", 10) && dc_front_fps60 >= 0) dc_front_fps60 = atoi(line + 10) >= 60;
         if (!strncmp(line, "halfrate=", 9)) osd_half = atoi(line + 9) != 0;
@@ -132,6 +138,14 @@ static void osd_load(void) {
     { const char *e = getenv("DC_HALF_STEP"); if (e) dc_pvr_gl_half_step = atoi(e) != 0; }   /* tests */
     { const char *e = getenv("DC_AA"); if (e) osd_aa = atoi(e); }   /* tests: anti-aliasing for this run */
     dc_pvr_gl_msaa = osd_aa;
+    { const char *e = getenv("DC_REFRESH"); if (e) { int m = atoi(e); for (int i = 1; i < REFRESH_N; i++) if (m == refresh_hz[i]) osd_refresh = i; } }
+#ifdef __SWITCH__
+    osd_refresh = 0;
+#else
+    /* a rate from another display: not over this one's (a little slack: 143.98 Hz reads as 143) */
+    while (osd_refresh && display_hz && refresh_hz[osd_refresh] > display_hz + 2) osd_refresh--;
+#endif
+    refresh_apply();
     { const char *e = getenv("DC_SHARPEN"); if (e) osd_sharp = atoi(e) & 3; }
     dc_pvr_gl_sharpen = sharp_amount[osd_sharp & 3];
     if (getenv("DC_PLAIN_SCALING")) dc_pvr_gl_plain_scaling = 1;   /* tests: the old linear blit to the window */
@@ -145,6 +159,7 @@ static void osd_save(void) {
     FILE *f = fopen(osd_cfg_path, "w");
     if (!f) return;
     fprintf(f, "scanlines=%d\nfps=%d\nbar=%d\naa=%d\nsharpen=%d\ncpu=%d\ngpu=%d\nhalfstep=%d\n", osd_scan, osd_fps, osd_bar, osd_aa, osd_sharp, cpu_mhz[osd_cpu], gpu_mhz[osd_gpu], dc_pvr_gl_half_step);
+    if (dc_front_refresh_ok) fprintf(f, "refresh=%d\n", refresh_hz[osd_refresh]);
     fprintf(f, "res=%d\n", cfg.scale * 2 - (dc_pvr_gl_half_step && cfg.scale > 1));
     if (dc_front_fps60 >= 0) fprintf(f, "framerate=%d\n", dc_front_fps60 ? 60 : 30);
     else fprintf(f, "halfrate=%d\n", osd_half);
@@ -292,6 +307,14 @@ static const char *osd_label(int i, char *buf, size_t n) {
     case OI_FRATE:                                               /* only for a port that offers both */
         if (dc_front_fps60 < 0) return osd_half ? "FRAME RATE    < 30 >" : "FRAME RATE    < FULL >";   /* drawing only: osd_half */
         snprintf(buf, n, "FRAME RATE    < %s >", dc_front_fps60 ? "60" : "30"); return buf;
+    case OI_REFRESH:                                             /* only for a port that plays the same at any rate */
+#ifdef __SWITCH__
+        return "";
+#else
+        if (!dc_front_refresh_ok) return "";
+        if (!osd_refresh) return "REFRESH RATE  < CONSOLE >";
+        snprintf(buf, n, "REFRESH RATE  < %d HZ >", refresh_hz[osd_refresh]); return buf;
+#endif
     case OI_SPEED: snprintf(buf, n, "SPEED         < %gX >", (double)game_speed()); return buf;
     case OI_BAR: snprintf(buf, n, "CONTROLS BAR  < %s >", osd_bar ? "ON" : "OFF"); return buf;
 #ifdef __SWITCH__
@@ -654,6 +677,11 @@ static void osd_run(int port) {
 #else
             if (sel == OI_FS) { cfg.fullscreen = !cfg.fullscreen; SDL_SetWindowFullscreen(win, cfg.fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0); }
 #endif
+            if (sel == OI_REFRESH) {                                /* the rates this display can show */
+                do osd_refresh = (osd_refresh + REFRESH_N + step) % REFRESH_N;
+                while (osd_refresh && display_hz && refresh_hz[osd_refresh] > display_hz + 2);
+                refresh_apply(); osd_save();
+            }
             if (sel == OI_FRATE && dc_front_fps60 >= 0) { dc_front_fps60 = !dc_front_fps60; osd_save(); }
             else if (sel == OI_FRATE) { osd_half = !osd_half; osd_save(); }
             if (sel == OI_SPEED) { speed_i += step; if (speed_i < 0) speed_i = SPEED_N - 1; if (speed_i >= SPEED_N) speed_i = 0; }

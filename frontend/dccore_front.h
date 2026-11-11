@@ -48,6 +48,11 @@ typedef struct {
  * default) before dc_front_open and follows it every field; -1 (the default) hides the menu item. A choice
  * made in the menu is kept in osd.cfg and replaces the port's default at the next start. */
 extern int dc_front_fps60;
+/* REFRESH RATE in the on-screen menu (PC): a port whose game takes its time step from a timer, and so
+ * plays at the same speed at any frame rate, sets this to 1 before dc_front_open. The menu then offers
+ * 60 and the rates up to the display's (120, 144, ...): the emulated console's vblanks come that often
+ * (dc_refresh_hz, hw.c). Kept in osd.cfg; DC_REFRESH=hz or the port's own option can set it too. */
+extern int dc_front_refresh_ok;
 int  dc_front_open(const dc_front_config *cfg);   /* 0 = ok */
 int  dc_front_open_icon(const dc_front_config *cfg, const unsigned char *icon_rgba32x32);
 /* a player built with an ICON (dccore_add_player) shows the game's VMU icon on its window */

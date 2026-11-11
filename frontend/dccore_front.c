@@ -414,6 +414,7 @@ static void set_speed(int i) {
 static int bar_click(int x, int y);
 
 int dc_front_fps60 = -1;
+int dc_front_refresh_ok;
 #ifdef __SWITCH__
 /* libnx threads on the Switch (dccore_nxthread.c): an SDL thread crashed in SDL's clean-up when it ended */
 void *dc_nx_thread_start(int (*fn)(void *), void *arg, int core);
@@ -1046,6 +1047,11 @@ int dc_front_open(const dc_front_config *c) {
     if (!dc_found_funcs_path) {                            /* functions only the interpreter ran: for the next build */
         static char found[1024]; char *dir = SDL_GetPrefPath("dc-core", cfg.save_name ? cfg.save_name : "default");
         if (dir) { snprintf(found, sizeof found, "%sfound_funcs.txt", dir); dc_found_funcs_path = found; SDL_free(dir); }
+    }
+    {   /* the display's refresh rate bounds REFRESH RATE: more fields than it shows would be thrown away
+         * (and with vsync each would wait for a refresh, slowing the game down) */
+        SDL_DisplayMode dm;
+        if (SDL_GetCurrentDisplayMode(SDL_GetWindowDisplayIndex(win), &dm) == 0 && dm.refresh_rate > 0) display_hz = dm.refresh_rate;
     }
     osd_load();
     dc_prof_clock = prof_clock;
