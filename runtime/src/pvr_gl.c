@@ -411,7 +411,8 @@ static float last_ww, last_rw, last_rh;   /* the last render's target width and 
 #define NKEEP 4
 static struct { uint32_t tgt; int w, h, fbw, fbh; float ww; GLuint fbo, tex; unsigned frame; } keep[NKEEP];
 int dc_pvr_gl_keep_outside = 1;
-static int fb_scale = 1;                                   /* the render's scale over the console's lines */
+static int fb_scale = 2;                                   /* the render's scale over the console's lines, in halves */
+int dc_pvr_gl_half_step;                                   /* render half a step lower than asked: 2 gives 1.5 (720 lines) */
 /* MSAA: the frame's polygons are drawn into ms_fbo (the same size, dc_pvr_gl_msaa samples a pixel) and
  * resolved into fbo once they are all drawn; everything after (side bars, readbacks, keep, present)
  * works on fbo as without it. Not while capturing a render-to-texture pass (its own buffers). */
@@ -1164,7 +1165,7 @@ static void scissor_for(const pvr_poly *p) {
     /* a rectangle at the picture's left or right edge reaches the edge of the (widescreen) target */
     int x0 = p->ux0 <= 0 ? 0 : (int)floorf((sc_off + (float)p->ux0 * sc_kx) * sc_k);
     int x1 = p->ux1 >= sc_rw || split_view(p) ? 1 << 20 : (int)ceilf((sc_off + (float)p->ux1 * sc_kx) * sc_k);
-    int y0 = fb_h - p->uy1 * sc_scale, y1 = fb_h - p->uy0 * sc_scale;     /* GL rows go up */
+    int y0 = fb_h - p->uy1 * sc_scale / 2, y1 = fb_h - p->uy0 * sc_scale / 2;     /* GL rows go up */
     if (x0 < sc_x) x0 = sc_x; if (x1 > sc_x + sc_w) x1 = sc_x + sc_w;
     if (y0 < sc_y) y0 = sc_y; if (y1 > sc_y + sc_h) y1 = sc_y + sc_h;
     scissor(x0, y0, x1 - x0, y1 - y0);
@@ -1741,6 +1742,9 @@ void dc_pvr_gl_render(int scale) {
 static void render_frame(int scale) {
     if (!ready) return;
     if (scale < 1) scale = 1;
+    /* from here on in halves (SC): 1.5 times is 960x720, the Switch's own screen */
+    scale = scale * 2 - (dc_pvr_gl_half_step && scale > 1 && !capturing);
+    #define SC(x) ((x) * scale / 2)
     frame_no++;
     pvr_frame f;
     if (snap_on) f = snap_f; else pvr_get_frame(&f);
@@ -1903,9 +1907,9 @@ static void render_frame(int scale) {
     /* the 4:3 picture starts on a whole pixel: margins of half a pixel put the console's pixel edges
      * (where 2D background tiles meet) through pixel centres, where both tiles may draw the pixel: a
      * thin line of doubled translucency (Sega Rally 2's title at 1707 x 960) */
-    int pic_w = f.width * scale, fb_w = pic_w + 2 * (int)((WW / (float)RW - 1.f) * (float)pic_w * 0.5f + 0.5f);
+    int pic_w = SC(f.width), fb_w = pic_w + 2 * (int)((WW / (float)RW - 1.f) * (float)pic_w * 0.5f + 0.5f);
     if (WW > (float)RW) WW = (float)RW * (float)fb_w / (float)pic_w;
-    ensure_fbo(fb_w, f.height * scale);
+    ensure_fbo(fb_w, SC(f.height));
     fb_scale = scale;
     gl_selftest();
     disp_aspect = aspect;
@@ -2321,14 +2325,14 @@ static void render_frame(int scale) {
       zoom_x0 = zoom_x1 = zoom_y0 = zoom_y1 = 0;
       if (lbox && lb_bot > lb_top && lb_bot - lb_top >= f.height / 3.f) {
           zoom_x0 = sx0; zoom_x1 = sx1;
-          zoom_y0 = fb_h - (int)floorf(lb_bot * (float)scale); zoom_y1 = fb_h - (int)ceilf(lb_top * (float)scale);
+          zoom_y0 = fb_h - (int)floorf(lb_bot * (float)scale * 0.5f); zoom_y1 = fb_h - (int)ceilf(lb_top * (float)scale * 0.5f);
       }
       else if (dc_pvr_gl_widescreen && band) {             /* a quarter: its side of the screen, out to that edge */
         float o = (WW - (float)RW) * 0.5f, k = (float)fb_w / WW, kx = (float)RW / (float)f.width;
         if (f.clip_x0 > 0) sx0 = (int)floorf((o + (float)f.clip_x0 * kx) * k + 0.5f);
         if (f.clip_x1 + 1 < f.width) sx1 = (int)floorf((o + (float)(f.clip_x1 + 1) * kx) * k + 0.5f);
       }
-      int sy0 = f.clip_y0 * scale, sy1 = (f.clip_y1 + 1) * scale;
+      int sy0 = SC(f.clip_y0), sy1 = SC(f.clip_y1 + 1);
       p_glEnable(GL_SCISSOR_TEST);
       sc_x = sx0; sc_y = fb_h - sy1; sc_w = sx1 - sx0; sc_h = sy1 - sy0; sc_set[2] = -1;
       sc_off = (WW - (float)RW) * 0.5f; sc_k = (float)fb_w / WW; sc_kx = (float)RW / (float)f.width; sc_scale = scale; sc_rw = f.width;
@@ -2544,7 +2548,7 @@ static void render_frame(int scale) {
         /* a side band the game drew into (a 3D scene past the picture) keeps it; an empty (black) one gets
          * a bar: menus, the title, the panel beside Rush's split-screen views. One pixel column each,
          * just outside the picture. */
-        int y0 = fb_h - (f.clip_y1 + 1) * scale, y1 = fb_h - f.clip_y0 * scale, fill[2] = { 0, 0 };
+        int y0 = fb_h - SC(f.clip_y1 + 1), y1 = fb_h - SC(f.clip_y0), fill[2] = { 0, 0 };
         int gpu = dc_pvr_gl_gpu_bars && edges_ok(px0, px1, y0, y1) && px0 > 4 && px1 < fb_w - 4 && gpu_bars_init(y1 - y0);
         if (gpu) {                                           /* see dc_pvr_gl_gpu_bars */
             edge_blit(px0, px1, y0, y1);
@@ -2562,7 +2566,7 @@ static void render_frame(int scale) {
         if (fill[0] || fill[1]) draw_bars(px0, px1, y0, y1, fill[0], fill[1], gpu);
     }
     pic_offy = ((float)(f.height - 1 - f.clip_y1) - (float)f.clip_y0) * 0.5f / (float)f.height;
-    pic_y0 = fb_h - (f.clip_y1 + 1) * scale; pic_y1 = fb_h - f.clip_y0 * scale;
+    pic_y0 = fb_h - SC(f.clip_y1 + 1); pic_y1 = fb_h - SC(f.clip_y0);
     /* odd clip or one band (a split-screen view, a loading screen's progress bar): the whole picture
      * where it is, not centred on the band (Looney Tunes Space Race's loading bar near the bottom) */
     if (pic_y0 < 0 || pic_y1 > fb_h || (pic_y1 - pic_y0) * 4 < fb_h * 3) { pic_y0 = pic_y1 = 0; pic_offy = 0; }
@@ -2799,11 +2803,11 @@ void dc_pvr_gl_present(int win_w, int win_h, int stretch) {
         present_blit(x0, y0, x1, y1, dx, dy, dx + dw, dy + dh, win_w, win_h);
     } else if (dc_pvr_gl_fill_lines && pic_y1 > pic_y0) {         /* the drawn lines fill the height */
         present_blit(0, pic_y0, fb_w, pic_y1, dx, dy, dx + dw, dy + dh, win_w, win_h);
-        if (dc_pvr_gl_scanlines) present_scanlines(dx, dy, dw, dh, (pic_y1 - pic_y0) / (fb_scale > 0 ? fb_scale : 1), win_w, win_h);
+        if (dc_pvr_gl_scanlines) present_scanlines(dx, dy, dw, dh, (pic_y1 - pic_y0) * 2 / (fb_scale > 0 ? fb_scale : 2), win_w, win_h);
     } else {
         int sh = (int)(pic_offy * (float)dh + (pic_offy >= 0 ? 0.5f : -0.5f));   /* centre the drawn lines (GL rows go up) */
         present_blit(0, 0, fb_w, fb_h, dx, dy - sh, dx + dw, dy + dh - sh, win_w, win_h);
-        if (dc_pvr_gl_scanlines) present_scanlines(dx, dy - sh, dw, dh, fb_h / (fb_scale > 0 ? fb_scale : 1), win_w, win_h);
+        if (dc_pvr_gl_scanlines) present_scanlines(dx, dy - sh, dw, dh, fb_h * 2 / (fb_scale > 0 ? fb_scale : 2), win_w, win_h);
     }
     p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }

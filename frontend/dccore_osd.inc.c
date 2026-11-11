@@ -98,9 +98,16 @@ static void osd_load(void) {
     if (dir) { snprintf(osd_cfg_path, sizeof osd_cfg_path, "%sosd.cfg", dir); SDL_free(dir); }
     FILE *f = osd_cfg_path[0] ? fopen(osd_cfg_path, "r") : NULL;   /* none yet: the defaults below still apply */
     char line[128];
+#ifdef __SWITCH__
+    int res = 3;                         /* RESOLUTION in halves, kept here on the Switch: 1.5 (720 lines, its screen) to start with */
+#endif
     while (f && fgets(line, sizeof line, f)) {
         if (!strncmp(line, "scanlines=", 10)) osd_scan = atoi(line + 10) & 3;
         if (!strncmp(line, "sharpen=", 8)) osd_sharp = atoi(line + 8) & 3;
+        if (!strncmp(line, "halfstep=", 9)) dc_pvr_gl_half_step = atoi(line + 9) != 0;
+#ifdef __SWITCH__
+        if (!strncmp(line, "res=", 4)) { res = atoi(line + 4); if (res < 2 || res > 6) res = 3; }
+#endif
         if (!strncmp(line, "aa=", 3)) { int a = atoi(line + 3); osd_aa = a >= 8 ? 8 : a >= 4 ? 4 : a >= 2 ? 2 : 0; }
         if (!strncmp(line, "fps=", 4)) osd_fps = atoi(line + 4) != 0;
         if (!strncmp(line, "boost=", 6) && atoi(line + 6)) osd_cpu = 3;    /* CPU BOOST ON, before CPU CLOCK */
@@ -111,7 +118,11 @@ static void osd_load(void) {
         if (!strncmp(line, "rumble_", 7) && line[7] >= 'a' && line[7] <= 'd' && line[8] == '=') osd_rumble[line[7] - 'a'] = atoi(line + 9) & 3;
     }
     if (f) fclose(f);
+#ifdef __SWITCH__
+    cfg.scale = (res + 1) / 2; dc_pvr_gl_half_step = res & 1;
+#endif
     dc_pvr_gl_scanlines = osd_scan;
+    { const char *e = getenv("DC_HALF_STEP"); if (e) dc_pvr_gl_half_step = atoi(e) != 0; }   /* tests */
     { const char *e = getenv("DC_AA"); if (e) osd_aa = atoi(e); }   /* tests: anti-aliasing for this run */
     dc_pvr_gl_msaa = osd_aa;
     { const char *e = getenv("DC_SHARPEN"); if (e) osd_sharp = atoi(e) & 3; }
@@ -125,7 +136,8 @@ static void osd_save(void) {
     if (!osd_cfg_path[0]) return;
     FILE *f = fopen(osd_cfg_path, "w");
     if (!f) return;
-    fprintf(f, "scanlines=%d\nfps=%d\nbar=%d\naa=%d\nsharpen=%d\ncpu=%d\n", osd_scan, osd_fps, osd_bar, osd_aa, osd_sharp, cpu_mhz[osd_cpu]);
+    fprintf(f, "scanlines=%d\nfps=%d\nbar=%d\naa=%d\nsharpen=%d\ncpu=%d\nhalfstep=%d\n", osd_scan, osd_fps, osd_bar, osd_aa, osd_sharp, cpu_mhz[osd_cpu], dc_pvr_gl_half_step);
+    fprintf(f, "res=%d\n", cfg.scale * 2 - (dc_pvr_gl_half_step && cfg.scale > 1));
     if (dc_front_fps60 >= 0) fprintf(f, "framerate=%d\n", dc_front_fps60 ? 60 : 30);
     else fprintf(f, "halfrate=%d\n", osd_half);
     for (int p = 0; p < 4; p++) fprintf(f, "rumble_%c=%d\n", 'a' + p, osd_rumble[p]);
@@ -250,7 +262,10 @@ static const char *osd_label(int i, char *buf, size_t n) {
     case OI_RESET: return "RESET GAME";
     case OI_SAVE: if (!reset_ready) return ""; snprintf(buf, n, "SAVE STATE    < %d >", state_slot); return buf;
     case OI_LOAD: if (!reset_ready) return ""; snprintf(buf, n, "LOAD STATE    < %d >", state_slot); return buf;
-    case OI_RES: snprintf(buf, n, "RESOLUTION    < %dX %dP >", cfg.scale, 480 * cfg.scale); return buf;
+    case OI_RES:
+        if (dc_pvr_gl_half_step && cfg.scale > 1) snprintf(buf, n, "RESOLUTION    < %d.5X %dP >", cfg.scale - 1, 480 * cfg.scale - 240);
+        else snprintf(buf, n, "RESOLUTION    < %dX %dP >", cfg.scale, 480 * cfg.scale);
+        return buf;
     case OI_SHARP: { static const char *n4[4] = { "OFF", "LOW", "MEDIUM", "HIGH" }; snprintf(buf, n, "SHARPEN       < %s >", n4[osd_sharp & 3]); return buf; }
     case OI_AA: if (osd_aa < 2) return "ANTI-ALIASING < OFF >"; snprintf(buf, n, "ANTI-ALIASING < %dX >", osd_aa); return buf;
     case OI_ASPECT: snprintf(buf, n, "ASPECT        < %s >", cfg.widescreen ? "WIDE" : "4:3"); return buf;
@@ -606,7 +621,10 @@ static void osd_run(int port) {
 #else
                 const int max_scale = 6;
 #endif
-                cfg.scale += step; if (cfg.scale < 1) cfg.scale = max_scale; if (cfg.scale > max_scale) cfg.scale = 1;
+                /* in halves: 1, 1.5 (720 lines: the Switch's screen), 2, 2.5, ... */
+                int h = cfg.scale * 2 - (dc_pvr_gl_half_step && cfg.scale > 1) + step;
+                if (h < 2) h = max_scale * 2; if (h > max_scale * 2) h = 2;
+                cfg.scale = (h + 1) / 2; dc_pvr_gl_half_step = h & 1; osd_save();
             }
             if (sel == OI_ASPECT) {
                 cfg.widescreen = !cfg.widescreen; dc_pvr_gl_widescreen = cfg.widescreen;

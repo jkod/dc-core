@@ -64,6 +64,7 @@ extern float dc_pvr_gl_aspect;        /* widescreen: the window's width / height
 extern int dc_pvr_gl_mipmaps;
 extern float dc_pvr_gl_anisotropy;
 extern int dc_pvr_gl_msaa;              /* multisample anti-aliasing: samples a pixel (0/1 off; clamped to the GPU's max) */
+extern int dc_pvr_gl_half_step;         /* render half a step under the scale asked for (2 -> 1.5: 960x720) */
 extern float dc_pvr_gl_sharpen;          /* 0 off .. 1: contrast-adaptive sharpening when presenting */
 extern int dc_pvr_gl_gpu_bars;           /* side bars decided on the GPU, so the CPU never waits for it (default on; 0: read back) */
 extern int dc_pvr_gl_plain_scaling;      /* 1: plain linear scaling to the window, no supersampled downscale */
