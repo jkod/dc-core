@@ -982,6 +982,7 @@ static void sky_mirror(const pvr_poly *p, const pvr_vtx *v, int index, float rw,
         for (int k = 1; k + 1 < n; k++) { push(&q[0]); push(&q[k]); push(&q[k + 1]); }
     }
 }
+int dc_pvr_gl_extend_mirror;
 static void extend_backdrop(const pvr_poly *p, const pvr_vtx *v, float rw, float ext) {
     if (p->n < 3 || p->n > 64) return;
     const pvr_vtx *e[2][64]; int ne[2] = { 0, 0 };
@@ -996,7 +997,33 @@ static void extend_backdrop(const pvr_poly *p, const pvr_vtx *v, float rw, float
         if (dc_pvr_gl_extend_tiles) mirror_tile(p, v, rw, ext);
         return;
     }
-    for (int sd = 0; sd < 2; sd++) {
+    /* dc_pvr_gl_extend_mirror: a textured card with two corners on each side (a letterboxed shot's sky)
+     * continues as its mirror image rather than its edge column repeated (streaks): the strip's outer
+     * corners take what the card shows as far inside from that edge (perspective-correct) */
+    int mir = dc_pvr_gl_extend_mirror && p->n == 4 && ne[0] == 2 && ne[1] == 2 && ((p->isp >> 25) & 1) && ext < rw;
+    if (mir) for (int sd = 0; sd < 2; sd++) {
+        qsort(e[0], 2, sizeof e[0][0], cmp_vy); qsort(e[1], 2, sizeof e[1][0], cmp_vy);
+        pvr_vtx o[2];
+        for (int k = 0; k < 2; k++) {
+            const pvr_vtx *in = e[sd][k], *far = e[!sd][k];
+            float t = ext / fabsf(far->x - in->x);
+            if (t > 1.f) t = 1.f;
+            float zi = in->z, zf = far->z, z = zi + (zf - zi) * t;
+            o[k] = *in;
+            o[k].x = sd ? rw + ext : -ext;
+            o[k].y = in->y + (far->y - in->y) * t;
+            o[k].z = zi;                                       /* depth (and fog) of the edge */
+            if (z > 0) {
+                o[k].u = (in->u * zi + (far->u * zf - in->u * zi) * t) / z;
+                o[k].v = (in->v * zi + (far->v * zf - in->v * zi) * t) / z;
+            }
+            for (int j = 0; j < 4; j++) { o[k].c[j] = in->c[j] + (far->c[j] - in->c[j]) * t; o[k].o[j] = in->o[j] + (far->o[j] - in->o[j]) * t; }
+            o[k].y = in->y;
+        }
+        const pvr_vtx *a = e[sd][0], *b = e[sd][1];
+        push(a); push(b); push(&o[0]); push(&o[0]); push(b); push(&o[1]);
+    }
+    else for (int sd = 0; sd < 2; sd++) {
         qsort(e[sd], (size_t)ne[sd], sizeof e[sd][0], cmp_vy);
         for (int k = 0; k + 1 < ne[sd]; k++) {
             const pvr_vtx *a = e[sd][k], *b = e[sd][k + 1];

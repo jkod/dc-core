@@ -101,6 +101,9 @@ extern int dc_pvr_gl_extend_backdrops;
  * menus whose tiles should keep side bars leave it off); a wall of pattern tiles (24+ quads at one
  * depth across the picture, each showing the same whole texture, turning or not) has its outer
  * columns repeated outwards a cell at a time */
+/* with dc_pvr_gl_extend_backdrops: a textured card spanning the picture (two corners on each side)
+ * continues as its mirror image instead of its edge column repeated (default 0) */
+extern int dc_pvr_gl_extend_mirror;
 extern int dc_pvr_gl_extend_tiles;
 /* with it: only tiles at least this many pixels wide (default 0: all); a port can set it per field, e.g.
  * to mirror a picture of small tiles on one screen but not on menus built the same way */
