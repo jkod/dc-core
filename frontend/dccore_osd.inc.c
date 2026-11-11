@@ -463,16 +463,16 @@ static void osd_overlays(int ww, int wh) {
  * S the sound chip, R rendering, P presenting (with vsync, waiting for the display), I pacing sleeps */
 
 static void osd_count_frame(void) {
-    static Uint64 t0, a0, r0t, p0, i0, w0, ar0, ds0, last, worst; static unsigned long r0;
+    static Uint64 t0, a0, r0t, p0, i0, w0, ar0, ds0, last, worst; static unsigned long r0, d0;
     Uint64 now = SDL_GetPerformanceCounter();
     if (last && now - last > worst) worst = now - last;    /* the longest frame: drops show here before the average */
     last = now;
-    if (!t0) { t0 = now; r0 = renders; a0 = dc_prof_aica; r0t = prof_render; p0 = prof_present; i0 = prof_idle; w0 = prof_wait;
+    if (!t0) { t0 = now; r0 = renders; d0 = drawn; a0 = dc_prof_aica; r0t = prof_render; p0 = prof_present; i0 = prof_idle; w0 = prof_wait;
                ar0 = dc_prof_aica_arm; ds0 = dc_prof_aica_dsp; return; }
     double f = (double)SDL_GetPerformanceFrequency(), dt = (double)(now - t0) / f;
     if (dt < 0.5) return;
     unsigned long fr = renders - r0;
-    fps_now = (float)(fr / dt);
+    fps_now = (float)((drawn - d0) / dt);                  /* what reaches the screen, not the frames the game sent */
     fps_worst = (float)((double)worst * 1000.0 / f); worst = 0;
     double per = fr ? 1000.0 / f / (double)fr : 0;
     double a = (double)(dc_prof_aica - a0) * per, r = (double)(prof_render - r0t) * per, p = (double)(prof_present - p0) * per,
@@ -486,7 +486,7 @@ static void osd_count_frame(void) {
              aica_thr ? " THREAD" : "");
     if (cfg.stats) fprintf(stderr, "dc-core: %.1f fps, ms a frame: game %.1f, wait %.1f, render %.1f, present %.1f, idle %.1f; sound %.1f (arm %.1f, dsp %.1f)%s\n",
                            fps_now, g < 0 ? 0 : g, w, r, p, i, a, arm, dsp, aica_thr ? " on its own thread" : "");
-    t0 = now; r0 = renders; a0 = dc_prof_aica; r0t = prof_render; p0 = prof_present; i0 = prof_idle; w0 = prof_wait;
+    t0 = now; r0 = renders; d0 = drawn; a0 = dc_prof_aica; r0t = prof_render; p0 = prof_present; i0 = prof_idle; w0 = prof_wait;
     ar0 = dc_prof_aica_arm; ds0 = dc_prof_aica_dsp;
     if (osd_fps) need_present = 1;
 }

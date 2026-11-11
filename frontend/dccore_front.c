@@ -143,6 +143,7 @@ static void read_raw(uint16_t *b, int *jx, int *jy, int *lt, int *rt) {
 #endif
 static dc_front_config cfg;
 static unsigned long presented, renders, last_render_frame;
+static unsigned long drawn;             /* frames really drawn: renders also counts the ones skipped (FRAME RATE 30, fast-forward) */
 /* FRAME RATE for games without a 30 / 60 choice of their own (dc_front_fps60 < 0): at 30 a 60 fps game is
  * drawn every other frame (it still runs at 60): steady where the Switch can't draw each one. A game that
  * draws at 30 anyway is not touched. 30 by default on the Switch. */
@@ -218,12 +219,12 @@ static void on_render(void) {
     } else if (rt_on) {
         rt_render(cfg.scale);                               /* drawn and presented on the render thread */
         note_render_target();
-        renders++; last_render_frame = (unsigned long)vblanks;
+        renders++; drawn++; last_render_frame = (unsigned long)vblanks;
         return;
     } else { Uint64 t = SDL_GetPerformanceCounter(); dc_pvr_gl_render(cfg.scale); prof_render += SDL_GetPerformanceCounter() - t; }
     note_render_target();
     need_present = 1;
-    renders++; last_render_frame = (unsigned long)vblanks;
+    renders++; drawn++; last_render_frame = (unsigned long)vblanks;
 }
 
 /* ------------------------------------------------------------------ input */
