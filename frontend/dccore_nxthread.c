@@ -27,6 +27,7 @@ static int service_running(const char *name) {
  * The system sets its own rate again when the console is docked, undocked or woken, possibly after
  * the applet hook has run, so the frontend also calls dc_nx_gpu_check now and then. */
 static ClkrstSession gpu_s; static int gpu_open; static u32 gpu_want, gpu_sys;
+static void clk_hook(AppletHookType hook, void *u);
 void dc_nx_gpu_check(void) {
     if (!gpu_open || !gpu_want) return;
     if (appletGetOperationMode() != AppletOperationMode_Handheld) return;   /* docked: the system's 768 MHz */
