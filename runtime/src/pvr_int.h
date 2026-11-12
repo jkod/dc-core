@@ -30,6 +30,12 @@ void pvr_region_extent(int *w, int *h);   /* pixels the region array lists tiles
 
 /* the context STARTRENDER draws (matched by PARAM_BASE), plus render size and background */
 void pvr_get_frame(pvr_frame *f);
+/* The same for a renderer on its own thread, in two steps. On the game's thread, at STARTRENDER:
+ * the sizes and background, and a copy of that context as the TA was sent it (not yet its lists);
+ * tex: tcw, tsp pairs of its textured polygons in the order they came (valid until the TA is next
+ * sent a list). Then on the renderer's thread: the copy's lists into f. */
+void pvr_snap_take(pvr_frame *f, const uint32_t **tex, int *ntex);
+void pvr_snap_lists(pvr_frame *f);
 /* decoded texture (0xAARRGGBB texels), cached until its VRAM pages or the palette change;
  * id changes whenever the pixels do */
 typedef struct { int w, h; const uint32_t *px; uint64_t id; } pvr_texinfo;

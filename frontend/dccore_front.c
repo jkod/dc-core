@@ -362,8 +362,9 @@ static Uint64 start_count; static uint64_t start_cycles;
 static void print_stats(void) {
     double wall = (double)(SDL_GetPerformanceCounter() - start_count) / (double)SDL_GetPerformanceFrequency();
     double emu = dc_current_ctx ? (double)(dc_current_ctx->cycles - start_cycles) / 200e6 : 0;
-    fprintf(stderr, "dc-core: %lu fields, %lu renders, %.1f s emulated in %.1f s (%.0f%% speed)\n",
-            presented, renders, emu, wall, wall > 0 ? emu / wall * 100 : 0);
+    double f = (double)SDL_GetPerformanceFrequency(), draw = (double)prof_render / f, pres = (double)prof_present / f;
+    fprintf(stderr, "dc-core: %lu fields, %lu renders, %.1f s emulated in %.1f s (%.0f%% speed); drawing %.1f s, presenting %.1f s%s\n",
+            presented, renders, emu, wall, wall > 0 ? emu / wall * 100 : 0, draw, pres, rt_on ? " (on the render thread)" : "");
 }
 /* debugging: DC_SHOTS_WINDOW=1 makes screenshots show the window as presented, not the rendered picture */
 static uint8_t win_rgb[1920 * 1080 * 3 * 4]; static int win_rgb_w, win_rgb_h;

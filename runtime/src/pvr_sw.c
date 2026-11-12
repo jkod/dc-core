@@ -59,7 +59,26 @@ typedef pvr_modtri modtri;
 
 /* The TA fills one context while the core renders another: contexts are keyed by TA_ISP_BASE at
  * list init and STARTRENDER draws the one whose base equals PARAM_BASE. */
-typedef struct { uint32_t base; int used; vtx *vt; int nvt, cap_vt; poly *pl; int npl, cap_pl; modtri *mt; int nmt, cap_mt; unsigned age; } ctx_t;
+/* What a header leaves for the vertices after it (the TA's state while a list comes in). */
+typedef struct {
+    uint32_t pcw, isp, tsp, tcw, tsp1, tcw1;
+    float face[4], face_ofs[4], face1[4];
+    int mod_inst, mod_cull;                        /* modifier volume instruction and culling mode of the last header */
+    int open;                                      /* index of the strip being filled, -1 none */
+    int sprite;                                    /* the last header was a sprite header */
+    int ux0, uy0, ux1, uy1;                        /* last user tile clip rectangle (scene pixels) */
+} pstate;
+/* The TA's input is kept as it comes (raw: records of a word -- kind, list + 1 << 8, words << 16 -- and
+ * the parameter's 8 or 16 words) and only turned into the lists a renderer draws (vt, pl, mt) when one
+ * asks for them (ctx_parse). The game's thread then pays a copy of 32 bytes for a vertex, where the
+ * colours' conversion and the rest of the parsing was a tenth of its time in a race, and a renderer on
+ * its own thread parses its copy there (pvr_snap_take / pvr_snap_lists). */
+typedef struct {
+    uint32_t base; int used; vtx *vt; int nvt, cap_vt; poly *pl; int npl, cap_pl; modtri *mt; int nmt, cap_mt; unsigned age;
+    uint32_t *raw; int nraw, cap_raw, parsed;      /* in words; parsed: how far vt, pl and mt have it */
+    pstate ps, ps0;                                /* the parser's state at parsed, and at the start of raw */
+    uint32_t *tex; int ntex, cap_tex;              /* tcw, tsp of the textured polygons, as they came (pairs) */
+} ctx_t;
 #define NCTX 4
 static ctx_t ctxs[NCTX];
 static ctx_t *ta_ctx = &ctxs[0];
@@ -73,6 +92,10 @@ static unsigned ctx_clock;
 #define mt (ta_ctx->mt)
 #define nmt (ta_ctx->nmt)
 #define cap_mt (ta_ctx->cap_mt)
+/* the collecting side's own view of the last header (in the order the TA is sent things, across
+ * contexts): whether its polygons are textured and with what, and the face colours, which an
+ * "intensity" header may take over from the one before it -- also from the list before */
+static struct { uint32_t pcw, tcw, tsp, tcw1, tsp1; int tex, two, noted; float face[4], face_ofs[4], face1[4]; } col;
 static void list_init(void) {
     uint32_t base = REG(0x128) & 0xFFFFFF;
     ctx_t *c = NULL, *old = &ctxs[0];
@@ -81,30 +104,12 @@ static void list_init(void) {
     c->base = base; c->used = 1; c->age = ++ctx_clock;
     ta_ctx = c;
     npl = 0; nvt = 0; nmt = 0;
-}
-static struct {
-    uint32_t pcw, isp, tsp, tcw, tsp1, tcw1;
-    float face[4], face_ofs[4], face1[4];
-    int mod_inst, mod_cull;                        /* modifier volume instruction and culling mode of the last header */
-    int open;                                      /* index of the strip being filled, -1 none */
-    int sprite;                                    /* the last header was a sprite header */
-    int ux0, uy0, ux1, uy1;                        /* last user tile clip rectangle (scene pixels) */
-} cur = { .open = -1 };
-
-static vtx *new_vtx(void) {
-    if (nvt == cap_vt) { cap_vt = cap_vt ? cap_vt * 2 : 4096; vt = realloc(vt, cap_vt * sizeof *vt); }
-    memset(&vt[nvt], 0, sizeof *vt);
-    return &vt[nvt++];
-}
-static poly *new_poly(int list, int sprite) {
-    if (npl == cap_pl) { cap_pl = cap_pl ? cap_pl * 2 : 1024; pl = realloc(pl, cap_pl * sizeof *pl); }
-    poly *p = &pl[npl++];
-    p->isp = cur.isp; p->tsp = cur.tsp; p->tcw = cur.tcw; p->tsp1 = cur.tsp1; p->tcw1 = cur.tcw1;
-    p->list = list; p->first = nvt; p->n = 0; p->sprite = sprite;
-    p->twovol = !sprite && ((cur.pcw >> 6) & 1); p->shadow = (cur.pcw >> 7) & 1;
-    p->uclip = (int)((cur.pcw >> 16) & 3); if (p->uclip == 1) p->uclip = 0;
-    p->ux0 = cur.ux0; p->uy0 = cur.uy0; p->ux1 = cur.ux1; p->uy1 = cur.uy1;
-    return p;
+    c->nraw = c->parsed = 0; c->ntex = 0;
+    memset(&c->ps, 0, sizeof c->ps);
+    c->ps.open = -1; c->ps.ux1 = c->ps.uy1 = 4096;
+    memcpy(c->ps.face, col.face, sizeof col.face); memcpy(c->ps.face_ofs, col.face_ofs, sizeof col.face_ofs); memcpy(c->ps.face1, col.face1, sizeof col.face1);
+    c->ps0 = c->ps;
+    col.pcw = 0; col.noted = 1;
 }
 
 static float f32(uint32_t w) { float f; memcpy(&f, &w, 4); return f; }
@@ -130,9 +135,45 @@ static float uv16(uint32_t w, int hi) { return f32(hi ? (w & 0xFFFF0000u) : (w <
  * into the ISP/TSP instruction word (bits 25..22); what the game wrote there is ignored */
 static uint32_t isp_from_pcw(uint32_t isp, uint32_t pcw) { return (isp & ~(0xFu << 22)) | ((pcw & 0xF) << 22); }
 
-static void sink(int kind, int list, const uint32_t *w, int words) {
+/* ---- the parser: one context's records into its lists. It touches nothing but the context it is
+ * given, so the copy a renderer on another thread took can be parsed there. */
+#undef vt
+#undef nvt
+#undef cap_vt
+#undef pl
+#undef npl
+#undef cap_pl
+#undef mt
+#undef nmt
+#undef cap_mt
+#define vt (pc->vt)
+#define nvt (pc->nvt)
+#define cap_vt (pc->cap_vt)
+#define pl (pc->pl)
+#define npl (pc->npl)
+#define cap_pl (pc->cap_pl)
+#define mt (pc->mt)
+#define nmt (pc->nmt)
+#define cap_mt (pc->cap_mt)
+#define cur (pc->ps)
+static vtx *new_vtx(ctx_t *pc) {
+    if (nvt == cap_vt) { cap_vt = cap_vt ? cap_vt * 2 : 4096; vt = realloc(vt, cap_vt * sizeof *vt); }
+    memset(&vt[nvt], 0, sizeof *vt);
+    return &vt[nvt++];
+}
+static poly *new_poly(ctx_t *pc, int list, int sprite) {
+    if (npl == cap_pl) { cap_pl = cap_pl ? cap_pl * 2 : 1024; pl = realloc(pl, cap_pl * sizeof *pl); }
+    poly *p = &pl[npl++];
+    p->isp = cur.isp; p->tsp = cur.tsp; p->tcw = cur.tcw; p->tsp1 = cur.tsp1; p->tcw1 = cur.tcw1;
+    p->list = list; p->first = nvt; p->n = 0; p->sprite = sprite;
+    p->twovol = !sprite && ((cur.pcw >> 6) & 1); p->shadow = (cur.pcw >> 7) & 1;
+    p->uclip = (int)((cur.pcw >> 16) & 3); if (p->uclip == 1) p->uclip = 0;
+    p->ux0 = cur.ux0; p->uy0 = cur.uy0; p->ux1 = cur.ux1; p->uy1 = cur.uy1;
+    return p;
+}
+
+static void parse_rec(ctx_t *pc, int kind, int list, const uint32_t *w, int words) {
     switch (kind) {
-    case -1: list_init(); cur.open = -1; cur.pcw = 0; cur.sprite = 0; cur.ux0 = cur.uy0 = 0; cur.ux1 = cur.uy1 = 4096; return;
     case 1:                                           /* user tile clip: tile (32x32) min/max, inclusive */
         cur.ux0 = (int)(w[4] & 63) * 32; cur.uy0 = (int)(w[5] & 31) * 32;
         cur.ux1 = ((int)(w[6] & 63) + 1) * 32; cur.uy1 = ((int)(w[7] & 31) + 1) * 32;
@@ -170,7 +211,7 @@ static void sink(int kind, int list, const uint32_t *w, int words) {
         }
         if (!cur.pcw) return;
         if (cur.sprite) {                             /* sprite: one quad per parameter */
-            poly *p = new_poly(list, 1);
+            poly *p = new_poly(pc, list, 1);
             int tex = (cur.isp >> 25) & 1;
             float x[4] = { f32(w[1]), f32(w[4]), f32(w[7]), f32(w[10]) }, y[4] = { f32(w[2]), f32(w[5]), f32(w[8]), f32(w[11]) };
             float z[4] = { f32(w[3]), f32(w[6]), f32(w[9]), 0 };
@@ -184,14 +225,14 @@ static void sink(int kind, int list, const uint32_t *w, int words) {
                 u[2] = uv16(w[15], 1); v[2] = uv16(w[15], 0); u[3] = u[0] + u[2] - u[1]; v[3] = v[0] + v[2] - v[1];
             }
             for (int i = 0; i < 4; i++) {
-                vtx *t = new_vtx(); t->x = x[i]; t->y = y[i]; t->z = z[i]; t->u = u[i]; t->v = v[i];
+                vtx *t = new_vtx(pc); t->x = x[i]; t->y = y[i]; t->z = z[i]; t->u = u[i]; t->v = v[i];
                 memcpy(t->c, cur.face, sizeof t->c); memcpy(t->o, cur.face_ofs, sizeof t->o);
             }
             p->n = 4;
             return;
         }
-        if (cur.open < 0) { new_poly(list, 0); cur.open = npl - 1; }
-        vtx *t = new_vtx();
+        if (cur.open < 0) { new_poly(pc, list, 0); cur.open = npl - 1; }
+        vtx *t = new_vtx(pc);
         t->x = f32(w[1]); t->y = f32(w[2]); t->z = f32(w[3]);
         uint32_t pcw = cur.pcw;
         int tex = (pcw >> 3) & 1, col = (pcw >> 4) & 3, vol = (pcw >> 6) & 1, u16 = pcw & 1;
@@ -224,6 +265,76 @@ static void sink(int kind, int list, const uint32_t *w, int words) {
     }
     default:
         return;
+    }
+}
+static void ctx_lists(ctx_t *pc, pvr_frame *f) { f->verts = vt; f->nverts = nvt; f->polys = pl; f->npolys = npl; f->mods = mt; f->nmods = nmt; }
+static void ctx_restart(ctx_t *pc) { nvt = 0; npl = 0; nmt = 0; }
+#undef cur
+#undef vt
+#undef nvt
+#undef cap_vt
+#undef pl
+#undef npl
+#undef cap_pl
+#undef mt
+#undef nmt
+#undef cap_mt
+#define vt (ta_ctx->vt)
+#define nvt (ta_ctx->nvt)
+#define cap_vt (ta_ctx->cap_vt)
+#define pl (ta_ctx->pl)
+#define npl (ta_ctx->npl)
+#define cap_pl (ta_ctx->cap_pl)
+#define mt (ta_ctx->mt)
+#define nmt (ta_ctx->nmt)
+#define cap_mt (ta_ctx->cap_mt)
+static void ctx_parse(ctx_t *pc) {
+    while (pc->parsed < pc->nraw) {
+        const uint32_t *r = pc->raw + pc->parsed;
+        int words = (int)(r[0] >> 16);
+        parse_rec(pc, (int)(r[0] & 0xFF), (int)((r[0] >> 8) & 0xFF) - 1, r + 1, words);
+        pc->parsed += 1 + words;
+    }
+}
+
+/* ---- the TA's sink: on the game's thread, as the game sends its lists */
+static void tex_note(ctx_t *c, uint32_t tcw, uint32_t tsp) {
+    if (c->ntex && c->tex[c->ntex * 2 - 2] == tcw && c->tex[c->ntex * 2 - 1] == tsp) return;   /* as the one before */
+    if (c->ntex == c->cap_tex) { c->cap_tex = c->cap_tex ? c->cap_tex * 2 : 256; c->tex = realloc(c->tex, (size_t)c->cap_tex * 8); }
+    c->tex[c->ntex * 2] = tcw; c->tex[c->ntex * 2 + 1] = tsp; c->ntex++;
+}
+static void sink(int kind, int list, const uint32_t *w, int words) {
+    if (kind == -1) { list_init(); return; }           /* TA_LIST_INIT */
+    if (kind != 7 && kind != 4 && kind != 5 && kind != 1) return;
+    ctx_t *c = ta_ctx;
+    if (c->nraw + 17 > c->cap_raw) { c->cap_raw = c->cap_raw ? c->cap_raw * 2 : 1 << 16; c->raw = realloc(c->raw, (size_t)c->cap_raw * 4); }
+    uint32_t *r = c->raw + c->nraw;
+    r[0] = (uint32_t)kind | ((uint32_t)(list + 1) & 0xFF) << 8 | (uint32_t)words << 16;
+    if (words == 8) memcpy(r + 1, w, 32); else memcpy(r + 1, w, (size_t)words * 4);
+    c->nraw += 1 + words;
+    if (kind == 7) {                                   /* the first vertex after a header: its polygons exist */
+        if (!col.noted && col.pcw && list != 1 && list != 3) {
+            col.noted = 1;
+            if (col.tex) { tex_note(c, col.tcw, col.tsp); if (col.two) tex_note(c, col.tcw1, col.tsp1); }
+        }
+        return;
+    }
+    if (kind == 4) {                                   /* as parse_rec reads a header, for what col keeps */
+        if (list == 1 || list == 3) { col.pcw = 0; return; }
+        int colt = (w[0] >> 4) & 3, vol = (w[0] >> 6) & 1, ofs = (w[0] >> 2) & 1;
+        col.pcw = w[0]; col.tex = (int)((isp_from_pcw(w[1], w[0]) >> 25) & 1); col.tsp = w[2]; col.tcw = w[3];
+        col.two = vol; if (vol) { col.tsp1 = w[4]; col.tcw1 = w[5]; }
+        if (colt == 2) {
+            if (words == 16 && vol) { float_col(w + 8, col.face); float_col(w + 12, col.face1); memset(col.face_ofs, 0, sizeof col.face_ofs); }
+            else if (words == 16 && ofs) { float_col(w + 8, col.face); float_col(w + 12, col.face_ofs); }
+            else float_col(w + 4, col.face);
+            if (!vol) memcpy(col.face1, col.face, sizeof col.face1);
+        }
+        col.noted = 0;
+    } else if (kind == 5) {
+        col.pcw = w[0]; col.tex = (int)((isp_from_pcw(w[1], w[0]) >> 25) & 1); col.tsp = w[2]; col.tcw = w[3]; col.two = 0;
+        unpack(w[4], col.face); unpack(w[5], col.face_ofs);
+        col.noted = 0;
     }
 }
 
@@ -676,11 +787,29 @@ static ctx_t *render_ctx(void) {
     for (int i = 0; i < NCTX; i++) if (ctxs[i].used && ctxs[i].base == pbase) rc = &ctxs[i];
     return rc ? rc : ta_ctx;                     /* no match: the list being built */
 }
+static void frame_params(pvr_frame *f);
 void pvr_get_frame(pvr_frame *f) {
-    ctx_t *saved = ta_ctx;
-    ta_ctx = render_ctx();
-    f->verts = vt; f->nverts = nvt; f->polys = pl; f->npolys = npl; f->mods = mt; f->nmods = nmt;
-    ta_ctx = saved;
+    ctx_t *rc = render_ctx();
+    ctx_parse(rc);
+    ctx_lists(rc, f);
+    frame_params(f);
+}
+/* for a renderer on another thread (pvr_int.h) */
+static ctx_t snap;
+void pvr_snap_take(pvr_frame *f, const uint32_t **tex, int *ntex) {
+    ctx_t *rc = render_ctx();
+    if (rc->nraw > snap.cap_raw) { snap.cap_raw = rc->nraw + rc->nraw / 2 + 1024; snap.raw = realloc(snap.raw, (size_t)snap.cap_raw * 4); }
+    if (rc->nraw) memcpy(snap.raw, rc->raw, (size_t)rc->nraw * 4);
+    snap.nraw = rc->nraw; snap.parsed = 0; ctx_restart(&snap); snap.ps = rc->ps0;
+    *tex = rc->tex; *ntex = rc->ntex;
+    f->verts = NULL; f->polys = NULL; f->mods = NULL; f->nverts = f->npolys = f->nmods = 0;
+    frame_params(f);
+}
+void pvr_snap_lists(pvr_frame *f) {
+    ctx_parse(&snap);
+    ctx_lists(&snap, f);
+}
+static void frame_params(pvr_frame *f) {
     uint32_t xc = REG(0x068), yc = REG(0x06C);
     f->hscale = (REG(0x0F4) >> 16) & 1;
     f->clip_x0 = (int)(xc & 0x7FF); f->clip_x1 = (int)((xc >> 16) & 0x7FF);
@@ -792,6 +921,7 @@ void dc_pvr_sw_store(const uint8_t *rgba, int w, int h) {
 
 int dc_pvr_sw_render(void) {
     ctx_t *saved = ta_ctx, *rc = render_ctx();
+    ctx_parse(rc);
     ta_ctx = rc;
     /* render target: FB_X_CLIP / FB_Y_CLIP maxima, doubled horizontally when the scaler halves it */
     uint32_t xc = REG(0x068), yc = REG(0x06C), sc = REG(0x0F4);
@@ -859,7 +989,13 @@ int dc_pvr_sw_render(void) {
     return n;
 }
 
-void dc_pvr_sw_install(void) { u8f_init(); dc_ta_set_sink(sink); }
+void dc_pvr_sw_install(void) {
+    u8f_init();
+    for (int i = 0; i < NCTX; i++) if (!ctxs[i].used && !ctxs[i].nraw) {   /* a context never initialised: no strip open */
+        ctxs[i].ps.open = -1; ctxs[i].ps.ux1 = ctxs[i].ps.uy1 = 4096; ctxs[i].ps0 = ctxs[i].ps;
+    }
+    dc_ta_set_sink(sink);
+}
 
 /* ------------------------------------------------------------------ video output */
 int dc_pvr_display(uint8_t *rgb, int maxw, int maxh, int *w, int *h) {

@@ -58,8 +58,7 @@ static void tex_get(uint32_t tcw, uint32_t tsp, pvr_texinfo *ti) {
     }
     pvr_get_texture(tcw, tsp, ti);
 }
-static pvr_frame snap_f; static pvr_vtx *snap_v; static pvr_poly *snap_p; static pvr_modtri *snap_m;
-static int snap_cv, snap_cp, snap_cm;
+static pvr_frame snap_f;
 
 /* ------------------------------------------------------------------ minimal GL binding */
 typedef unsigned int GLenum, GLuint, GLbitfield; typedef int GLint, GLsizei; typedef float GLfloat;
@@ -1393,7 +1392,7 @@ static void scissor_for(const pvr_poly *p) {
 static struct { bkey key; int valid; GLint *first; GLsizei *count; int n, cap; } B;
 /* DC_GL_STATS=1: what a frame costs to draw, averaged and printed every 300 frames (polygons, vertices
  * sent, state changes, draw calls) */
-static struct { int on; unsigned long frames, polys, verts, states, draws, ranges; } gst = { -1, 0, 0, 0, 0, 0, 0 };
+static struct { int on; unsigned long frames, polys, verts, states, draws, ranges, mods; } gst = { -1, 0, 0, 0, 0, 0, 0, 0 };
 static void batch_flush(void) {
     if (B.n && gst.on > 0) { gst.draws++; gst.ranges += (unsigned long)B.n; }
     if (B.n == 1) p_glDrawArrays(GL_TRIANGLES, B.first[0], B.count[0]);
@@ -1935,23 +1934,13 @@ static int backdrop_card(const pvr_frame *f, int RW) {
  * keep decoded at once); render the usual way then. */
 int dc_pvr_gl_prepare(void) {
     snap_on = tmap_on = 0;
-    pvr_frame f; pvr_get_frame(&f);
-    #define SNAP_GROW(buf, cap, n) if ((n) > cap) { cap = (n) + (n) / 2 + 64; buf = realloc(buf, (size_t)cap * sizeof *buf); if (!buf) { cap = 0; return 0; } }
-    SNAP_GROW(snap_v, snap_cv, f.nverts) SNAP_GROW(snap_p, snap_cp, f.npolys) SNAP_GROW(snap_m, snap_cm, f.nmods)
-    #undef SNAP_GROW
-    if (f.nverts) memcpy(snap_v, f.verts, (size_t)f.nverts * sizeof *snap_v);
-    if (f.npolys) memcpy(snap_p, f.polys, (size_t)f.npolys * sizeof *snap_p);
-    if (f.nmods) memcpy(snap_m, f.mods, (size_t)f.nmods * sizeof *snap_m);
-    snap_f = f; snap_f.verts = snap_v; snap_f.polys = snap_p; snap_f.mods = snap_m;
+    const uint32_t *tex; int ntex;
+    pvr_snap_take(&snap_f, &tex, &ntex);                   /* the lists are parsed where they are drawn */
     for (uint32_t i = 0; i < 0x2000 / 4; i++) snap_reg[i] = (dc_pvr_reg)(i * 4);
     tmap_stamp++; tmap_n = 0; tmap_miss = 0;
     if (!tmap_stamp) { memset(tmap, 0, sizeof tmap); tmap_stamp = 1; }
-    for (int i = 0; i < f.npolys; i++) {                 /* the decoded textures stay in pvr_sw's cache (512) */
-        const pvr_poly *p = &f.polys[i];
-        if (!((p->isp >> 25) & 1)) continue;
-        if (tmap_add(p->tcw, p->tsp) > 384) return 0;
-        if (p->twovol && tmap_add(p->tcw1, p->tsp1) > 384) return 0;
-    }
+    for (int i = 0; i < ntex; i++)                         /* the decoded textures stay in pvr_sw's cache (512) */
+        if (tmap_add(tex[i * 2], tex[i * 2 + 1]) > 384) return 0;
     snap_on = tmap_on = 1;
     return 1;
 }
@@ -2036,7 +2025,7 @@ static void render_frame(int scale) {
     #define SC(x) ((x) * scale / 2)
     frame_no++;
     pvr_frame f;
-    if (snap_on) f = snap_f; else pvr_get_frame(&f);
+    if (snap_on) { f = snap_f; pvr_snap_lists(&f); } else pvr_get_frame(&f);
     tp_frame = &f;
     /* Several renders into the same framebuffer, each clipped to its own band of lines (FB_Y_CLIP), make
      * up one picture (Looney Tunes Space Race's split screen: top view, bottom view, top strip): a
@@ -2571,11 +2560,11 @@ static void render_frame(int scale) {
     p_glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)nverts * (GLsizeiptr)sizeof(gv), verts, GL_STREAM_DRAW);
     if (gst.on < 0) { const char *e = getenv("DC_GL_STATS"); gst.on = e && *e == '1'; }
     if (gst.on > 0) {
-        gst.polys += (unsigned long)f.npolys; gst.verts += (unsigned long)nverts;
+        gst.polys += (unsigned long)f.npolys; gst.verts += (unsigned long)nverts; gst.mods += (unsigned long)f.nmods;
         if (++gst.frames % 300 == 0) {
-            fprintf(stderr, "pvr_gl: a frame: %lu polygons, %lu vertices, %lu state changes, %lu draw calls (%lu ranges)\n",
-                    gst.polys / 300, gst.verts / 300, gst.states / 300, gst.draws / 300, gst.ranges / 300);
-            gst.polys = gst.verts = gst.states = gst.draws = gst.ranges = 0;
+            fprintf(stderr, "pvr_gl: a frame: %lu polygons, %lu vertices, %lu state changes, %lu draw calls (%lu ranges), %lu volume triangles, %d shader variants\n",
+                    gst.polys / 300, gst.verts / 300, gst.states / 300, gst.draws / 300, gst.ranges / 300, gst.mods / 300, sv_n);
+            gst.polys = gst.verts = gst.states = gst.draws = gst.ranges = gst.mods = 0;
         }
     }
 
