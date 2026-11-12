@@ -38,6 +38,26 @@ static int load_file(const char *path, uint8_t *dst, size_t n) {
     size_t r = fread(dst, 1, n, f); fclose(f);
     return r == n ? 0 : -1;
 }
+/* a folder with the player's BIOS: the boot ROM and the flash by the names they usually have */
+int dc_bios_load_dir(const char *dir) {
+    static const char *boots[] = {"dc_boot.bin", "dc_bios.bin", "boot.bin", "bios.bin", "dc_boot_rom.bin"};
+    static const char *flashes[] = {"dc_flash.bin", "dc_nvmem.bin", "flash.bin", "dc_flash_wb.bin"};
+    char b[1024], f[1024];
+    const char *boot = NULL, *fl = NULL;
+    for (unsigned i = 0; !boot && i < sizeof boots / sizeof *boots; i++) {
+        snprintf(b, sizeof b, "%s/%s", dir, boots[i]);
+        FILE *t = fopen(b, "rb"); if (t) { fclose(t); boot = b; }
+    }
+    for (unsigned i = 0; !fl && i < sizeof flashes / sizeof *flashes; i++) {
+        snprintf(f, sizeof f, "%s/%s", dir, flashes[i]);
+        FILE *t = fopen(f, "rb"); if (t) { fclose(t); fl = f; }
+    }
+    if (!boot && !fl) return -1;
+    int r = dc_bios_load(boot, fl);
+    fprintf(stderr, "bios: %s%s%s%s\n", boot ? boot : "", boot && fl ? ", " : "", fl ? fl : "", r ? " (not read)" : "");
+    return r;
+}
+
 int dc_bios_load(const char *boot, const char *flashp) {
     int ok = 0;
     if (boot) {
@@ -61,16 +81,32 @@ static uint16_t flash_crc(const uint8_t *p, int n) {
     }
     return (uint16_t)~crc;
 }
-static int flash_user_next;                              /* next free physical block */
+/* the next free block (after the last one in use: blocks are taken in order), 0 = full */
+static int flash_user_free(void) {
+    const uint8_t *bm = flash + 0x1C000 + 0x4000 - 0x40;  /* bitmap: a cleared bit = in use */
+    int last = 0;
+    for (int blk = 1; blk < 255; blk++) if (!(bm[(blk - 1) / 8] & (0x80u >> ((blk - 1) % 8)))) last = blk;
+    return last + 1 < 255 ? last + 1 : 0;
+}
 static void flash_user_put(uint16_t id, const uint8_t data[60]) {
-    uint8_t *u = flash + 0x1C000, *b = u + 0x40 * flash_user_next;
+    int blk = flash_user_free();
+    if (!blk) return;
+    uint8_t *u = flash + 0x1C000, *b = u + 0x40 * blk;
     b[0] = id & 0xFF; b[1] = id >> 8;
     memcpy(b + 2, data, 60);
     uint16_t crc = flash_crc(b, 62);
     b[62] = crc & 0xFF; b[63] = crc >> 8;
-    int bit = flash_user_next - 1;                        /* bitmap: a cleared bit = in use */
-    u[0x4000 - 0x40 + bit / 8] &= (uint8_t)~(0x80u >> (bit % 8));
-    flash_user_next++;
+    u[0x4000 - 0x40 + (blk - 1) / 8] &= (uint8_t)~(0x80u >> ((blk - 1) % 8));
+}
+/* is there a block with this ID in the user partition? */
+static int flash_user_has(uint16_t id) {
+    const uint8_t *u = flash + 0x1C000;
+    if (memcmp(u, "KATANA_FLASH", 12)) return -1;        /* not formatted */
+    for (int blk = 1; blk < 255; blk++) {
+        if (u[0x4000 - 0x40 + (blk - 1) / 8] & (0x80u >> ((blk - 1) % 8))) continue;
+        if ((u[blk * 0x40] | u[blk * 0x40 + 1] << 8) == id) return 1;
+    }
+    return 0;
 }
 
 /* The network settings a console has once its browser (PlanetWeb, DreamKey) has set up an ISP and
@@ -111,7 +147,6 @@ static void flash_user_init(void) {
     memset(u, 0xFF, 0x4000);
     memcpy(u, "KATANA_FLASH____", 16);
     u[16] = 2; u[17] = 0;                                 /* partition 2 */
-    flash_user_next = 1;
     uint32_t t = 2240611200u;                             /* 2021-01-01 00:00, in seconds since 1950 */
     memset(d, 0xFF, 60);                                  /* block 5: system settings */
     d[0] = t & 0xFF; d[1] = (t >> 8) & 0xFF; d[2] = (t >> 16) & 0xFF; d[3] = t >> 24;
@@ -425,6 +460,10 @@ static void set_region(char region) {
 int dc_bios_install(sh4ctx *c, char region) {
     (void)c;
     if (!flash_loaded) flash_init(region);
+    else if (flash_user_has(0x80) == 0) {                /* the player's flash, never set up for the internet */
+        flash_network_init();
+        fprintf(stderr, "bios: the flash has no network settings; added for this session\n");
+    }
     set_region(region);
     dc_bba_reset();
     dc_modem_reset();

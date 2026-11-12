@@ -7,6 +7,7 @@
 #include "dccore/bios.h"
 #include "dccore/net.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 typedef struct { uint32_t addr, end; sh4fn fn; } dc_fn_entry;
@@ -169,6 +170,34 @@ int main(void) {
     }
     CHECK(found_inet && found_bba == 1 && found_sys);
     CHECK((u[0x4000 - 0x40] & 0x80) == 0);                /* block 1 marked in use */
+
+    /* a player's own flash, set up but never for the internet: the network blocks are added */
+    {
+        static uint8_t fl[0x20000];
+        memcpy(fl, dc_flash, sizeof fl);                  /* the factory partition as above */
+        uint8_t *up = fl + 0x1C000;
+        memset(up + 0x40, 0xFF, 0x4000 - 0x40);           /* only block 1: system settings, a marker */
+        memcpy(up + 0x40, dc_flash + 0x1C040, 64);
+        up[0x40 + 30] = 0x5A;
+        up[0x4000 - 0x40] = 0x7F;
+        FILE *f = fopen("test_bba_flash/dc_flash.bin", "wb");
+        if (!f) { (void)!system("mkdir test_bba_flash"); f = fopen("test_bba_flash/dc_flash.bin", "wb"); }
+        CHECK(f != NULL);
+        if (f) { fwrite(fl, 1, sizeof fl, f); fclose(f); }
+        CHECK(dc_bios_load_dir("test_bba_flash") == 0);
+        CHECK(dc_bios_load_dir("no_such_folder") == -1);
+        dc_bios_install(&c, '1');
+        int inet = 0, sys = 0, bbab = 0;
+        for (int blkn = 1; blkn < 255; blkn++) {
+            const uint8_t *bk = dc_flash + 0x1C000 + blkn * 64;
+            if (dc_flash[0x1C000 + 0x4000 - 0x40 + (blkn - 1) / 8] & (0x80 >> ((blkn - 1) % 8))) continue;
+            uint16_t bid = (uint16_t)(bk[0] | bk[1] << 8);
+            if (bid == 0x05 && bk[30] == 0x5A && blkn == 1) sys = 1;
+            if (bid == 0x80) inet = blkn;
+            if (bid == 0xE0) bbab = 1;
+        }
+        CHECK(sys && inet == 2 && bbab);
+    }
 
     printf(fails ? "bba: %d FAILED\n" : "bba: all passed\n", fails);
     return fails != 0;

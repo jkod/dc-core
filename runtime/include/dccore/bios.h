@@ -24,6 +24,10 @@ extern void (*dc_bios_read_hook)(uint32_t lba, uint32_t count, uint32_t dst);   
  * The ROM is mapped at 0x00000000 (reads through NULL pointers see it, like on hardware) and
  * provides the built-in font; the flash replaces the synthetic one. Call before dc_bios_install. */
 int dc_bios_load(const char *boot_rom, const char *flash);
+/* the same from a folder: the boot ROM as dc_boot.bin (or dc_bios.bin, boot.bin, bios.bin) and the
+ * flash as dc_flash.bin (or dc_nvmem.bin, flash.bin); either may be missing. -1: neither there.
+ * A flash without network settings gets them for the session (online games need them). */
+int dc_bios_load_dir(const char *dir);
 extern uint8_t *dc_bios_rom;
 extern uint8_t dc_flash[0x20000];   /* non-zero: log every syscall to stderr */
 #ifdef __cplusplus
