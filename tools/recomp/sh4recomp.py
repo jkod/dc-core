@@ -127,7 +127,7 @@ def _sq_stores(lines):
                 if j < k and setr.search(t) and not step.search(t):
                     break
 
-def localize_regs(lines, fp=False, fast_mem=False):
+def localize_regs(lines, fp=False, fast_mem=False, t_local=True, sq_stores=True):
     fpl = localize_fp(lines) if fp else None
     fflush = freload = ""
     if fpl:
@@ -138,8 +138,8 @@ def localize_regs(lines, fp=False, fast_mem=False):
         return lines
     # the T flag as a local too (tf_): a compare then sets the host's flags for the branch after it and no
     # more; kept in c->t it was also made a value and stored every time, two instructions a compare
-    t_used = bool(re.search(r"\bc->t\b", body))
-    t_written = bool(re.search(r"\bc->t\s*(?:[-+*/&|^]|<<|>>)?=(?!=)", body))
+    t_used = t_local and bool(re.search(r"\bc->t\b", body))
+    t_written = t_used and bool(re.search(r"\bc->t\s*(?:[-+*/&|^]|<<|>>)?=(?!=)", body))
     written = sorted({int(n) for n in re.findall(r"c->r\[(\d+)\]\s*(?:[-+*/&|^]|<<|>>)?=(?!=)", body)}
                      | {int(n) for n in re.findall(r"(?:\+\+|--)c->r\[(\d+)\]|c->r\[(\d+)\](?:\+\+|--)", body) for n in n if n})
     flush = " ".join(["c->r[%d] = r_%d;" % (n, n) for n in written] + (["c->t = tf_;"] if t_written else []) + ([fflush] if fflush else []))
@@ -175,7 +175,7 @@ def localize_regs(lines, fp=False, fast_mem=False):
         body, nmem = re.subn(r"\bdc_(rd|wr)(8|16|32)\(", r"dc_f\1\2(ram_, ", body)
         mem = nmem > 0
     lines = body.split("\n")
-    if fast_mem:
+    if fast_mem and sq_stores:
         _sq_stores(lines)
     decls = []
     if mem: decls.append("  uint8_t *const ram_ = dc_ram;")
@@ -214,6 +214,8 @@ class Translator:
         self.sparse_labels = False   # labels only at real entries (--sparse-labels; others: dc_mid_entry)
         self.fp_mode = True          # FP instructions in a known PR/SZ mode (fp_modes; --no-fp-mode)
         self.fp_locals = True        # FP registers as locals in the fast version (localize_fp; --no-fp-locals)
+        self.t_local = True          # the T flag as a local in the fast version (--no-t-local)
+        self.sq_stores = True        # stores before a PREF test for a store queue first (--no-sq-stores)
         self.fs_trace = False        # --fs-trace: dc_fs_trace() wherever the fast version hands over to the full one
         self.fast_mem = True         # the fast version's memory accesses inline, RAM's base a local (--no-fast-mem)
         self._fpmode = None
@@ -545,7 +547,8 @@ class Translator:
         self._fpmode = None
         if self.local_regs:
             out[first:] = localize_regs(out[first:], fp=self.fp_mode and self.sparse_labels and self.fp_locals,
-                                        fast_mem=self.sparse_labels and self.fast_mem)
+                                        fast_mem=self.sparse_labels and self.fast_mem,
+                                        t_local=self.t_local, sq_stores=self.sq_stores)
 
     # FP mode (--fp-mode, with --sparse-labels). Every FP instruction tested FPSCR.PR (single or double)
     # or FPSCR.SZ (32- or 64-bit moves) at run time. Games keep both 0 nearly everywhere and flip SZ
@@ -1133,6 +1136,8 @@ def main():
     ap.add_argument("--fs-trace", action="store_true", help="count the fast versions' hand-overs to the full ones (printed at exit)")
     ap.add_argument("--no-fast-mem", action="store_true", help="the fast version's memory accesses as everywhere else (see sh4.h dc_frd32)")
     ap.add_argument("--no-fp-locals", action="store_true", help="FP registers stay in the context (see localize_fp)")
+    ap.add_argument("--no-t-local", action="store_true", help="the T flag stays in the context (see localize_regs)")
+    ap.add_argument("--no-sq-stores", action="store_true", help="no store-queue-first stores (see _sq_stores)")
     ap.add_argument("--no-fp-mode", action="store_true", help="FP instructions test FPSCR.PR/SZ at run time everywhere (see fp_modes)")
     ap.add_argument("--entries", help="file of mid-function entry addresses (hex, one a line) that keep their label")
     ap.add_argument("--no-idle-loops", action="store_true", help="no DC_IDLE in poll loops (time doesn't jump ahead there)")
@@ -1150,6 +1155,8 @@ def main():
     tr.sparse_labels = args.sparse_labels or os.environ.get("DCCORE_SPARSE_LABELS", "0") == "1"
     tr.fp_mode = not args.no_fp_mode and os.environ.get("DCCORE_FP_MODE", "1") != "0"
     tr.fp_locals = not args.no_fp_locals and os.environ.get("DCCORE_FP_LOCALS", "1") != "0"
+    tr.t_local = not args.no_t_local and os.environ.get("DCCORE_T_LOCAL", "1") != "0"
+    tr.sq_stores = not args.no_sq_stores and os.environ.get("DCCORE_SQ_STORES", "1") != "0"
     tr.fs_trace = args.fs_trace or os.environ.get("DCCORE_FS_TRACE", "0") == "1"
     tr.fast_mem = not args.no_fast_mem and os.environ.get("DCCORE_FAST_MEM", "1") != "0"
     entries = args.entries or os.environ.get("DCCORE_ENTRIES")
