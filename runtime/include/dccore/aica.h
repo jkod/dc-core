@@ -1,6 +1,9 @@
 #ifndef DCCORE_AICA_H
 #define DCCORE_AICA_H
 #include <stdint.h>
+#if defined(__GNUC__) && defined(__ELF__)
+#pragma GCC visibility push(hidden)             /* see dccore/sh4.h */
+#endif
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -40,5 +43,8 @@ int      dc_aica_audio_read(int16_t *dst, int frames);
 void     dc_set_ext_irq(uint32_t istext_bit, int on);   /* hw.c: Holly external interrupt line */
 #ifdef __cplusplus
 }
+#endif
+#if defined(__GNUC__) && defined(__ELF__)
+#pragma GCC visibility pop
 #endif
 #endif

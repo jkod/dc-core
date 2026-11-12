@@ -1,6 +1,9 @@
 #ifndef DCCORE_PVR_H
 #define DCCORE_PVR_H
 #include <stdint.h>
+#if defined(__GNUC__) && defined(__ELF__)
+#pragma GCC visibility push(hidden)             /* see dccore/sh4.h */
+#endif
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -161,5 +164,8 @@ extern int dc_pvr_gl_hud_bars;
 extern int dc_pvr_gl_hud_sharp;       /* HUD textures (flat polygons at >= dc_pvr_gl_hud_z) get a bicubic filter (default 1) */
 #ifdef __cplusplus
 }
+#endif
+#if defined(__GNUC__) && defined(__ELF__)
+#pragma GCC visibility pop
 #endif
 #endif

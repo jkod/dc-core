@@ -108,9 +108,13 @@ static poly *new_poly(int list, int sprite) {
 }
 
 static float f32(uint32_t w) { float f; memcpy(&f, &w, 4); return f; }
+/* a packed colour's channels as floats: n / 255 from a table (the same values; four divisions for each
+ * colour of each vertex were a tenth of what a vertex cost here) */
+static float u8f[256];
+static void u8f_init(void) { for (int i = 0; i < 256; i++) u8f[i] = (float)i / 255.f; }
 static void unpack(uint32_t argb, float *c) {
-    c[0] = ((argb >> 16) & 255) / 255.f; c[1] = ((argb >> 8) & 255) / 255.f;
-    c[2] = (argb & 255) / 255.f; c[3] = (argb >> 24) / 255.f;
+    c[0] = u8f[(argb >> 16) & 255]; c[1] = u8f[(argb >> 8) & 255];
+    c[2] = u8f[argb & 255]; c[3] = u8f[argb >> 24];
 }
 static void float_col(const uint32_t *w, float *c) {      /* A R G B floats */
     c[3] = f32(w[0]); c[0] = f32(w[1]); c[1] = f32(w[2]); c[2] = f32(w[3]);
@@ -661,6 +665,7 @@ static void background(float *col, float *depth) {
     uint32_t vbase = base + 12;                       /* after ISP, TSP, TCW */
     uint32_t cw = rd32_area32(vbase + (3 + (texd ? 2 : 0)) * 4);
     (void)skip;
+    if (u8f[255] == 0) u8f_init();
     unpack(cw, col); col[3] = 1;
     *depth = f32(REG(0x088));
 }
@@ -854,7 +859,7 @@ int dc_pvr_sw_render(void) {
     return n;
 }
 
-void dc_pvr_sw_install(void) { dc_ta_set_sink(sink); }
+void dc_pvr_sw_install(void) { u8f_init(); dc_ta_set_sink(sink); }
 
 /* ------------------------------------------------------------------ video output */
 int dc_pvr_display(uint8_t *rgb, int maxw, int maxh, int *w, int *h) {

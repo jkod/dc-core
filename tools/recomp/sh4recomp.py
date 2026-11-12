@@ -106,6 +106,27 @@ def localize_fp(lines):
     decl = "  float %s;" % ", ".join("f_%d = c->fr.f[%d]" % (n, n) for n in used)
     return out, flush, reload, decl
 
+_pref_re = re.compile(r"\bdc_hw_pref\(r_(\d+)\)")
+def _sq_stores(lines):
+    """Stores that go to a store queue get its test first (sh4.h: dc_fwr32_sq): a queue is sent off with
+    PREF @Rn, so the 32-bit stores through Rn that lead up to one -- back to where Rn is set to something
+    other than itself plus a constant, or to a label -- are taken to be the queue's eight words. A
+    wrong guess only costs the order of the tests."""
+    for k, l in enumerate(lines):
+        for n in _pref_re.findall(l):
+            reg = "r_%s" % n
+            store = re.compile(r"\bdc_fwr32\(ram_, %s\b(?!\d)" % reg)
+            setr = re.compile(r"\b%s\b(?!\d)\s*(?:[-+*/&|^]|<<|>>)?=(?!=)" % reg)
+            step = re.compile(r"\b%s\b(?!\d)\s*(?:\+=|-=)\s*0x[0-9A-Fa-f]+u?;" % reg)
+            for j in range(k, max(k - 400, -1), -1):
+                t = lines[j]
+                if j < k and (t.startswith("L_") or t.startswith("local_jump")):
+                    break
+                if store.search(t):
+                    lines[j] = t = store.sub("dc_fwr32_sq(ram_, %s" % reg, t)
+                if j < k and setr.search(t) and not step.search(t):
+                    break
+
 def localize_regs(lines, fp=False, fast_mem=False):
     fpl = localize_fp(lines) if fp else None
     fflush = freload = ""
@@ -115,11 +136,19 @@ def localize_regs(lines, fp=False, fast_mem=False):
     used = sorted({int(n) for n in _reg_re.findall(body)})
     if not used and not fpl:
         return lines
+    # the T flag as a local too (tf_): a compare then sets the host's flags for the branch after it and no
+    # more; kept in c->t it was also made a value and stored every time, two instructions a compare
+    t_used = bool(re.search(r"\bc->t\b", body))
+    t_written = bool(re.search(r"\bc->t\s*(?:[-+*/&|^]|<<|>>)?=(?!=)", body))
     written = sorted({int(n) for n in re.findall(r"c->r\[(\d+)\]\s*(?:[-+*/&|^]|<<|>>)?=(?!=)", body)}
                      | {int(n) for n in re.findall(r"(?:\+\+|--)c->r\[(\d+)\]|c->r\[(\d+)\](?:\+\+|--)", body) for n in n if n})
-    flush = " ".join(["c->r[%d] = r_%d;" % (n, n) for n in written] + ([fflush] if fflush else []))
-    reload = " ".join(["r_%d = c->r[%d];" % (n, n) for n in used] + ([freload] if freload else []))
+    flush = " ".join(["c->r[%d] = r_%d;" % (n, n) for n in written] + (["c->t = tf_;"] if t_written else []) + ([fflush] if fflush else []))
+    reload = " ".join(["r_%d = c->r[%d];" % (n, n) for n in used] + (["tf_ = c->t;"] if t_used else []) + ([freload] if freload else []))
     body = _reg_re.sub(lambda m: "r_%s" % m.group(1), body)
+    if t_used:
+        body = re.sub(r"\bc->t\b", "tf_", body)
+        if t_written:                                   # SR read as a whole takes T from the context
+            body = re.sub(r"\bsh4_get_sr\(c\)", "(c->t = tf_, sh4_get_sr(c))", body)
     # calls and helpers that see c->r: flush before, reload after (as statements)
     for name in SYNC_CALLS:
         out, last = [], 0
@@ -146,9 +175,12 @@ def localize_regs(lines, fp=False, fast_mem=False):
         body, nmem = re.subn(r"\bdc_(rd|wr)(8|16|32)\(", r"dc_f\1\2(ram_, ", body)
         mem = nmem > 0
     lines = body.split("\n")
+    if fast_mem:
+        _sq_stores(lines)
     decls = []
     if mem: decls.append("  uint8_t *const ram_ = dc_ram;")
     if used: decls.append("  uint32_t %s;" % ", ".join("r_%d = c->r[%d]" % (n, n) for n in used))
+    if t_used: decls.append("  uint32_t tf_ = c->t;")
     if fpl: decls.append(fdecl)
     for k, l in enumerate(lines):                       # after the header and jt, before the entry check
         if l.startswith("  if (c->entry != "):

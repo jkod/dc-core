@@ -2,6 +2,9 @@
 #define DCCORE_RUNTIME_H
 #include "dccore/sh4.h"
 #include <stddef.h>
+#if defined(__GNUC__) && defined(__ELF__)
+#pragma GCC visibility push(hidden)             /* see dccore/sh4.h */
+#endif
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -64,5 +67,8 @@ void dc_idle(sh4ctx *c);
 
 #ifdef __cplusplus
 }
+#endif
+#if defined(__GNUC__) && defined(__ELF__)
+#pragma GCC visibility pop
 #endif
 #endif

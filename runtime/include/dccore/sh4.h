@@ -11,6 +11,13 @@
 #include <string.h>
 #include <math.h>
 #include <setjmp.h>
+/* ELF (the Switch, Linux): these are all one program's own symbols. Declared hidden, position-independent
+ * code reads them directly; with the default visibility every access to a global defined in another
+ * file first loads its address from the GOT (on AArch64: two more instructions and a load each time,
+ * and the generated code reads dc_next_event and the tick costs at every loop and call). */
+#if defined(__GNUC__) && defined(__ELF__)
+#pragma GCC visibility push(hidden)
+#endif
 
 #ifdef __cplusplus
 extern "C" {
@@ -93,9 +100,18 @@ void dc_mem_wr8(uint32_t a, uint8_t v); void dc_mem_wr16(uint32_t a, uint16_t v)
 #define DC_URAM_INLINE_RD(a, T)
 #define DC_URAM_INLINE_WR(a, v)
 #endif
-DC_FORCE_INLINE uint8_t  dc_rd8 (uint32_t a) { if (DC_LIKELY(DC_IS_RAM(a))) { DC_RWATCHED(a, 1); return dc_ram[DC_RAM_OFS(a)]; } DC_URAM_INLINE_RD(a, uint8_t) return dc_mem_rd8(a); }
-DC_FORCE_INLINE uint16_t dc_rd16(uint32_t a) { if (DC_LIKELY(DC_IS_RAM(a))) { uint16_t v; DC_RWATCHED(a, 2); memcpy(&v, dc_ram + DC_RAM_OFS(a), 2); return v; } DC_URAM_INLINE_RD(a, uint16_t) return dc_mem_rd16(a); }
-DC_FORCE_INLINE uint32_t dc_rd32(uint32_t a) { if (DC_LIKELY(DC_IS_RAM(a))) { uint32_t v; DC_RWATCHED(a, 4); memcpy(&v, dc_ram + DC_RAM_OFS(a), 4); return v; } DC_URAM_INLINE_RD(a, uint32_t) return dc_mem_rd32(a); }
+/* RAM's test where an access is inlined. On AArch64 the mask-and-compare of DC_IS_RAM is four
+ * instructions (0x0C000000 is no compare immediate: mov, and, cmp, b.ne) on every load and store, a
+ * quarter of what the generated code executes; written as two shifts it becomes three (ubfx, cmp,
+ * b.ne). Elsewhere the mask-and-compare is the shorter one. */
+#if defined(__aarch64__)
+#define dc_is_ram_(a) ((((uint32_t)(a)) << 3) >> 29 == 3u)
+#else
+#define dc_is_ram_(a) DC_IS_RAM(a)
+#endif
+DC_FORCE_INLINE uint8_t  dc_rd8 (uint32_t a) { if (DC_LIKELY(dc_is_ram_(a))) { DC_RWATCHED(a, 1); return dc_ram[DC_RAM_OFS(a)]; } DC_URAM_INLINE_RD(a, uint8_t) return dc_mem_rd8(a); }
+DC_FORCE_INLINE uint16_t dc_rd16(uint32_t a) { if (DC_LIKELY(dc_is_ram_(a))) { uint16_t v; DC_RWATCHED(a, 2); memcpy(&v, dc_ram + DC_RAM_OFS(a), 2); return v; } DC_URAM_INLINE_RD(a, uint16_t) return dc_mem_rd16(a); }
+DC_FORCE_INLINE uint32_t dc_rd32(uint32_t a) { if (DC_LIKELY(dc_is_ram_(a))) { uint32_t v; DC_RWATCHED(a, 4); memcpy(&v, dc_ram + DC_RAM_OFS(a), 4); return v; } DC_URAM_INLINE_RD(a, uint32_t) return dc_mem_rd32(a); }
 #ifdef DC_WATCH
 /* debug builds (-DDC_WATCH): every RAM write inside [dc_watch_lo, dc_watch_hi) is reported */
 extern uint32_t dc_watch_lo, dc_watch_hi;
@@ -104,9 +120,9 @@ void dc_watch_hit(uint32_t a, uint32_t v, int size);
 #else
 #define DC_WATCHED(a, v, n) ((void)0)
 #endif
-DC_FORCE_INLINE void dc_wr8 (uint32_t a, uint8_t v)  { if (DC_LIKELY(DC_IS_RAM(a))) { DC_WATCHED(a, v, 1); dc_ram[DC_RAM_OFS(a)] = v; return; } DC_URAM_INLINE_WR(a, v) dc_mem_wr8(a, v); }
-DC_FORCE_INLINE void dc_wr16(uint32_t a, uint16_t v) { if (DC_LIKELY(DC_IS_RAM(a))) { DC_WATCHED(a, v, 2); memcpy(dc_ram + DC_RAM_OFS(a), &v, 2); return; } DC_URAM_INLINE_WR(a, v) dc_mem_wr16(a, v); }
-DC_FORCE_INLINE void dc_wr32(uint32_t a, uint32_t v) { if (DC_LIKELY(DC_IS_RAM(a))) { DC_WATCHED(a, v, 4); memcpy(dc_ram + DC_RAM_OFS(a), &v, 4); return; } DC_URAM_INLINE_WR(a, v) dc_mem_wr32(a, v); }
+DC_FORCE_INLINE void dc_wr8 (uint32_t a, uint8_t v)  { if (DC_LIKELY(dc_is_ram_(a))) { DC_WATCHED(a, v, 1); dc_ram[DC_RAM_OFS(a)] = v; return; } DC_URAM_INLINE_WR(a, v) dc_mem_wr8(a, v); }
+DC_FORCE_INLINE void dc_wr16(uint32_t a, uint16_t v) { if (DC_LIKELY(dc_is_ram_(a))) { DC_WATCHED(a, v, 2); memcpy(dc_ram + DC_RAM_OFS(a), &v, 2); return; } DC_URAM_INLINE_WR(a, v) dc_mem_wr16(a, v); }
+DC_FORCE_INLINE void dc_wr32(uint32_t a, uint32_t v) { if (DC_LIKELY(dc_is_ram_(a))) { DC_WATCHED(a, v, 4); memcpy(dc_ram + DC_RAM_OFS(a), &v, 4); return; } DC_URAM_INLINE_WR(a, v) dc_mem_wr32(a, v); }
 
 /* The fast version's accesses (the recompiler's --sparse-labels code, unless --no-fast-mem): RAM's base
  * is a local of the function (ram, read from dc_ram once: a store into RAM can't change it, where the
@@ -118,15 +134,23 @@ DC_FORCE_INLINE void dc_wr32(uint32_t a, uint32_t v) { if (DC_LIKELY(DC_IS_RAM(a
 #else
 #define DC_ALWAYS_INLINE static inline
 #endif
-DC_ALWAYS_INLINE uint8_t  dc_frd8 (const uint8_t *ram, uint32_t a) { if (DC_LIKELY(DC_IS_RAM(a))) { DC_RWATCHED(a, 1); return ram[DC_RAM_OFS(a)]; } DC_URAM_INLINE_RD(a, uint8_t) return dc_mem_rd8(a); }
-DC_ALWAYS_INLINE uint16_t dc_frd16(const uint8_t *ram, uint32_t a) { if (DC_LIKELY(DC_IS_RAM(a))) { uint16_t v; DC_RWATCHED(a, 2); memcpy(&v, ram + DC_RAM_OFS(a), 2); return v; } DC_URAM_INLINE_RD(a, uint16_t) return dc_mem_rd16(a); }
-DC_ALWAYS_INLINE uint32_t dc_frd32(const uint8_t *ram, uint32_t a) { if (DC_LIKELY(DC_IS_RAM(a))) { uint32_t v; DC_RWATCHED(a, 4); memcpy(&v, ram + DC_RAM_OFS(a), 4); return v; } DC_URAM_INLINE_RD(a, uint32_t) return dc_mem_rd32(a); }
-DC_ALWAYS_INLINE void dc_fwr8 (uint8_t *ram, uint32_t a, uint8_t v)  { if (DC_LIKELY(DC_IS_RAM(a))) { DC_WATCHED(a, v, 1); ram[DC_RAM_OFS(a)] = v; return; } DC_URAM_INLINE_WR(a, v) dc_mem_wr8(a, v); }
-DC_ALWAYS_INLINE void dc_fwr16(uint8_t *ram, uint32_t a, uint16_t v) { if (DC_LIKELY(DC_IS_RAM(a))) { DC_WATCHED(a, v, 2); memcpy(ram + DC_RAM_OFS(a), &v, 2); return; } DC_URAM_INLINE_WR(a, v) dc_mem_wr16(a, v); }
-/* a store queue next (0xE0000000..: every vertex goes to the tile accelerator through them, eight stores each) */
+DC_ALWAYS_INLINE uint8_t  dc_frd8 (const uint8_t *ram, uint32_t a) { if (DC_LIKELY(dc_is_ram_(a))) { DC_RWATCHED(a, 1); return ram[DC_RAM_OFS(a)]; } DC_URAM_INLINE_RD(a, uint8_t) return dc_mem_rd8(a); }
+DC_ALWAYS_INLINE uint16_t dc_frd16(const uint8_t *ram, uint32_t a) { if (DC_LIKELY(dc_is_ram_(a))) { uint16_t v; DC_RWATCHED(a, 2); memcpy(&v, ram + DC_RAM_OFS(a), 2); return v; } DC_URAM_INLINE_RD(a, uint16_t) return dc_mem_rd16(a); }
+DC_ALWAYS_INLINE uint32_t dc_frd32(const uint8_t *ram, uint32_t a) { if (DC_LIKELY(dc_is_ram_(a))) { uint32_t v; DC_RWATCHED(a, 4); memcpy(&v, ram + DC_RAM_OFS(a), 4); return v; } DC_URAM_INLINE_RD(a, uint32_t) return dc_mem_rd32(a); }
+DC_ALWAYS_INLINE void dc_fwr8 (uint8_t *ram, uint32_t a, uint8_t v)  { if (DC_LIKELY(dc_is_ram_(a))) { DC_WATCHED(a, v, 1); ram[DC_RAM_OFS(a)] = v; return; } DC_URAM_INLINE_WR(a, v) dc_mem_wr8(a, v); }
+DC_ALWAYS_INLINE void dc_fwr16(uint8_t *ram, uint32_t a, uint16_t v) { if (DC_LIKELY(dc_is_ram_(a))) { DC_WATCHED(a, v, 2); memcpy(ram + DC_RAM_OFS(a), &v, 2); return; } DC_URAM_INLINE_WR(a, v) dc_mem_wr16(a, v); }
+/* a store queue next (0xE0000000..: every vertex goes to the tile accelerator through them, eight stores
+ * each). dc_sq_wr32 (hw.c) is the store itself, out of line: the test stays here, off RAM's path. */
 extern uint32_t dc_sq[2][8]; extern int dc_sq_direct;
-DC_ALWAYS_INLINE void dc_fwr32(uint8_t *ram, uint32_t a, uint32_t v) { if (DC_LIKELY(DC_IS_RAM(a))) { DC_WATCHED(a, v, 4); memcpy(ram + DC_RAM_OFS(a), &v, 4); return; }
-    if ((a >> 26) == 0x38 && dc_sq_direct) { dc_sq[(a >> 5) & 1][(a >> 2) & 7] = v; return; } DC_URAM_INLINE_WR(a, v) dc_mem_wr32(a, v); }
+void dc_sq_wr32(uint32_t a, uint32_t v);
+DC_ALWAYS_INLINE void dc_fwr32(uint8_t *ram, uint32_t a, uint32_t v) { if (DC_LIKELY(dc_is_ram_(a))) { DC_WATCHED(a, v, 4); memcpy(ram + DC_RAM_OFS(a), &v, 4); return; }
+    if ((a >> 26) == 0x38) { dc_sq_wr32(a, v); return; } DC_URAM_INLINE_WR(a, v) dc_mem_wr32(a, v); }
+/* a store the recompiler expects to go to a store queue (through a register the function also gives
+ * to PREF, which is how a queue is sent off): the queue's test first and its store inline, RAM after */
+DC_ALWAYS_INLINE void dc_fwr32_sq(uint8_t *ram, uint32_t a, uint32_t v) {
+    if (DC_LIKELY((a >> 26) == 0x38) && DC_LIKELY(dc_sq_direct)) { ((uint32_t *)dc_sq)[(a >> 2) & 15] = v; return; }
+    dc_fwr32(ram, a, v);
+}
 
 DC_FORCE_INLINE float dc_rdf(uint32_t a) { uint32_t u = dc_rd32(a); float f; memcpy(&f, &u, 4); return f; }
 DC_FORCE_INLINE void  dc_wrf(uint32_t a, float f) { uint32_t u; memcpy(&u, &f, 4); dc_wr32(a, u); }
@@ -312,5 +336,8 @@ static inline void sh4_macw(sh4ctx *c, int n, int m) {
 
 #ifdef __cplusplus
 }
+#endif
+#if defined(__GNUC__) && defined(__ELF__)
+#pragma GCC visibility pop
 #endif
 #endif

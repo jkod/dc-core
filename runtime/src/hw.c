@@ -374,10 +374,18 @@ static void sq_flush(uint32_t a) {
     uint32_t dst = dc_sq_base ? dc_sq_base + (a & 0x03FFFFE0) : ((qacr & 0x1C) << 24) | (a & 0x03FFFFE0);
     if (dc_hw.on_sq && dc_hw.on_sq(dst, sq[n])) return;
     uint32_t m = dst & 0x1FFFFFFFu;
-    if (m >= 0x10000000u && m < 0x14000000u) { ta_area_write(m, (const uint8_t *)sq[n], 32); return; }
+    if (m >= 0x10000000u && m < 0x14000000u) {
+        /* the TA's polygon FIFO (see ta_area_write), where every vertex goes: straight to the parser */
+        if (!(m & 0x01800000u)) { dc_ta_write32(sq[n]); return; }
+        ta_area_write(m, (const uint8_t *)sq[n], 32); return;
+    }
     for (int i = 0; i < 8; i++) dc_wr32(dst + i * 4, sq[n][i]);
 }
 void dc_hw_pref(uint32_t a) { if ((a >> 26) == 0x38) sq_flush(a); }   /* 0xE0000000..0xE3FFFFFF */
+/* a 32-bit store to 0xE0000000..0xE3FFFFFF from the fast code (sh4.h: dc_fwr32) */
+void dc_sq_wr32(uint32_t a, uint32_t v) {
+    if (dc_sq_direct) sq[(a >> 5) & 1][(a >> 2) & 7] = v; else dc_mem_wr32(a, v);
+}
 
 /* ---------------------------------------------------------------- access */
 int dc_hw_verbose = 1;

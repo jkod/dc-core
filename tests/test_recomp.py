@@ -203,6 +203,34 @@ t("found_funcs", {0: [0x4F22, 0xD103, 0x410B, 0x0009, 0x4F26, 0x000B, 0x0009, 0x
                   0x40: [0xE02A, 0x000B, 0x0009]},
   'dc_found_funcs_path = "found_funcs_test.txt"; remove(dc_found_funcs_path);',
   'c.r[0] == 42 && (dc_interp_all || file_has("found_funcs_test.txt", "8c010040"))')
+# The T flag is a local of the fast code's functions (sh4recomp.py localize_regs): what a callee leaves in
+# it, what it finds in it, SR read as a whole, and carries from one add to the next
+#   sts.l pr,@-r15 ; clrt ; bsr 0x10 ; nop ; movt r0 ; lds.l @r15+,pr ; rts ; nop   |  0x10: sett ; rts ; nop
+t("t_from_callee", {0: [0x4F22, 0x0008, 0xB004, 0x0009, 0x0029, 0x4F26, 0x000B, 0x0009],
+                    0x10: [0x0018, 0x000B, 0x0009]}, "c.r[0] = 9;", "c.r[0] == 1")
+#   sts.l pr,@-r15 ; sett ; bsr 0x10 ; nop ; lds.l @r15+,pr ; rts ; nop   |  0x10: movt r1 ; rts ; nop
+t("t_into_callee", {0: [0x4F22, 0x0018, 0xB004, 0x0009, 0x4F26, 0x000B, 0x0009],
+                    0x10: [0x0129, 0x000B, 0x0009]}, "c.r[1] = 9;", "c.r[1] == 1")
+# the same through a register (jsr): its code keeps the target in a local of its own
+#   sts.l pr,@-r15 ; mov.l @(0x14),r1 ; sett ; jsr @r1 ; nop ; movt r0 ; lds.l @r15+,pr ; rts ; nop ; nop ; .long 0x20  |  0x20: movt r2 ; rts ; nop
+t("t_across_jsr", {0: [0x4F22, 0xD104, 0x0018, 0x410B, 0x0009, 0x0029, 0x4F26, 0x000B, 0x0009, 0x0009,
+                       (BASE + 0x20) & 0xFFFF, (BASE + 0x20) >> 16],
+                   0x20: [0x0229, 0x000B, 0x0009]}, "c.r[0] = 9; c.r[2] = 9;", "c.r[0] == 1 && c.r[2] == 1")
+#   ... clrt ; jsr @r1 ...  |  0x20: sett ; rts ; nop
+t("t_from_jsr_callee", {0: [0x4F22, 0xD104, 0x0008, 0x410B, 0x0009, 0x0029, 0x4F26, 0x000B, 0x0009, 0x0009,
+                            (BASE + 0x20) & 0xFFFF, (BASE + 0x20) >> 16],
+                        0x20: [0x0018, 0x000B, 0x0009]}, "c.r[0] = 9;", "c.r[0] == 1")
+#   cmp/eq r0,r0 ; stc sr,r1 ; clrt ; stc sr,r2 ; rts ; nop
+t("t_in_sr", {0: [0x3000, 0x0102, 0x0008, 0x0202, 0x000B, 0x0009]}, "", "(c.r[1] & 1) == 1 && (c.r[2] & 1) == 0")
+#   clrt ; addc r2,r1 ; mov #0,r3 ; addc r3,r3 ; movt r4 ; rts ; nop
+t("t_addc_chain", {0: [0x0008, 0x312E, 0xE300, 0x333E, 0x0429, 0x000B, 0x0009]},
+  "c.r[1] = 0xFFFFFFFFu; c.r[2] = 1; c.r[4] = 9;", "c.r[1] == 0 && c.r[3] == 1 && c.r[4] == 0")
+# Store queue: two words through @r4 = 0xE0200000 and PREF send the queue to QACR0's area (RAM); the fast
+# code writes the queue inline (sh4.h dc_fwr32_sq)
+#   mov #12,r0 ; mov.l r0,@r5 (QACR0) ; mov #17,r1 ; mov.l r1,@r4 ; mov #34,r1 ; mov.l r1,@(4,r4) ; pref @r4 ; rts ; nop
+t("store_queue_pref", {0: [0xE00C, 0x2502, 0xE111, 0x2412, 0xE122, 0x1411, 0x0483, 0x000B, 0x0009]},
+  "c.r[4] = 0xE0200000u; c.r[5] = 0xFF000038u;", "dc_rd32(0x8C200000u) == 17 && dc_rd32(0x8C200004u) == 34")
+
 FUNCS = {"found_funcs": ["8c010000 8c010014"]}
 
 def _found_recomp(gen):
@@ -225,6 +253,10 @@ GEN_CHECK = {"coro_setjmp_split_caller": lambda gen: _table_end(gen, BASE + 4) =
 EXTRA = {"coro_setjmp_threads": ["--setjmp", hex(S)], "coro_setjmp_split_caller": ["--setjmp", hex(S)],
          "found_funcs": ["--no-discover"]}
 
+# RECOMP_ARGS="--sparse-labels": the same tests through the fast code (registers and flags as locals, labels only
+# at entries, each function with its full fallback), as the Switch builds are made
+RECOMP_ARGS = os.environ.get("RECOMP_ARGS", "").split()
+
 def build_bin(prog):
     size = max(off + 2 * len(w) for off, w in prog.items())
     size = (size + 0x40) & ~3
@@ -243,7 +275,7 @@ def prepare(tmp, name, prog, setup, check):
     open(os.path.join(d, "funcs.txt"), "w").write("\n".join(FUNCS.get(name, ["%08x" % s for s in starts])))
     subprocess.check_call([sys.executable, os.path.join(ROOT, "tools/recomp/sh4recomp.py"),
                            os.path.join(d, "t.bin"), "--funcs", os.path.join(d, "funcs.txt"),
-                           "--out", os.path.join(d, "gen")] + EXTRA.get(name, []), stdout=subprocess.DEVNULL)
+                           "--out", os.path.join(d, "gen")] + EXTRA.get(name, []) + RECOMP_ARGS, stdout=subprocess.DEVNULL)
     main_c = """
 #include "dccore/runtime.h"
 #include "dccore/coro.h"
@@ -272,7 +304,8 @@ int main(void) {
 
 
 def main():
-    if len(sys.argv) == 3 and sys.argv[1] == "--emit":      # for CMake: build with the configured compiler
+    if len(sys.argv) >= 3 and sys.argv[1] == "--emit":      # for CMake: build with the configured compiler
+        RECOMP_ARGS.extend(sys.argv[3:])                    # the recompiler's extra arguments
         for name, prog, setup, check in TESTS:
             prepare(sys.argv[2], name, prog, setup, check)
         open(os.path.join(sys.argv[2], "tests.txt"), "w").write(";".join(n for n, _, _, _ in TESTS))
@@ -285,7 +318,7 @@ def main():
                [os.path.join(d, "gen", f) for f in os.listdir(os.path.join(d, "gen")) if f.endswith(".c")]
         exe = os.path.join(d, "t.exe" if os.environ.get("EXE") else "t")
         cc = os.environ.get("CC", "cc").split() + os.environ.get("CFLAGS", "").split()
-        subprocess.check_call(cc + ["-O1", "-w", "-I" + os.path.join(ROOT, "runtime/include"), "-o", exe] + srcs + ["-lm"])
+        subprocess.check_call(cc + [os.environ.get("OPT", "-O1"), "-w", "-I" + os.path.join(ROOT, "runtime/include"), "-o", exe] + srcs + ["-lm"])
         r = subprocess.run(os.environ.get("RUN", "").split() + [exe], capture_output=True, text=True, cwd=d)
         gen_ok = GEN_CHECK.get(name, lambda g: True)(os.path.join(d, "gen"))
         if not gen_ok: r = subprocess.CompletedProcess(r.args, 1, "generated code check failed", "")

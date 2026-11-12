@@ -1,6 +1,9 @@
 #ifndef DCCORE_HW_H
 #define DCCORE_HW_H
 #include <stdint.h>
+#if defined(__GNUC__) && defined(__ELF__)
+#pragma GCC visibility push(hidden)             /* see dccore/sh4.h */
+#endif
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -56,5 +59,8 @@ uint32_t dc_pvr_reg(uint32_t ofs);
 uint32_t dc_sb_reg(uint32_t addr);
 #ifdef __cplusplus
 }
+#endif
+#if defined(__GNUC__) && defined(__ELF__)
+#pragma GCC visibility pop
 #endif
 #endif

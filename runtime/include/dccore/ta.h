@@ -1,6 +1,9 @@
 #ifndef DCCORE_TA_H
 #define DCCORE_TA_H
 #include <stdint.h>
+#if defined(__GNUC__) && defined(__ELF__)
+#pragma GCC visibility push(hidden)             /* see dccore/sh4.h */
+#endif
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -14,5 +17,8 @@ void dc_ta_write32(const uint32_t blk[8]);    /* one 32-byte block */
 void dc_ta_write(const uint8_t *p, uint32_t len);
 #ifdef __cplusplus
 }
+#endif
+#if defined(__GNUC__) && defined(__ELF__)
+#pragma GCC visibility pop
 #endif
 #endif
