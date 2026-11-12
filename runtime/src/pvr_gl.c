@@ -117,6 +117,8 @@ typedef unsigned char GLboolean, GLubyte; typedef char GLchar; typedef ptrdiff_t
 #define GL_DEPTH_STENCIL_ATTACHMENT 0x821A
 #define GL_DEPTH24_STENCIL8 0x88F0
 #define GL_DEPTH32F_STENCIL8 0x8CAD
+#define GL_DEPTH_COMPONENT32F 0x8CAC
+#define GL_DEPTH_ATTACHMENT 0x8D00
 #define GL_LOWER_LEFT 0x8CA1
 #define GL_NEGATIVE_ONE_TO_ONE 0x935E
 #define GL_ZERO_TO_ONE 0x935F
@@ -413,6 +415,14 @@ static float depth_of(float invw) { float d = (log2f(fmaxf(invw, 1e-30f)) + 64.f
  * glClipControl (GL 4.5 / ARB_clip_control: macOS). */
 int dc_pvr_gl_fast_depth = 1;
 static int zv_on;                       /* this is how depth goes now */
+/* The stencil is only for modifier volumes (shadows). Next to a float depth it is a plane of its own
+ * (64 bits a pixel where depth alone is 32), on a GPU that is short of memory bandwidth: a game gets
+ * it with its first frame that has volumes (zv_stencil, kept from then on), and plain 32-bit depth
+ * until then. zv_plain: the driver makes a framebuffer with depth alone (tested with the rest). */
+static int zv_stencil, zv_plain;
+static GLenum depth_format(void) { return !zv_on ? GL_DEPTH24_STENCIL8 : zv_stencil || !zv_plain ? GL_DEPTH32F_STENCIL8 : GL_DEPTH_COMPONENT32F; }
+static GLenum depth_attachment(GLenum fmt) { return fmt == GL_DEPTH_COMPONENT32F ? GL_DEPTH_ATTACHMENT : GL_DEPTH_STENCIL_ATTACHMENT; }
+static GLenum fbo_dfmt, ms_dfmt;        /* what fbo's and ms_fbo's depth buffers are */
 static int zv_ok;                       /* the driver can */
 static void (*p_glClipControl)(GLenum, GLenum);
 static float depth_clear(float invw) {
@@ -608,7 +618,7 @@ int dc_pvr_gl_half_step;                                   /* render half a step
 /* MSAA: the frame's polygons are drawn into ms_fbo (the same size, dc_pvr_gl_msaa samples a pixel) and
  * resolved into fbo once they are all drawn; everything after (side bars, readbacks, keep, present)
  * works on fbo as without it. Not while capturing a render-to-texture pass (its own buffers). */
-static GLuint ms_fbo, ms_col, ms_depth; static int ms_w, ms_h, ms_n, ms_max = -1;
+static GLuint ms_fbo, ms_col, ms_depth; static int ms_w, ms_h, ms_n, ms_n_said, ms_max = -1;
 static int ms_a2c;                              /* this frame: punch-through by alpha to coverage */
 static int ms_want(void) {
     if (dc_pvr_gl_msaa < 2) return 0;
@@ -619,7 +629,8 @@ static int ms_want(void) {
 static int ensure_ms(void) {                     /* 1: draw into ms_fbo this frame */
     int n = ms_want();
     /* kept at the largest picture seen: games that switch sizes (Soulcalibur) remade it again and again */
-    if (n && ms_fbo && ms_n == n && ms_w >= fb_w && ms_h >= fb_h) return 1;
+    GLenum df = depth_format();
+    if (n && ms_fbo && ms_n == n && ms_w >= fb_w && ms_h >= fb_h && ms_dfmt == df) return 1;
     int want_w = fb_w > ms_w ? fb_w : ms_w, want_h = fb_h > ms_h ? fb_h : ms_h;
     if (!n || ms_n != n) { want_w = fb_w; want_h = fb_h; }
     if (ms_fbo) { p_glDeleteFramebuffers(1, &ms_fbo); p_glDeleteRenderbuffers(1, &ms_col); p_glDeleteRenderbuffers(1, &ms_depth); ms_fbo = 0; }
@@ -628,10 +639,10 @@ static int ensure_ms(void) {                     /* 1: draw into ms_fbo this fra
     p_glGenRenderbuffers(1, &ms_col); p_glBindRenderbuffer(GL_RENDERBUFFER, ms_col);
     p_glRenderbufferStorageMultisample(GL_RENDERBUFFER, n, GL_RGBA8, want_w, want_h);
     p_glGenRenderbuffers(1, &ms_depth); p_glBindRenderbuffer(GL_RENDERBUFFER, ms_depth);
-    p_glRenderbufferStorageMultisample(GL_RENDERBUFFER, n, zv_on ? GL_DEPTH32F_STENCIL8 : GL_DEPTH24_STENCIL8, want_w, want_h);
+    p_glRenderbufferStorageMultisample(GL_RENDERBUFFER, n, df, want_w, want_h);
     p_glGenFramebuffers(1, &ms_fbo); p_glBindFramebuffer(GL_FRAMEBUFFER, ms_fbo);
     p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, ms_col);
-    p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, ms_depth);
+    p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, depth_attachment(df), GL_RENDERBUFFER, ms_depth);
     int ok = p_glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
     while (p_glGetError()) {}
     if (!ok) {
@@ -640,24 +651,37 @@ static int ensure_ms(void) {                     /* 1: draw into ms_fbo this fra
         ms_max = n - 1;                           /* try fewer next time */
         return 0;
     }
-    ms_n = n; ms_w = want_w; ms_h = want_h;
-    fprintf(stderr, "pvr_gl: %dx anti-aliasing\n", n);
+    if (ms_n_said != n) fprintf(stderr, "pvr_gl: %dx anti-aliasing\n", n);
+    ms_n = ms_n_said = n; ms_w = want_w; ms_h = want_h; ms_dfmt = df;
     return 1;
 }
 static void ensure_fbo(int w, int h) {
-    if (fbo && w == fb_w && h == fb_h) return;
+    GLenum df = depth_format();
+    if (fbo && w == fb_w && h == fb_h) {
+        if (fbo_dfmt == df) return;
+        /* another depth (the first volumes bring the stencil; FAST DEPTH was switched): the colour
+         * stays, a picture made in bands keeps the bands it has and a capture its picture */
+        p_glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+        p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, 0);
+        p_glBindRenderbuffer(GL_RENDERBUFFER, depth_rb);
+        p_glRenderbufferStorage(GL_RENDERBUFFER, df, w, h);
+        p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, depth_attachment(df), GL_RENDERBUFFER, depth_rb);
+        if (p_glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) fprintf(stderr, "pvr_gl: framebuffer incomplete\n");
+        fbo_dfmt = df;
+        return;
+    }
     if (fbo) { p_glDeleteFramebuffers(1, &fbo); p_glDeleteTextures(1, &color_tex); p_glDeleteRenderbuffers(1, &depth_rb); }
     p_glGenTextures(1, &color_tex); p_glBindTexture(GL_TEXTURE_2D, color_tex);
     p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, w, h, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
     p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     p_glGenRenderbuffers(1, &depth_rb); p_glBindRenderbuffer(GL_RENDERBUFFER, depth_rb);
-    p_glRenderbufferStorage(GL_RENDERBUFFER, zv_on ? GL_DEPTH32F_STENCIL8 : GL_DEPTH24_STENCIL8, w, h);
+    p_glRenderbufferStorage(GL_RENDERBUFFER, df, w, h);
     p_glGenFramebuffers(1, &fbo); p_glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color_tex, 0);
-    p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, depth_rb);
+    p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, depth_attachment(df), GL_RENDERBUFFER, depth_rb);
     if (p_glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) fprintf(stderr, "pvr_gl: framebuffer incomplete\n");
-    fb_w = w; fb_h = h;
+    fb_w = w; fb_h = h; fbo_dfmt = df;
 }
 
 /* ------------------------------------------------------------------ texture packs
@@ -739,7 +763,7 @@ static float push_rw;
  * full width; a full-screen quad that later shows that texture draws the wide capture instead, its
  * texture coordinates taken from where each corner lands on the screen */
 #define NCAP 4
-static struct { GLuint fbo, tex, depth; int w, h; uint32_t addr; float ww, rw, rh; unsigned long frame; int flat2d; } cap[NCAP + 1];
+static struct { GLuint fbo, tex, depth; GLenum dfmt; int w, h; uint32_t addr; float ww, rw, rh; unsigned long frame; int flat2d; } cap[NCAP + 1];
 static int pass_2d;                     /* the capture pass just drawn was a 2D screen */   /* [NCAP]: the previous contents of the one being drawn */
 static int capturing;                   /* drawing a render-to-texture pass */
 static int cap_cur = -1;                /* while capturing: the slot being drawn */
@@ -1392,7 +1416,7 @@ static void scissor_for(const pvr_poly *p) {
 static struct { bkey key; int valid; GLint *first; GLsizei *count; int n, cap; } B;
 /* DC_GL_STATS=1: what a frame costs to draw, averaged and printed every 300 frames (polygons, vertices
  * sent, state changes, draw calls) */
-static struct { int on; unsigned long frames, polys, verts, states, draws, ranges, mods; } gst = { -1, 0, 0, 0, 0, 0, 0, 0 };
+static struct { int on; unsigned long frames, polys, verts, states, draws, ranges, mods, tav, sunk; } gst = { -1, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 static void batch_flush(void) {
     if (B.n && gst.on > 0) { gst.draws++; gst.ranges += (unsigned long)B.n; }
     if (B.n == 1) p_glDrawArrays(GL_TRIANGLES, B.first[0], B.count[0]);
@@ -1988,6 +2012,12 @@ static int zv_selftest(void) {
         ok = px[0][0] > 200 && px[0][1] < 50 && px[0][2] < 50 && px[1][2] > 200 && px[1][0] < 50 && px[1][1] < 50;
         if (!ok) fprintf(stderr, "pvr_gl: depth test from the vertices: got %d %d %d, %d %d %d\n", px[0][0], px[0][1], px[0][2], px[1][0], px[1][1], px[1][2]);
     }
+    /* and with depth alone, as games without modifier volumes get it (see zv_stencil) */
+    while (p_glGetError()) {}
+    p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, 0);
+    p_glBindRenderbuffer(GL_RENDERBUFFER, td); p_glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT32F, 8, 8);
+    p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, td);
+    zv_plain = !p_glGetError() && p_glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
     while (p_glGetError()) {}
     p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
     p_glDeleteFramebuffers(1, &tf); p_glDeleteTextures(1, &tc); p_glDeleteRenderbuffers(1, &td);
@@ -2008,9 +2038,7 @@ static void zv_apply(void) {
     if (want != zv_on) {
         zv_on = want;
         p_glClipControl(GL_LOWER_LEFT, zv_on ? GL_ZERO_TO_ONE : GL_NEGATIVE_ONE_TO_ONE);
-        if (fbo) { p_glDeleteFramebuffers(1, &fbo); p_glDeleteTextures(1, &color_tex); p_glDeleteRenderbuffers(1, &depth_rb); fbo = 0; }
-        if (ms_fbo) { p_glDeleteFramebuffers(1, &ms_fbo); p_glDeleteRenderbuffers(1, &ms_col); p_glDeleteRenderbuffers(1, &ms_depth); ms_fbo = 0; ms_n = 0; ms_w = ms_h = 0; }
-        sv_cur = NULL;
+        sv_cur = NULL;                           /* the buffers follow: ensure_fbo and ensure_ms look at their depth's format */
         fprintf(stderr, "pvr_gl: depth %s\n", zv_on ? "from the vertices (float buffer, tested before shading)" : "by logarithm per pixel");
         listed = 0;
     }
@@ -2187,6 +2215,7 @@ static void render_frame(int scale) {
      * thin line of doubled translucency (Sega Rally 2's title at 1707 x 960) */
     int pic_w = SC(f.width), fb_w = pic_w + 2 * (int)((WW / (float)RW - 1.f) * (float)pic_w * 0.5f + 0.5f);
     if (WW > (float)RW) WW = (float)RW * (float)fb_w / (float)pic_w;
+    if (!zv_stencil) for (int i = 0; i < f.nmods; i++) if (f.mods[i].list == 1) { zv_stencil = 1; break; }
     ensure_fbo(fb_w, SC(f.height));
     fb_scale = scale;
     gl_selftest();
@@ -2560,11 +2589,14 @@ static void render_frame(int scale) {
     p_glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)nverts * (GLsizeiptr)sizeof(gv), verts, GL_STREAM_DRAW);
     if (gst.on < 0) { const char *e = getenv("DC_GL_STATS"); gst.on = e && *e == '1'; }
     if (gst.on > 0) {
-        gst.polys += (unsigned long)f.npolys; gst.verts += (unsigned long)nverts; gst.mods += (unsigned long)f.nmods;
+        gst.polys += (unsigned long)f.npolys; gst.verts += (unsigned long)nverts; gst.mods += (unsigned long)f.nmods; gst.tav += (unsigned long)f.nverts;
         if (++gst.frames % 300 == 0) {
             fprintf(stderr, "pvr_gl: a frame: %lu polygons, %lu vertices, %lu state changes, %lu draw calls (%lu ranges), %lu volume triangles, %d shader variants\n",
                     gst.polys / 300, gst.verts / 300, gst.states / 300, gst.draws / 300, gst.ranges / 300, gst.mods / 300, sv_n);
-            gst.polys = gst.verts = gst.states = gst.draws = gst.ranges = gst.mods = 0;
+            /* over the 300 frames (all the game sent, drawn or not): how many came through the sink */
+            fprintf(stderr, "pvr_gl: the game's vertices in the frames drawn: %lu a frame; through the TA's sink in that time: %lu a frame\n",
+                    gst.tav / 300, (pvr_sink_vertices - gst.sunk) / 300);
+            gst.polys = gst.verts = gst.states = gst.draws = gst.ranges = gst.mods = gst.tav = 0; gst.sunk = pvr_sink_vertices;
         }
     }
 
@@ -2640,15 +2672,16 @@ static void render_frame(int scale) {
     uint32_t shad = dc_pvr_reg(0x074);
     int cheap = (shad >> 8) & 1, has_mods = 0;
     for (int i = 0; i < f.nmods; i++) if (f.mods[i].list == 1) has_mods = 1;
-    p_glEnable(GL_STENCIL_TEST);
-    p_glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE); p_glStencilMask(2);
+    /* without volumes nothing reads the stencil: no test, and no writes of a mark nobody looks at */
+    if (has_mods) { p_glEnable(GL_STENCIL_TEST); p_glStencilOp(GL_KEEP, GL_KEEP, GL_REPLACE); p_glStencilMask(2); }
+    else p_glDisable(GL_STENCIL_TEST);
     for (int pass = 0; pass < 2; pass++) {
         int list = pass ? 4 : 0;
         for (int i = 0; i < f.npolys; i++) {
             const pvr_poly *p = &f.polys[i];
             if (p->list != list || !spans[i].count) continue;
             int mark = has_mods && (cheap ? p->shadow : p->twovol);
-            batch_add(p, 0, mark ? 2 : 0, 0, spans[i].first, spans[i].count);
+            batch_add(p, 0, has_mods ? (mark ? 2 : 0) : -1, 0, spans[i].first, spans[i].count);
         }
     }
     batch_reset();
@@ -2962,7 +2995,7 @@ void dc_pvr_gl_capture(int scale) {
     while (c < NCAP && !(cap[c].tex && cap[c].addr == addr)) { if (cap[c].frame < cap[old].frame) old = c; c++; }
     if (c == NCAP) c = old;
     /* swap the screen's target for the capture's, draw, swap back (with what the present uses) */
-    GLuint sf = fbo, st = color_tex, sd = depth_rb; int sw = fb_w, sh = fb_h;
+    GLuint sf = fbo, st = color_tex, sd = depth_rb; GLenum sdf = fbo_dfmt; int sw = fb_w, sh = fb_h;
     float sa = disp_aspect, so = pic_offy, sww = last_ww, srw = last_rw, srh = last_rh; int sy0 = pic_y0, sy1 = pic_y1, zx0 = zoom_x0, zx1 = zoom_x1, zy0 = zoom_y0, zy1 = zoom_y1;
     if (cap[c].tex) {                   /* keep what is there now: the pass may draw it again (a trail) */
         if (cap[NCAP].w != cap[c].w || cap[NCAP].h != cap[c].h || !cap[NCAP].tex) {
@@ -2978,7 +3011,7 @@ void dc_pvr_gl_capture(int scale) {
         p_glBlitFramebuffer(0, 0, cap[c].w, cap[c].h, 0, 0, cap[c].w, cap[c].h, GL_COLOR_BUFFER_BIT, GL_NEAREST);
         cap[NCAP].addr = addr; cap[NCAP].ww = cap[c].ww; cap[NCAP].rw = cap[c].rw; cap[NCAP].rh = cap[c].rh;
     } else if (cap[NCAP].tex) cap[NCAP].addr = 0xFFFFFFFFu;
-    fbo = cap[c].fbo; color_tex = cap[c].tex; depth_rb = cap[c].depth; fb_w = cap[c].w; fb_h = cap[c].h;
+    fbo = cap[c].fbo; color_tex = cap[c].tex; depth_rb = cap[c].depth; fbo_dfmt = cap[c].dfmt; fb_w = cap[c].w; fb_h = cap[c].h;
     capturing = 1; cap_cur = c; pass_2d = 0;
     dc_pvr_gl_render(scale);
     capturing = 0; cap_cur = -1;
@@ -2989,11 +3022,11 @@ void dc_pvr_gl_capture(int scale) {
             p_glColorMask(0, 0, 0, 1); p_glClearColor(0, 0, 0, 1); p_glClear(GL_COLOR_BUFFER_BIT); p_glColorMask(1, 1, 1, 1);
         }
     }
-    cap[c].fbo = fbo; cap[c].tex = color_tex; cap[c].depth = depth_rb; cap[c].w = fb_w; cap[c].h = fb_h;
+    cap[c].fbo = fbo; cap[c].tex = color_tex; cap[c].depth = depth_rb; cap[c].dfmt = fbo_dfmt; cap[c].w = fb_w; cap[c].h = fb_h;
     cap[c].addr = addr; cap[c].ww = last_ww; cap[c].rw = last_rw; cap[c].rh = last_rh; cap[c].frame = frame_no;
     cap[c].flat2d = pass_2d;
     if (capture_vram) capture_readback(c);
-    fbo = sf; color_tex = st; depth_rb = sd; fb_w = sw; fb_h = sh;
+    fbo = sf; color_tex = st; depth_rb = sd; fbo_dfmt = sdf; fb_w = sw; fb_h = sh;
     disp_aspect = sa; pic_offy = so; pic_y0 = sy0; pic_y1 = sy1; zoom_x0 = zx0; zoom_x1 = zx1; zoom_y0 = zy0; zoom_y1 = zy1; last_ww = sww; last_rw = srw; last_rh = srh;
     p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }

@@ -66,7 +66,7 @@ static const struct { char c; uint8_t r[7]; } osd_font[] = {
 };
 #define OSD_W 200
 /* the items, top to bottom */
-enum { OI_RESUME, OI_RESET, OI_SAVE, OI_LOAD, OI_RES, OI_AA, OI_SHARP, OI_FASTZ, OI_ASPECT, OI_SCAN, OI_FPS, OI_RUMBLE, OI_FS, OI_GPU, OI_FRATE, OI_REFRESH,
+enum { OI_RESUME, OI_RESET, OI_SAVE, OI_LOAD, OI_RES, OI_AA, OI_ANISO, OI_SHARP, OI_FASTZ, OI_ASPECT, OI_SCAN, OI_FPS, OI_RUMBLE, OI_FS, OI_GPU, OI_FRATE, OI_REFRESH,
        OI_SPEED, OI_BAR, OI_PROF, OI_QUIT, OSD_ITEMS };
 static int osd_scan, osd_fps;
 /* Switch: CPU CLOCK. 1224 MHz by default, the smallest step over the system's 1020 */
@@ -104,6 +104,27 @@ static int osd_sharp = 0;                /* sharpen: off, low, medium, high (off
 static int osd_sharp = 1;
 #endif
 static const float sharp_amount[4] = { 0.f, 0.35f, 0.65f, 1.f };
+/* ANISOTROPIC: the filtering of textures seen at a slant (a road towards the horizon), for a port that
+ * has mipmaps on. Up to that many samples for every pixel of such a surface: a PC's GPU doesn't notice
+ * 16x, the Switch's has the memory traffic of a phone, and a racing game is mostly road. There 2x to
+ * start with; everywhere else what the port asks for. -1: no such item (the port left mipmaps off). */
+static const int aniso_x[5] = { 1, 2, 4, 8, 16 };
+static int osd_aniso = -1, aniso_cfg = -1;   /* aniso_cfg: what osd.cfg (or DC_ANISO) asks for */
+static int aniso_index(int x) { int i = 0; while (i < 4 && aniso_x[i + 1] <= x) i++; return i; }
+/* at the first field, not in osd_load: a port sets its filtering after dc_front_open */
+static void osd_aniso_apply(void) {
+    static int done;
+    if (done) return;
+    done = 1;
+    if (!dc_pvr_gl_mipmaps || dc_pvr_gl_anisotropy <= 1.f) return;
+#ifdef __SWITCH__
+    osd_aniso = 1;
+#else
+    osd_aniso = aniso_index((int)dc_pvr_gl_anisotropy);
+#endif
+    if (aniso_cfg >= 1) osd_aniso = aniso_index(aniso_cfg);
+    dc_pvr_gl_anisotropy = (float)aniso_x[osd_aniso];
+}
 static void osd_load(void) {
     char *dir = SDL_GetPrefPath("dc-core", cfg.save_name ? cfg.save_name : "default");
     if (dir) { snprintf(osd_cfg_path, sizeof osd_cfg_path, "%sosd.cfg", dir); SDL_free(dir); }
@@ -116,6 +137,7 @@ static void osd_load(void) {
         if (!strncmp(line, "scanlines=", 10)) osd_scan = atoi(line + 10) & 3;
         if (!strncmp(line, "sharpen=", 8)) osd_sharp = atoi(line + 8) & 3;
         if (!strncmp(line, "fastdepth=", 10)) dc_pvr_gl_fast_depth = atoi(line + 10) != 0;
+        if (!strncmp(line, "aniso=", 6)) aniso_cfg = atoi(line + 6);
         if (!strncmp(line, "halfstep=", 9)) dc_pvr_gl_half_step = atoi(line + 9) != 0;
 #ifdef __SWITCH__
         if (!strncmp(line, "res=", 4)) { res = atoi(line + 4); if (res < 2 || res > 6) res = 3; }
@@ -150,6 +172,7 @@ static void osd_load(void) {
     refresh_apply();
     { const char *e = getenv("DC_SHARPEN"); if (e) osd_sharp = atoi(e) & 3; }
     dc_pvr_gl_sharpen = sharp_amount[osd_sharp & 3];
+    { const char *e = getenv("DC_ANISO"); if (e && atoi(e) >= 1) aniso_cfg = atoi(e); }   /* tests */
     if (getenv("DC_PLAIN_SCALING")) dc_pvr_gl_plain_scaling = 1;   /* tests: the old linear blit to the window */
 #ifdef __SWITCH__
     if (cpu_mhz[osd_cpu]) set_cpu_clock(cpu_mhz[osd_cpu]);
@@ -163,6 +186,8 @@ static void osd_save(void) {
     fprintf(f, "scanlines=%d\nfps=%d\nbar=%d\naa=%d\nsharpen=%d\ncpu=%d\ngpu=%d\nhalfstep=%d\n", osd_scan, osd_fps, osd_bar, osd_aa, osd_sharp, cpu_mhz[osd_cpu], gpu_mhz[osd_gpu], dc_pvr_gl_half_step);
     if (dc_front_refresh_ok) fprintf(f, "refresh=%d\n", refresh_hz[osd_refresh]);
     fprintf(f, "fastdepth=%d\n", dc_pvr_gl_fast_depth);
+    if (osd_aniso >= 0) fprintf(f, "aniso=%d\n", aniso_x[osd_aniso]);
+    else if (aniso_cfg >= 1) fprintf(f, "aniso=%d\n", aniso_cfg);   /* not looked at yet: kept */
     fprintf(f, "res=%d\n", cfg.scale * 2 - (dc_pvr_gl_half_step && cfg.scale > 1));
     if (dc_front_fps60 >= 0) fprintf(f, "framerate=%d\n", dc_front_fps60 ? 60 : 30);
     else fprintf(f, "halfrate=%d\n", osd_half);
@@ -297,6 +322,10 @@ static const char *osd_label(int i, char *buf, size_t n) {
         return dc_pvr_gl_fast_depth ? "FAST DEPTH    < ON >" : "FAST DEPTH    < OFF >";
     case OI_SHARP: { static const char *n4[4] = { "OFF", "LOW", "MEDIUM", "HIGH" }; snprintf(buf, n, "SHARPEN       < %s >", n4[osd_sharp & 3]); return buf; }
     case OI_AA: if (osd_aa < 2) return "ANTI-ALIASING < OFF >"; snprintf(buf, n, "ANTI-ALIASING < %dX >", osd_aa); return buf;
+    case OI_ANISO:                                               /* only where the port has mipmaps on */
+        if (osd_aniso < 0) return "";
+        if (!osd_aniso) return "ANISOTROPIC   < OFF >";
+        snprintf(buf, n, "ANISOTROPIC   < %dX >", aniso_x[osd_aniso]); return buf;
     case OI_ASPECT: snprintf(buf, n, "ASPECT        < %s >", cfg.widescreen ? "WIDE" : "4:3"); return buf;
     case OI_SCAN: snprintf(buf, n, "SCANLINES     < %s >", scan[osd_scan]); return buf;
     case OI_FPS: snprintf(buf, n, "SHOW FPS      < %s >", osd_fps ? "ON" : "OFF"); return buf;
@@ -672,6 +701,7 @@ static void osd_run(int port) {
             if (sel == OI_SHARP) { osd_sharp = (osd_sharp + 4 + step) % 4; dc_pvr_gl_sharpen = sharp_amount[osd_sharp]; need_present = 1; osd_save(); }
             if (sel == OI_AA) { static const int lv[4] = { 0, 2, 4, 8 }; int i = osd_aa >= 8 ? 3 : osd_aa >= 4 ? 2 : osd_aa >= 2 ? 1 : 0;
                                 i = (i + 4 + step) % 4; osd_aa = lv[i]; dc_pvr_gl_msaa = osd_aa; need_present = 1; osd_save(); }
+            if (sel == OI_ANISO && osd_aniso >= 0) { osd_aniso = (osd_aniso + 5 + step) % 5; dc_pvr_gl_anisotropy = (float)aniso_x[osd_aniso]; need_present = 1; osd_save(); }
             if (sel == OI_SCAN) { osd_scan = (osd_scan + 4 + step) % 4; dc_pvr_gl_scanlines = osd_scan; osd_save(); }
             if (sel == OI_FPS) { osd_fps = !osd_fps; osd_save(); }
             if (sel == OI_RUMBLE) {                                 /* this controller's rumble, felt at once */

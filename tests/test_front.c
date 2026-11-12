@@ -102,6 +102,33 @@ int main(void) {
     }
     CHECK(grey[1] > 80 && grey[1] < 175, "mipmapped checkerboard %d, want grey", grey[1]);
     dc_pvr_gl_mipmaps = 0;
+
+    /* modifier volumes, in both depth modes and across the switches between them: a red quad (Shadow bit)
+     * under one volume triangle in front of it (cheap shadow: half as bright) and one behind it (no
+     * effect). With depth from the vertices the depth buffer has no stencil until the first frame with a
+     * volume (pvr_gl.c zv_stencil): the first pass is that frame. */
+    for (int pass = 0; pass < 3; pass++) {
+        dc_pvr_gl_fast_depth = pass != 1;
+        pvr(0x074, 0x100 | 128);                                               /* FPU_SHAD_SCALE: cheap shadow, 128/256 */
+        pvr(0x128, 0); pvr(0x144, 0x80000000u);
+        uint32_t qh[8] = { (4u << 29) | (0u << 24) | (1u << 7), (7u << 29), (1u << 29) | (2u << 22), 0, 0, 0, 0, 0 };
+        uint32_t q0[8] = { 7u << 29, fu(0), fu(0), fu(1), 0, 0, 0xFFFF0000u, 0 }, q1[8] = { 7u << 29, fu(64), fu(0), fu(1), 0, 0, 0xFFFF0000u, 0 };
+        uint32_t q2[8] = { 7u << 29, fu(0), fu(64), fu(1), 0, 0, 0xFFFF0000u, 0 }, q3[8] = { (7u << 29) | (1u << 28), fu(64), fu(64), fu(1), 0, 0, 0xFFFF0000u, 0 };
+        ta(qh); ta(q0); ta(q1); ta(q2); ta(q3); ta(eol);
+        uint32_t mh[8] = { (4u << 29) | (1u << 24), 1u << 29, 0, 0, 0, 0, 0, 0 };   /* opaque volumes: "inside last polygon", one triangle each */
+        uint32_t mfront[16] = { 7u << 29, fu(2), fu(2), fu(2), fu(30), fu(2), fu(2), fu(2), fu(30), fu(2), 0, 0, 0, 0, 0, 0 };
+        uint32_t mback[16] = { 7u << 29, fu(40), fu(40), fu(0.5f), fu(62), fu(40), fu(0.5f), fu(40), fu(62), fu(0.5f), 0, 0, 0, 0, 0, 0 };
+        ta(mh); ta(mfront); ta(mfront + 8); ta(mh); ta(mback); ta(mback + 8); ta(eol);
+        pvr(0x014, 1);
+        dc_pvr_gl_read(rgb, &w, &h);
+        const uint8_t *in_ = rgb + (10 * w + 10) * 3, *behind = rgb + (100 * w + 100) * 3, *beside = rgb + (10 * w + 100) * 3;
+        const char *mode = pass == 1 ? "depth by logarithm" : pass ? "depth from the vertices again" : "depth from the vertices";
+        CHECK(in_[0] >= 127 && in_[0] <= 129 && in_[1] == 0 && in_[2] == 0, "%s: shadowed pixel %02X%02X%02X, want 800000", mode, in_[0], in_[1], in_[2]);
+        CHECK(behind[0] == 255 && behind[1] == 0, "%s: volume behind the surface %02X%02X%02X", mode, behind[0], behind[1], behind[2]);
+        CHECK(beside[0] == 255 && beside[1] == 0, "%s: outside the volume %02X%02X%02X", mode, beside[0], beside[1], beside[2]);
+    }
+    pvr(0x074, 0);
+    dc_pvr_gl_fast_depth = 1;
     dc_front_close();
     printf(fails ? "%d frontend checks failed\n" : "frontend tests passed\n", fails);
     return fails != 0;

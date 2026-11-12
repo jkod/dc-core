@@ -754,6 +754,7 @@ static void rumble_tick(void) {
 /* ------------------------------------------------------------------ per field */
 static void on_vblank(uint64_t f) {
     vblanks = f;
+    osd_aniso_apply();
 #ifdef __SWITCH__
     if (!(f & 127)) dc_nx_gpu_check();                      /* the system put its own GPU clock back (undocked, woken) */
 #endif
