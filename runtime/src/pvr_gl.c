@@ -117,6 +117,10 @@ typedef unsigned char GLboolean, GLubyte; typedef char GLchar; typedef ptrdiff_t
 #define GL_COLOR_ATTACHMENT0 0x8CE0
 #define GL_DEPTH_STENCIL_ATTACHMENT 0x821A
 #define GL_DEPTH24_STENCIL8 0x88F0
+#define GL_DEPTH32F_STENCIL8 0x8CAD
+#define GL_LOWER_LEFT 0x8CA1
+#define GL_NEGATIVE_ONE_TO_ONE 0x935E
+#define GL_ZERO_TO_ONE 0x935F
 #define GL_MAX_SAMPLES 0x8D57
 #define GL_SAMPLE_ALPHA_TO_COVERAGE 0x809E
 #define GL_FRAMEBUFFER_COMPLETE 0x8CD5
@@ -131,6 +135,9 @@ typedef unsigned char GLboolean, GLubyte; typedef char GLchar; typedef ptrdiff_t
 #define GL_LINK_STATUS 0x8B82
 #define GL_PACK_ALIGNMENT 0x0D05
 #define GL_UNPACK_ALIGNMENT 0x0CF5
+#define GL_RG_INTEGER 0x8228
+#define GL_RG8UI 0x8238
+#define GL_TEXTURE1 0x84C1
 
 #define GLFUNCS \
     F(void, glGenFramebuffers, (GLsizei, GLuint *)) F(void, glBindFramebuffer, (GLenum, GLuint)) \
@@ -168,7 +175,8 @@ typedef unsigned char GLboolean, GLubyte; typedef char GLchar; typedef ptrdiff_t
     F(void, glEnableVertexAttribArray, (GLuint)) F(void, glDrawArrays, (GLenum, GLint, GLsizei)) \
     F(void, glReadPixels, (GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, void *)) \
     F(void, glBlitFramebuffer, (GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLint, GLbitfield, GLenum)) \
-    F(void, glPixelStorei, (GLenum, GLint)) F(GLenum, glGetError, (void))
+    F(void, glPixelStorei, (GLenum, GLint)) F(GLenum, glGetError, (void)) \
+    F(void, glDeleteProgram, (GLuint)) F(void, glDeleteShader, (GLuint))
 #define F(ret, name, args) static ret (*p_##name) args;
 GLFUNCS
 #undef F
@@ -236,44 +244,62 @@ static void gl_debug_init(void *(*getproc)(const char *)) {
  * is sent premultiplied by 1/w (noperspective), then divided by the interpolated 1/w per pixel.
  * Drivers then interpolate plainly in screen space, clipping included; GL's own perspective
  * correction with w = 1/(1/w) gave wrong texture coordinates on NVIDIA whenever 1/w was far from 1. */
-static const char *vs_src =
-"#version 330 core\n"
+/* One program per render state in use (a variant, sv_*): what the PVR's instruction words select -- textured,
+ * the shading mode, fog, punch-through, ... -- is fixed when the program is built (#if on the names
+ * below) where one program tested it all per pixel through uniforms. Per pixel is where the Switch's
+ * GPU spends a frame (a few thousand triangles, but every pixel several times over), and a variant
+ * runs a fraction of the instructions. A game uses a few dozen of them; each is built when first
+ * needed, and the ones a game has used are built at start-up next time (dc_pvr_gl_shader_list). */
+static const char *vs_body =
 "layout(location=0) in vec3 a_pos;\n"            /* PVR x, y, 1/w */
 "layout(location=1) in vec4 a_uv;\n"             /* u v (set 0), u v (set 1) */
 "layout(location=2) in vec4 a_c;  layout(location=3) in vec4 a_o;\n"
 "layout(location=4) in vec4 a_c1; layout(location=5) in vec4 a_o1;\n"
-"uniform vec2 u_scale; uniform float u_offx; uniform int u_set; uniform int u_quad;\n"
+"uniform vec2 u_scale; uniform float u_offx;\n"
 "noperspective out vec2 v_uvz; noperspective out vec4 v_cz; noperspective out vec4 v_oz; noperspective out float v_invw;\n"
 "flat out vec4 f_c; flat out vec4 f_o;\n"
+"invariant gl_Position;\n"                       /* the same in every variant: a polygon's passes meet at equal depth */
 "void main() {\n"
-"  if (u_quad != 0) { gl_Position = vec4(a_pos.xy, 0.0, 1.0); v_invw = 1.0; v_uvz = vec2(0.0); v_cz = vec4(0.0); v_oz = vec4(0.0); f_c = vec4(0.0); f_o = vec4(0.0); return; }\n"
+"#if QUAD\n"
+"  gl_Position = vec4(a_pos.xy, 0.0, 1.0); v_invw = 1.0; v_uvz = vec2(0.0); v_cz = vec4(0.0); v_oz = vec4(0.0); f_c = vec4(0.0); f_o = vec4(0.0);\n"
+"#else\n"
 "  float z = max(a_pos.z, 1e-30);\n"
 "  vec2 ndc = vec2((a_pos.x + u_offx) * u_scale.x - 1.0, 1.0 - a_pos.y * u_scale.y);\n"
+"#if ZV\n"                                       /* depth from the vertices: see zv_on */
+"  gl_Position = vec4(ndc, min(z * 5.421010862427522e-20, 1.0), 1.0);\n"
+"#else\n"
 "  gl_Position = vec4(ndc, 0.0, 1.0);\n"
-"  vec2 uv = u_set != 0 ? a_uv.zw : a_uv.xy;\n"
-"  vec4 c = u_set != 0 ? a_c1 : a_c, o = u_set != 0 ? a_o1 : a_o;\n"
+"#endif\n"
+"#if SET\n"
+"  vec2 uv = a_uv.zw; vec4 c = a_c1, o = a_o1;\n"
+"#else\n"
+"  vec2 uv = a_uv.xy; vec4 c = a_c, o = a_o;\n"
+"#endif\n"
 "  v_uvz = uv * z; v_cz = c * z; v_oz = o * z; v_invw = z; f_c = c; f_o = o;\n"
+"#endif\n"
 "}\n";
 
-static const char *fs_src =
-"#version 330 core\n"
+static const char *fs_body =
 "noperspective in vec2 v_uvz; noperspective in vec4 v_cz; noperspective in vec4 v_oz; noperspective in float v_invw;\n"
 "flat in vec4 f_c; flat in vec4 f_o;\n"
-"uniform sampler2D u_tex;\n"
-"uniform int u_quad; uniform vec4 u_quad_col;\n"
-"uniform int u_textured, u_shade, u_use_alpha, u_ign_ta, u_offset, u_gouraud, u_fog, u_pt, u_tpass;\n"
-"uniform float u_pt_ref; uniform vec3 u_fog_ram, u_fog_vert; uniform float u_fog_den; uniform vec2 u_fog_tab[128];\n"
-"uniform int u_hud; uniform vec4 u_uvbox;\n"
+"uniform sampler2D u_tex; uniform usampler2D u_fogtab;\n"
+"uniform vec4 u_quad_col;\n"
+"uniform float u_pt_ref; uniform vec3 u_fog_ram, u_fog_vert; uniform float u_fog_den;\n"
+"uniform vec4 u_uvbox;\n"
 "out vec4 o_col;\n"
+"#if !QUAD\n"
+"#if TEX && (HUD & 1)\n"
 /* HUD art (low resolution, magnified several times): Catmull-Rom bicubic instead of bilinear keeps
  * digits and outlines crisp; 9 bilinear taps, clamped (the kernel overshoots at hard edges) */
-"vec4 tex_cr(vec2 uv, bool edge) {\n"
+"vec4 tex_cr(vec2 uv) {\n"
 "  vec2 ts = vec2(textureSize(u_tex, 0)), p = uv * ts - 0.5, i = floor(p), f = p - i;\n"
 "  vec2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f)), w1 = 1.0 + f * f * (-2.5 + 1.5 * f);\n"
 "  vec2 w2 = f * (0.5 + f * (2.0 - 1.5 * f)), w3 = f * f * (-0.5 + 0.5 * f);\n"
 "  vec2 w12 = w1 + w2, o12 = w2 / w12;\n"
 "  vec2 t0 = (i - 0.5) / ts, t3 = (i + 2.5) / ts, t12 = (i + 0.5 + o12) / ts;\n"
-"  if (edge) { vec2 lo = u_uvbox.xy + 0.5 / ts, hi = max(u_uvbox.zw - 0.5 / ts, lo); t0 = clamp(t0, lo, hi); t3 = clamp(t3, lo, hi); t12 = clamp(t12, lo, hi); }\n"
+"#if HUD & 2\n"
+"  { vec2 lo = u_uvbox.xy + 0.5 / ts, hi = max(u_uvbox.zw - 0.5 / ts, lo); t0 = clamp(t0, lo, hi); t3 = clamp(t3, lo, hi); t12 = clamp(t12, lo, hi); }\n"
+"#endif\n"
 "  vec4 r = vec4(0.0);\n"
 "  r += textureLod(u_tex, vec2(t0.x, t0.y), 0.0) * w0.x * w0.y;\n"
 "  r += textureLod(u_tex, vec2(t12.x, t0.y), 0.0) * w12.x * w0.y;\n"
@@ -289,56 +315,140 @@ static const char *fs_src =
 "  vec4 blur = textureLod(u_tex, uv, 1.0);\n"
 "  return clamp(r + 1.0 * (r - blur), 0.0, 1.0);\n"
 "}\n"
+"#endif\n"
+"#if FOG == 0 || FOG == 3\n"
+/* the fog table (FOG_TABLE, 128 entries of two 8-bit values) is a 128x1 texture: as a uniform array
+ * its 2 KB went to the GPU again with every change of state */
 "float fog_alpha(float invw) {\n"
 "  float fw = clamp(u_fog_den * invw, 1.0, 255.999985);\n"
 "  uint b = floatBitsToUint(fw); uint e = (b >> 23) & 255u; uint m = b & 0x7FFFFFu;\n"
 "  int idx = int((((e + 1u) & 7u) << 4) | ((m >> 19) & 15u));\n"
 "  float bl = float((m >> 11) & 255u);\n"
-"  vec2 ent = u_fog_tab[idx];\n"
+"  vec2 ent = vec2(texelFetch(u_fogtab, ivec2(idx, 0), 0).rg);\n"
 "  return floor((ent.x * bl + ent.y * (255.0 - bl)) / 256.0) / 255.0;\n"
 "}\n"
+"#endif\n"
+"#endif\n"
 "void main() {\n"
-"  if (u_quad != 0) { o_col = u_quad_col; gl_FragDepth = 0.0; return; }\n"
+"#if QUAD\n"
+"  o_col = u_quad_col;\n"
+"#if !ZV\n"
+"  gl_FragDepth = 0.0;\n"
+"#endif\n"
+"#else\n"
 "  float iw = max(v_invw, 1e-30);\n"
 "  vec2 uv = v_uvz / iw;\n"
-"  vec4 col = u_gouraud != 0 ? v_cz / iw : f_c, off = u_gouraud != 0 ? v_oz / iw : f_o;\n"
-"  if (u_use_alpha == 0) col.a = 1.0;\n"
+"#if GOURAUD\n"
+"  vec4 col = v_cz / iw, off = v_oz / iw;\n"
+"#else\n"
+"  vec4 col = f_c, off = f_o;\n"
+"#endif\n"
+"#if !USE_ALPHA\n"
+"  col.a = 1.0;\n"
+"#endif\n"
 "  vec4 px;\n"
-"  if (u_textured != 0) {\n"
-"    if ((u_hud & 2) != 0) { vec2 h = 0.5 / vec2(textureSize(u_tex, 0)), lo = u_uvbox.xy + h, hi = max(u_uvbox.zw - h, lo); uv = clamp(uv, lo, hi); }\n"
-"    vec4 t = (u_hud & 1) != 0 ? tex_cr(uv, (u_hud & 2) != 0) : texture(u_tex, uv);\n"
-"    if (u_ign_ta != 0) t.a = 1.0;\n"
-"    if (u_shade == 0) px = t;\n"
-"    else if (u_shade == 1) px = vec4(t.rgb * col.rgb, t.a);\n"
-"    else if (u_shade == 2) px = vec4(t.rgb * t.a + col.rgb * (1.0 - t.a), col.a);\n"
-"    else px = t * col;\n"
-"  } else px = col;\n"
-"  if (u_offset != 0) px.rgb = min(px.rgb + off.rgb, vec3(1.0));\n"
-"  if (u_fog != 2) {\n"
-"    float f; vec3 fc;\n"
-"    if (u_fog == 1) { fc = u_fog_vert; f = off.a; } else { fc = u_fog_ram; f = fog_alpha(iw); }\n"
-"    if (u_fog == 3) px = vec4(fc, f); else px.rgb = mix(px.rgb, fc, f);\n"
-"  }\n"
-"  if (u_pt == 2) {\n"   /* MSAA: punch-through edges by alpha to coverage, a ramp one pixel wide across the cut-off */
-"    float c = clamp((px.a * 255.0 + 0.5 - u_pt_ref * 255.0) / max(fwidth(px.a) * 255.0, 1.0) + 0.5, 0.0, 1.0);\n"
+"#if TEX\n"
+"#if HUD & 2\n"
+"  { vec2 h = 0.5 / vec2(textureSize(u_tex, 0)), lo = u_uvbox.xy + h, hi = max(u_uvbox.zw - h, lo); uv = clamp(uv, lo, hi); }\n"
+"#endif\n"
+"#if HUD & 1\n"
+"  vec4 t = tex_cr(uv);\n"
+"#else\n"
+"  vec4 t = texture(u_tex, uv);\n"
+"#endif\n"
+"#if IGN_TA\n"
+"  t.a = 1.0;\n"
+"#endif\n"
+"#if SHADE == 0\n"
+"  px = t;\n"
+"#elif SHADE == 1\n"
+"  px = vec4(t.rgb * col.rgb, t.a);\n"
+"#elif SHADE == 2\n"
+"  px = vec4(t.rgb * t.a + col.rgb * (1.0 - t.a), col.a);\n"
+"#else\n"
+"  px = t * col;\n"
+"#endif\n"
+"#else\n"
+"  px = col;\n"
+"#endif\n"
+"#if OFFSET\n"
+"  px.rgb = min(px.rgb + off.rgb, vec3(1.0));\n"
+"#endif\n"
+"#if FOG == 0\n"
+"  px.rgb = mix(px.rgb, u_fog_ram, fog_alpha(iw));\n"
+"#elif FOG == 1\n"
+"  px.rgb = mix(px.rgb, u_fog_vert, off.a);\n"
+"#elif FOG == 3\n"
+"  px = vec4(u_fog_ram, fog_alpha(iw));\n"
+"#endif\n"
+"#if PT == 2\n"   /* MSAA: punch-through edges by alpha to coverage, a ramp one pixel wide across the cut-off */
+"  { float c = clamp((px.a * 255.0 + 0.5 - u_pt_ref * 255.0) / max(fwidth(px.a) * 255.0, 1.0) + 0.5, 0.0, 1.0);\n"
 "    if (c <= 0.0) discard;\n"
-"    px.a = c;\n"
-"  } else if (u_pt != 0 && px.a * 255.0 + 0.5 < u_pt_ref * 255.0) discard;\n"
-"  if (u_tpass == 1 && px.a < 0.996) discard;\n"
-"  if (u_tpass == 2 && px.a >= 0.996) discard;\n"   /* in 8-bit steps like the PVR: colours divided by the interpolated 1/w can land a hair below 1.0 (NVIDIA), which dropped whole letters of Rush's text */
+"    px.a = c; }\n"
+"#elif PT == 1\n"
+"  if (px.a * 255.0 + 0.5 < u_pt_ref * 255.0) discard;\n"
+"#endif\n"
+"#if TPASS == 1\n"
+"  if (px.a < 0.996) discard;\n"
+"#elif TPASS == 2\n"
+"  if (px.a >= 0.996) discard;\n"   /* in 8-bit steps like the PVR: colours divided by the interpolated 1/w can land a hair below 1.0 (NVIDIA), which dropped whole letters of Rush's text */
+"#endif\n"
 "  o_col = px;\n"
+"#if !ZV\n"
 "  gl_FragDepth = clamp((log2(iw) + 64.0) / 128.0, 0.0, 1.0);\n"
-
+"#endif\n"
+"#endif\n"
 "}\n";
-
 static float depth_of(float invw) { float d = (log2f(fmaxf(invw, 1e-30f)) + 64.f) / 128.f; return d < 0 ? 0 : d > 1 ? 1 : d; }
+/* Depth. The PVR compares 1/w, a float of any magnitude (a HUD at 2e6 over a scene below 1000). In a
+ * 24-bit depth buffer that takes a logarithm, and since 1/w, not its logarithm, is what runs linearly
+ * across a triangle, the logarithm has to be taken per pixel (gl_FragDepth). A program that writes its
+ * own depth is run for every pixel of every triangle, hidden or not, and Dreamcast games send their
+ * opaque polygons in any order (the PVR only textured what stayed visible), so on the Switch most of
+ * the GPU's work went into pixels that were then thrown away.
+ * zv_on: 1/w itself goes out as the vertex's depth, scaled by 2^-64 into 0..1 (exact, and the range
+ * the logarithm covered), into a float depth buffer that keeps a float's precision at any magnitude.
+ * That needs depth 0..1 left as it is (glClipControl: GL's -1..1 to 0..1 mapping would round small
+ * values away). The GPU then tests depth before it runs the program, and skips what is hidden.
+ * dc_pvr_gl_fast_depth = 0 (DC_GL_FAST_DEPTH=0) keeps the logarithm; so does a driver without
+ * glClipControl (GL 4.5 / ARB_clip_control: macOS). */
+int dc_pvr_gl_fast_depth = 1;
+static int zv_on;                       /* this is how depth goes now */
+static int zv_ok;                       /* the driver can */
+static void (*p_glClipControl)(GLenum, GLenum);
+static float depth_clear(float invw) {
+    if (!zv_on) return depth_of(invw);
+    float d = fmaxf(invw, 1e-30f) * 5.421010862427522e-20f;   /* 2^-64 */
+    return d > 1 ? 1 : d;
+}
 
 /* ------------------------------------------------------------------ state */
 typedef struct { float x, y, z, u, v, u1, v1, c[4], o[4], c1[4], o1[4]; } gv;
-static GLuint prog, vao, vbo, fbo, color_tex, depth_rb;
+static GLuint vao, vbo, fbo, color_tex, depth_rb;
 static int fb_w, fb_h, ready;
-static struct { GLint scale, offx, set, quad, quad_col, tex, textured, tpass, shade, use_alpha, ign_ta, offset, gouraud, fog, pt, pt_ref,
-                fog_ram, fog_vert, fog_den, fog_tab, hud, uvbox; } U;
+/* a variant's key: the state its program is built for */
+#define SV_TEX 1u                       /* textured */
+#define SV_SHADE(n) ((uint32_t)(n) << 1)   /* 2 bits: texture/shading instruction */
+#define SV_USE_ALPHA (1u << 3)
+#define SV_IGN_TA (1u << 4)
+#define SV_OFFSET (1u << 5)
+#define SV_GOURAUD (1u << 6)
+#define SV_FOG(n) ((uint32_t)(n) << 7)  /* 2 bits: fog mode (2 = none) */
+#define SV_PT(n) ((uint32_t)(n) << 9)   /* 2 bits: punch-through (1), by alpha to coverage (2) */
+#define SV_TPASS(n) ((uint32_t)(n) << 11) /* 2 bits: two-pass translucent polygons (see two_pass_poly) */
+#define SV_HUD(n) ((uint32_t)(n) << 13) /* 2 bits: bicubic (1), sampling clamped to u_uvbox (2) */
+#define SV_SET (1u << 15)               /* the vertices' second set (two-volume polygons inside a volume) */
+#define SV_QUAD (1u << 16)              /* a quad of one colour in clip space: draw_quad */
+#define SV_ZV (1u << 17)                /* depth from the vertices: zv_on */
+#define SV_PLAIN (SV_FOG(2))            /* untextured, no fog: modifier volumes (their colour is masked) */
+typedef struct { uint32_t key; GLuint prog; GLint scale, offx, quad_col, pt_ref, fog_ram, fog_vert, fog_den, uvbox; unsigned stamp; } svar;
+#define NSV 256
+static svar sv_tab[NSV]; static int sv_n;
+static svar *sv_cur;                    /* the variant in use (NULL: another program may be bound) */
+static unsigned sv_stamp = 1;           /* FU's generation: a variant takes the values when it is first used with them */
+static struct { float sx, sy, offx, pt_ref, fog_ram[3], fog_vert[3], fog_den; } FU;   /* the frame's uniforms */
+static GLuint fog_tex; static uint8_t fog_last[256]; static int fog_valid;
+const char *dc_pvr_gl_shader_list;      /* file of the variants a game has used: built at start-up next time */
 static gv *verts; static int nverts, cap_verts;
 typedef struct { int first, count; } span;
 static span *spans; static int cap_spans;
@@ -362,6 +472,82 @@ float dc_pvr_gl_anisotropy;            /* enhancement: anisotropic filtering (cl
 static float max_aniso;
 static void bars_init(void);
 
+/* ------------------------------------------------------------------ variants */
+static int sv_listed;                   /* building the list's variants: don't write them back */
+static svar *sv_get(uint32_t key) {
+    for (int i = 0; i < sv_n; i++) if (sv_tab[i].key == key) return &sv_tab[i];
+    if (sv_n == NSV) {                  /* never in practice: start over */
+        for (int i = 0; i < sv_n; i++) p_glDeleteProgram(sv_tab[i].prog);
+        sv_n = 0; sv_cur = NULL;
+    }
+    char def[512];
+    snprintf(def, sizeof def, "#version 330 core\n#define TEX %d\n#define SHADE %d\n#define USE_ALPHA %d\n#define IGN_TA %d\n#define OFFSET %d\n"
+             "#define GOURAUD %d\n#define FOG %d\n#define PT %d\n#define TPASS %d\n#define HUD %d\n#define SET %d\n#define QUAD %d\n#define ZV %d\n",
+             (int)(key & 1), (int)(key >> 1 & 3), (int)(key >> 3 & 1), (int)(key >> 4 & 1), (int)(key >> 5 & 1), (int)(key >> 6 & 1),
+             (int)(key >> 7 & 3), (int)(key >> 9 & 3), (int)(key >> 11 & 3), (int)(key >> 13 & 3), (int)(key >> 15 & 1), (int)(key >> 16 & 1), (int)(key >> 17 & 1));
+    GLuint sh[2], pr = p_glCreateProgram();
+    for (int k = 0; k < 2; k++) {
+        const char *src[2] = { def, k ? fs_body : vs_body };
+        sh[k] = p_glCreateShader(k ? GL_FRAGMENT_SHADER : GL_VERTEX_SHADER);
+        p_glShaderSource(sh[k], 2, src, NULL); p_glCompileShader(sh[k]);
+        GLint ok = 0; p_glGetShaderiv(sh[k], GL_COMPILE_STATUS, &ok);
+        if (!ok) { char log[2048]; p_glGetShaderInfoLog(sh[k], sizeof log, NULL, log); fprintf(stderr, "pvr_gl: shader %05X: %s\n", key, log); }
+        p_glAttachShader(pr, sh[k]);
+    }
+    p_glLinkProgram(pr);
+    p_glDeleteShader(sh[0]); p_glDeleteShader(sh[1]);
+    GLint ok = 0; p_glGetProgramiv(pr, GL_LINK_STATUS, &ok);
+    if (!ok) { char log[2048]; p_glGetProgramInfoLog(pr, sizeof log, NULL, log); fprintf(stderr, "pvr_gl: link %05X: %s\n", key, log); p_glDeleteProgram(pr); return NULL; }
+    svar *v = &sv_tab[sv_n++];
+    memset(v, 0, sizeof *v);
+    v->key = key; v->prog = pr;
+    v->scale = p_glGetUniformLocation(pr, "u_scale"); v->offx = p_glGetUniformLocation(pr, "u_offx"); v->quad_col = p_glGetUniformLocation(pr, "u_quad_col");
+    v->pt_ref = p_glGetUniformLocation(pr, "u_pt_ref"); v->fog_ram = p_glGetUniformLocation(pr, "u_fog_ram"); v->fog_vert = p_glGetUniformLocation(pr, "u_fog_vert");
+    v->fog_den = p_glGetUniformLocation(pr, "u_fog_den"); v->uvbox = p_glGetUniformLocation(pr, "u_uvbox");
+    p_glUseProgram(pr); sv_cur = NULL;                     /* the samplers' units, once */
+    { GLint t = p_glGetUniformLocation(pr, "u_tex"), ft = p_glGetUniformLocation(pr, "u_fogtab");
+      if (t >= 0) p_glUniform1i(t, 0);
+      if (ft >= 0) p_glUniform1i(ft, 1); }
+    if (!sv_listed && dc_pvr_gl_shader_list) {             /* for the next start */
+        FILE *f = fopen(dc_pvr_gl_shader_list, "a");
+        if (f) { fprintf(f, "%05X\n", key); fclose(f); }
+    }
+    return v;
+}
+static void sv_use(uint32_t key) {
+    if (key & SV_QUAD) key = SV_QUAD;
+    else if (!(key & SV_TEX)) key &= ~(SV_SHADE(3) | SV_IGN_TA | SV_HUD(3));    /* what only textured polygons have */
+    if (zv_on) key |= SV_ZV;
+    svar *v = sv_cur && sv_cur->key == key ? sv_cur : sv_get(key);
+    if (!v) return;
+    if (v != sv_cur) { p_glUseProgram(v->prog); sv_cur = v; }
+    if (v->stamp != sv_stamp) {
+        v->stamp = sv_stamp;
+        if (v->scale >= 0) p_glUniform2f(v->scale, FU.sx, FU.sy);
+        if (v->offx >= 0) p_glUniform1f(v->offx, FU.offx);
+        if (v->pt_ref >= 0) p_glUniform1f(v->pt_ref, FU.pt_ref);
+        if (v->fog_ram >= 0) p_glUniform3f(v->fog_ram, FU.fog_ram[0], FU.fog_ram[1], FU.fog_ram[2]);
+        if (v->fog_vert >= 0) p_glUniform3f(v->fog_vert, FU.fog_vert[0], FU.fog_vert[1], FU.fog_vert[2]);
+        if (v->fog_den >= 0) p_glUniform1f(v->fog_den, FU.fog_den);
+    }
+}
+/* the variants a game used before, from dc_pvr_gl_shader_list: built now, not in the middle of play */
+static void sv_load_list(void) {
+    if (!dc_pvr_gl_shader_list) return;
+    FILE *f = fopen(dc_pvr_gl_shader_list, "r");
+    if (!f) return;
+    char line[64]; int n = 0;
+    sv_listed = 1;
+    while (fgets(line, sizeof line, f) && n < NSV / 2) {
+        uint32_t key = (uint32_t)strtoul(line, NULL, 16);
+        if (!key || key >= (1u << 18) || !(key & SV_ZV) != !zv_on) continue;
+        if (sv_get(key)) n++;
+    }
+    sv_listed = 0;
+    fclose(f);
+    sv_cur = NULL;
+}
+
 int dc_pvr_gl_init(void *(*getproc)(const char *)) {
     int missing = 0;
 #define F(ret, name, args) p_##name = (ret (*) args)getproc(#name); if (!p_##name) { fprintf(stderr, "pvr_gl: missing %s\n", #name); missing++; }
@@ -369,19 +555,12 @@ int dc_pvr_gl_init(void *(*getproc)(const char *)) {
 #undef F
     if (missing) return -1;
     gl_debug_init(getproc);
-    prog = p_glCreateProgram();
-    p_glAttachShader(prog, compile(GL_VERTEX_SHADER, vs_src));
-    p_glAttachShader(prog, compile(GL_FRAGMENT_SHADER, fs_src));
-    p_glLinkProgram(prog);
-    GLint ok = 0; p_glGetProgramiv(prog, GL_LINK_STATUS, &ok);
-    if (!ok) { char log[2048]; p_glGetProgramInfoLog(prog, sizeof log, NULL, log); fprintf(stderr, "pvr_gl: link: %s\n", log); return -1; }
     bars_init();
-#define UL(f, n) U.f = p_glGetUniformLocation(prog, n)
-    UL(scale, "u_scale"); UL(offx, "u_offx"); UL(set, "u_set"); UL(quad, "u_quad"); UL(quad_col, "u_quad_col"); UL(tex, "u_tex");
-    UL(textured, "u_textured"); UL(tpass, "u_tpass"); UL(shade, "u_shade"); UL(use_alpha, "u_use_alpha"); UL(ign_ta, "u_ign_ta"); UL(offset, "u_offset");
-    UL(gouraud, "u_gouraud"); UL(fog, "u_fog"); UL(pt, "u_pt"); UL(pt_ref, "u_pt_ref"); UL(hud, "u_hud"); UL(uvbox, "u_uvbox"); UL(fog_ram, "u_fog_ram");
-    UL(fog_vert, "u_fog_vert"); UL(fog_den, "u_fog_den"); UL(fog_tab, "u_fog_tab");
-#undef UL
+    p_glGenTextures(1, &fog_tex); p_glActiveTexture(GL_TEXTURE1); p_glBindTexture(GL_TEXTURE_2D, fog_tex);
+    p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RG8UI, 128, 1, 0, GL_RG_INTEGER, GL_UNSIGNED_BYTE, fog_last);
+    p_glActiveTexture(GL_TEXTURE0);
     p_glGenVertexArrays(1, &vao); p_glBindVertexArray(vao);
     p_glGenBuffers(1, &vbo); p_glBindBuffer(GL_ARRAY_BUFFER, vbo);
     p_glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(gv), (void *)offsetof(gv, x));
@@ -392,6 +571,20 @@ int dc_pvr_gl_init(void *(*getproc)(const char *)) {
     p_glVertexAttribPointer(5, 4, GL_FLOAT, GL_FALSE, sizeof(gv), (void *)offsetof(gv, o1));
     for (int i = 0; i < 6; i++) p_glEnableVertexAttribArray((GLuint)i);
     { GLfloat a = 0; p_glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY, &a); while (p_glGetError()) {} max_aniso = a; }
+    sv_listed = 1;
+    if (!sv_get(SV_TEX | SV_SHADE(3) | SV_USE_ALPHA | SV_GOURAUD | SV_FOG(2))) return -1;   /* the shaders build here at all */
+    sv_listed = 0;
+    {   /* zv_on's needs: glClipControl (GL 4.5 or ARB_clip_control) */
+        const unsigned char *(*gsi)(GLenum, GLuint) = (const unsigned char *(*)(GLenum, GLuint))getproc("glGetStringi");
+        GLint n = 0, maj = 0, min = 0;
+        p_glGetIntegerv(0x821B /* MAJOR_VERSION */, &maj); p_glGetIntegerv(0x821C /* MINOR_VERSION */, &min); p_glGetIntegerv(0x821D /* NUM_EXTENSIONS */, &n);
+        int has = maj > 4 || (maj == 4 && min >= 5);
+        for (int i = 0; gsi && !has && i < n; i++) { const char *e = (const char *)gsi(0x1F03 /* EXTENSIONS */, (GLuint)i); if (e && !strcmp(e, "GL_ARB_clip_control")) has = 1; }
+        p_glClipControl = has ? (void (*)(GLenum, GLenum))getproc("glClipControl") : NULL;
+        zv_ok = p_glClipControl != NULL;
+        while (p_glGetError()) {}
+        const char *e = getenv("DC_GL_FAST_DEPTH"); if (e) dc_pvr_gl_fast_depth = atoi(e) != 0;
+    }
     ready = 1;
     return 0;
 }
@@ -436,7 +629,7 @@ static int ensure_ms(void) {                     /* 1: draw into ms_fbo this fra
     p_glGenRenderbuffers(1, &ms_col); p_glBindRenderbuffer(GL_RENDERBUFFER, ms_col);
     p_glRenderbufferStorageMultisample(GL_RENDERBUFFER, n, GL_RGBA8, want_w, want_h);
     p_glGenRenderbuffers(1, &ms_depth); p_glBindRenderbuffer(GL_RENDERBUFFER, ms_depth);
-    p_glRenderbufferStorageMultisample(GL_RENDERBUFFER, n, GL_DEPTH24_STENCIL8, want_w, want_h);
+    p_glRenderbufferStorageMultisample(GL_RENDERBUFFER, n, zv_on ? GL_DEPTH32F_STENCIL8 : GL_DEPTH24_STENCIL8, want_w, want_h);
     p_glGenFramebuffers(1, &ms_fbo); p_glBindFramebuffer(GL_FRAMEBUFFER, ms_fbo);
     p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_RENDERBUFFER, ms_col);
     p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, ms_depth);
@@ -460,7 +653,7 @@ static void ensure_fbo(int w, int h) {
     p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR); p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE); p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
     p_glGenRenderbuffers(1, &depth_rb); p_glBindRenderbuffer(GL_RENDERBUFFER, depth_rb);
-    p_glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH24_STENCIL8, w, h);
+    p_glRenderbufferStorage(GL_RENDERBUFFER, zv_on ? GL_DEPTH32F_STENCIL8 : GL_DEPTH24_STENCIL8, w, h);
     p_glGenFramebuffers(1, &fbo); p_glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color_tex, 0);
     p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, depth_rb);
@@ -1096,13 +1289,13 @@ static int two_pass_poly(const pvr_poly *p) {
     for (int j = 1; j < p->n; j++) if (v[j].z != v[0].z) return 1;
     return 0;
 }
-static void set_poly_state(const pvr_poly *p, int set) {
+static void set_poly_state(const pvr_poly *p, int set, int hud) {
     uint32_t tsp = set ? p->tsp1 : p->tsp, tcw = set ? p->tcw1 : p->tcw;
     int tex = (p->isp >> 25) & 1;
-    p_glUniform1i(U.set, set);
-    p_glUniform1i(U.textured, tex); p_glUniform1i(U.offset, (p->isp >> 24) & 1); p_glUniform1i(U.gouraud, (p->isp >> 23) & 1);
-    p_glUniform1i(U.shade, (tsp >> 6) & 3); p_glUniform1i(U.use_alpha, (tsp >> 20) & 1); p_glUniform1i(U.ign_ta, (tsp >> 19) & 1);
-    p_glUniform1i(U.fog, (tsp >> 22) & 3); p_glUniform1i(U.pt, p->list == 4 ? (ms_a2c ? 2 : 1) : 0);
+    int tp = tpass && two_pass_poly(p) ? tpass : 0;
+    sv_use((tex ? SV_TEX : 0) | SV_SHADE((tsp >> 6) & 3) | (((tsp >> 20) & 1) ? SV_USE_ALPHA : 0) | (((tsp >> 19) & 1) ? SV_IGN_TA : 0)
+           | (((p->isp >> 24) & 1) ? SV_OFFSET : 0) | (((p->isp >> 23) & 1) ? SV_GOURAUD : 0) | SV_FOG((tsp >> 22) & 3)
+           | SV_PT(p->list == 4 ? (ms_a2c ? 2 : 1) : 0) | SV_TPASS(tp) | SV_HUD(hud & 3) | (set ? SV_SET : 0));
     if (ms_a2c) { if (p->list == 4) p_glEnable(GL_SAMPLE_ALPHA_TO_COVERAGE); else p_glDisable(GL_SAMPLE_ALPHA_TO_COVERAGE); }
     if (tex) {
         int ci = poly_cap && poly_base ? poly_cap[p - poly_base] : 0;
@@ -1130,8 +1323,6 @@ static void set_poly_state(const pvr_poly *p, int set) {
     if (p->list == 4 && zmode == 0) zmode = 6;
     p_glDepthFunc(depth_fn[zmode]);
     p_glDepthMask(p->list != 2 && !((p->isp >> 26) & 1));
-    int tp = tpass && two_pass_poly(p) ? tpass : 0;
-    p_glUniform1i(U.tpass, tp);
     if (tp == 1) p_glDepthMask(1);
 }
 static GLenum blend_src(int i) { static const GLenum t[8] = { GL_ZERO, GL_ONE, GL_DST_COLOR, GL_ONE_MINUS_DST_COLOR, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_DST_ALPHA, GL_ONE_MINUS_DST_ALPHA }; return t[i & 7]; }
@@ -1139,9 +1330,11 @@ static GLenum blend_dst(int i) { static const GLenum t[8] = { GL_ZERO, GL_ONE, G
 
 static int quad_first;                 /* full-screen quad in the vertex buffer */
 static void draw_quad(float r, float g, float b, float a) {
-    p_glUniform1i(U.quad, 1); p_glUniform4f(U.quad_col, r, g, b, a);
+    uint32_t back = sv_cur ? sv_cur->key : SV_PLAIN;
+    sv_use(SV_QUAD);
+    if (sv_cur && sv_cur->quad_col >= 0) p_glUniform4f(sv_cur->quad_col, r, g, b, a);
     p_glDrawArrays(GL_TRIANGLES, quad_first, 6);
-    p_glUniform1i(U.quad, 0);
+    sv_use(back & ~SV_ZV);                                  /* what was in use: the caller goes on drawing with it */
 }
 
 typedef struct { int idx; float key; } sort_e;
@@ -1198,7 +1391,11 @@ static void scissor_for(const pvr_poly *p) {
     scissor(x0, y0, x1 - x0, y1 - y0);
 }
 static struct { bkey key; int valid; GLint *first; GLsizei *count; int n, cap; } B;
+/* DC_GL_STATS=1: what a frame costs to draw, averaged and printed every 300 frames (polygons, vertices
+ * sent, state changes, draw calls) */
+static struct { int on; unsigned long frames, polys, verts, states, draws, ranges; } gst = { -1, 0, 0, 0, 0, 0, 0 };
 static void batch_flush(void) {
+    if (B.n && gst.on > 0) { gst.draws++; gst.ranges += (unsigned long)B.n; }
     if (B.n == 1) p_glDrawArrays(GL_TRIANGLES, B.first[0], B.count[0]);
     else if (B.n > 1) p_glMultiDrawArrays(GL_TRIANGLES, B.first, B.count, B.n);
     B.n = 0;
@@ -1214,11 +1411,11 @@ static void batch_add(const pvr_poly *p, int set, int mark, int blend, int first
     if (k.hud & 2) memcpy(k.ub, poly_uvbox[p - poly_base], sizeof k.ub);
     if (!B.valid || memcmp(&k, &B.key, sizeof k)) {
         batch_flush();
+        if (gst.on > 0) gst.states++;
         if (mark >= 0) p_glStencilFunc(GL_ALWAYS, mark, 0xFF);
-        set_poly_state(p, set);
+        set_poly_state(p, set, k.hud);
         scissor_for(p);
-        p_glUniform1i(U.hud, k.hud);
-        if (k.hud & 2) p_glUniform4f(U.uvbox, k.ub[0], k.ub[1], k.ub[2], k.ub[3]);
+        if ((k.hud & 2) && sv_cur && sv_cur->uvbox >= 0) p_glUniform4f(sv_cur->uvbox, k.ub[0], k.ub[1], k.ub[2], k.ub[3]);
         if (set) { p_glDepthFunc(GL_EQUAL); p_glDepthMask(0); }
         if (blend) p_glBlendFunc(blend_src((p->tsp >> 29) & 7), blend_dst((p->tsp >> 26) & 7));
         B.key = k; B.valid = 1;
@@ -1393,7 +1590,7 @@ static void gpu_bars_decide(int cx0, int cx1, int y0, int y1) {
     p_glUniform1i(dec_e0, 1); p_glUniform1i(dec_e1, 2); p_glUniform1i(dec_c, 3); p_glUniform1i(dec_n, n);
     p_glBindVertexArray(vao);
     p_glDrawArrays(GL_TRIANGLES, quad_first, 6);
-    p_glUseProgram(prog);
+    sv_cur = NULL;
     p_glBindFramebuffer(GL_FRAMEBUFFER, fbo);
     p_glViewport(0, 0, fb_w, fb_h);
 }
@@ -1428,7 +1625,7 @@ static void draw_bars(int px0, int px1, int y0, int y1, int left, int right, int
         p_glBindTexture(GL_TEXTURE_2D, edge_tex[i]);
         p_glDrawArrays(GL_TRIANGLES, quad_first, 6);
     }
-    p_glUseProgram(prog);
+    sv_cur = NULL;
     p_glDisable(GL_SCISSOR_TEST);
 }
 /* vertical centring: the share of the picture height to move it down by (the drawn lines are
@@ -1458,11 +1655,8 @@ static void gl_selftest(void) {
     p_glBindFramebuffer(GL_FRAMEBUFFER, fbo); p_glViewport(0, 0, fb_w, fb_h);
     p_glDisable(GL_SCISSOR_TEST); p_glDisable(GL_DEPTH_TEST); p_glDisable(GL_STENCIL_TEST); p_glDisable(GL_BLEND); p_glDisable(GL_CULL_FACE);
     p_glColorMask(1, 1, 1, 1);
-    p_glUseProgram(prog);
-    p_glUniform2f(U.scale, 2.f / 640.f, 2.f / 480.f); p_glUniform1f(U.offx, 0);
-    p_glUniform1i(U.tex, 0); p_glUniform1i(U.quad, 0); p_glUniform1i(U.set, 0);
-    p_glUniform1i(U.textured, 1); p_glUniform1i(U.shade, 0); p_glUniform1i(U.use_alpha, 1); p_glUniform1i(U.ign_ta, 0);
-    p_glUniform1i(U.offset, 0); p_glUniform1i(U.gouraud, 1); p_glUniform1i(U.fog, 2); p_glUniform1i(U.pt, 0);
+    FU.sx = 2.f / 640.f; FU.sy = 2.f / 480.f; FU.offx = 0; sv_stamp++; sv_cur = NULL;
+    sv_use(SV_TEX | SV_SHADE(0) | SV_USE_ALPHA | SV_GOURAUD | SV_FOG(2));
     static const float zs[4] = { 1.f, 0.01f, 1000.f, -1.f };   /* -1: per-vertex 1/w 0.5 .. 2 (perspective) */
     const char *names[4] = { "1/w=1", "1/w=0.01", "1/w=1000", "perspective" };
     uint8_t *px = malloc((size_t)fb_w * fb_h * 4);
@@ -1502,7 +1696,7 @@ static void gl_selftest(void) {
         GLint v[6] = {0};
         getiv(0x8069 /* TEXTURE_BINDING_2D */, &v[0]); getiv(0x84E0 /* ACTIVE_TEXTURE */, &v[1]);
         getiv(0x8B8D /* CURRENT_PROGRAM */, &v[2]); getiv(0x8919 /* SAMPLER_BINDING */, &v[3]);
-        fprintf(dbg_log, "state: texture %d (made %u) active unit %X program %d (ours %u) sampler %d\n", v[0], t, v[1], v[2], prog, v[3]);
+        fprintf(dbg_log, "state: texture %d (made %u) active unit %X program %d (ours %u) sampler %d\n", v[0], t, v[1], v[2], sv_cur ? sv_cur->prog : 0, v[3]);
     }
     fflush(dbg_log);
     free(px);
@@ -1766,9 +1960,77 @@ void dc_pvr_gl_render(int scale) {
     render_frame(scale);
     snap_on = tmap_on = 0;
 }
+/* depth from the vertices or by the logarithm (zv_on), as dc_pvr_gl_fast_depth asks and the driver can:
+ * the depth buffers are made again in the other format, and the variants of that kind are used */
+/* Tried once before it is used: four quads over each other in a small float-depth target, at 1/w as a
+ * scene and a HUD have them, the second of each pair behind the first. A driver that maps depth to
+ * 0..1 its own way after all, or keeps fewer bits than a float, lets the ones behind through. */
+static int zv_selftest(void) {
+    GLuint tf = 0, tc = 0, td = 0; int ok = 0;
+    p_glGenTextures(1, &tc); p_glBindTexture(GL_TEXTURE_2D, tc);
+    p_glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, 8, 8, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+    p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST); p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    p_glGenRenderbuffers(1, &td); p_glBindRenderbuffer(GL_RENDERBUFFER, td);
+    p_glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH32F_STENCIL8, 8, 8);
+    p_glGenFramebuffers(1, &tf); p_glBindFramebuffer(GL_FRAMEBUFFER, tf);
+    p_glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tc, 0);
+    p_glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_RENDERBUFFER, td);
+    if (p_glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE) {
+        static const float zs[4] = { 2e-3f, 1.5e-3f, 1e6f, 5e5f };
+        static const float cols[4][3] = { { 1, 0, 0 }, { 0, 1, 0 }, { 0, 0, 1 }, { 1, 1, 1 } };
+        static const float X[6] = { 0, 8, 0, 8, 8, 0 }, Y[6] = { 0, 0, 8, 0, 8, 8 };
+        gv q[24]; memset(q, 0, sizeof q);
+        for (int k = 0; k < 24; k++) {
+            q[k].x = X[k % 6]; q[k].y = Y[k % 6]; q[k].z = zs[k / 6];
+            q[k].c[0] = cols[k / 6][0]; q[k].c[1] = cols[k / 6][1]; q[k].c[2] = cols[k / 6][2]; q[k].c[3] = 1;
+        }
+        p_glBindVertexArray(vao); p_glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        p_glBufferData(GL_ARRAY_BUFFER, sizeof q, q, GL_STREAM_DRAW);
+        p_glViewport(0, 0, 8, 8);
+        p_glDisable(GL_SCISSOR_TEST); p_glDisable(GL_STENCIL_TEST); p_glDisable(GL_BLEND); p_glDisable(GL_CULL_FACE);
+        p_glEnable(GL_DEPTH_TEST); p_glDepthFunc(GL_GEQUAL); p_glDepthMask(1); p_glColorMask(1, 1, 1, 1);
+        FU.sx = 2.f / 8.f; FU.sy = 2.f / 8.f; FU.offx = 0; sv_stamp++; sv_cur = NULL;
+        sv_use(SV_USE_ALPHA | SV_FOG(2));
+        p_glClearColor(0, 0, 0, 1); p_glClearDepth(depth_clear(1e-3f)); p_glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        uint8_t px[2][4] = { { 0 }, { 0 } };
+        p_glPixelStorei(GL_PACK_ALIGNMENT, 1);
+        p_glDrawArrays(GL_TRIANGLES, 0, 12); p_glReadPixels(4, 4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px[0]);
+        p_glDrawArrays(GL_TRIANGLES, 12, 12); p_glReadPixels(4, 4, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, px[1]);
+        ok = px[0][0] > 200 && px[0][1] < 50 && px[0][2] < 50 && px[1][2] > 200 && px[1][0] < 50 && px[1][1] < 50;
+        if (!ok) fprintf(stderr, "pvr_gl: depth test from the vertices: got %d %d %d, %d %d %d\n", px[0][0], px[0][1], px[0][2], px[1][0], px[1][1], px[1][2]);
+    }
+    while (p_glGetError()) {}
+    p_glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    p_glDeleteFramebuffers(1, &tf); p_glDeleteTextures(1, &tc); p_glDeleteRenderbuffers(1, &td);
+    sv_cur = NULL;
+    return ok;
+}
+int dc_pvr_gl_fast_depth_ok(void) { return zv_ok; }
+static void zv_apply(void) {
+    int want = dc_pvr_gl_fast_depth && zv_ok;
+    static int listed, tested;
+    if (want && !tested) {
+        tested = 1;
+        zv_on = 1; p_glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
+        int ok = zv_selftest();
+        zv_on = 0; p_glClipControl(GL_LOWER_LEFT, GL_NEGATIVE_ONE_TO_ONE);
+        if (!ok) { zv_ok = 0; want = 0; fprintf(stderr, "pvr_gl: this driver's depth from the vertices fails its test: depth by logarithm per pixel\n"); }
+    }
+    if (want != zv_on) {
+        zv_on = want;
+        p_glClipControl(GL_LOWER_LEFT, zv_on ? GL_ZERO_TO_ONE : GL_NEGATIVE_ONE_TO_ONE);
+        if (fbo) { p_glDeleteFramebuffers(1, &fbo); p_glDeleteTextures(1, &color_tex); p_glDeleteRenderbuffers(1, &depth_rb); fbo = 0; }
+        if (ms_fbo) { p_glDeleteFramebuffers(1, &ms_fbo); p_glDeleteRenderbuffers(1, &ms_col); p_glDeleteRenderbuffers(1, &ms_depth); ms_fbo = 0; ms_n = 0; ms_w = ms_h = 0; }
+        sv_cur = NULL;
+        fprintf(stderr, "pvr_gl: depth %s\n", zv_on ? "from the vertices (float buffer, tested before shading)" : "by logarithm per pixel");
+        listed = 0;
+    }
+    if (!listed) { listed = 1; sv_load_list(); }
+}
 static void render_frame(int scale) {
     if (!ready) return;
     if (scale < 1) scale = 1;
+    zv_apply();
     /* from here on in halves (SC): 1.5 times is 960x720, the Switch's own screen */
     scale = scale * 2 - (dc_pvr_gl_half_step && scale > 1 && !capturing);
     #define SC(x) ((x) * scale / 2)
@@ -2307,24 +2569,39 @@ static void render_frame(int scale) {
     p_glBindVertexArray(vao);
     p_glBindBuffer(GL_ARRAY_BUFFER, vbo);
     p_glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)nverts * (GLsizeiptr)sizeof(gv), verts, GL_STREAM_DRAW);
+    if (gst.on < 0) { const char *e = getenv("DC_GL_STATS"); gst.on = e && *e == '1'; }
+    if (gst.on > 0) {
+        gst.polys += (unsigned long)f.npolys; gst.verts += (unsigned long)nverts;
+        if (++gst.frames % 300 == 0) {
+            fprintf(stderr, "pvr_gl: a frame: %lu polygons, %lu vertices, %lu state changes, %lu draw calls (%lu ranges)\n",
+                    gst.polys / 300, gst.verts / 300, gst.states / 300, gst.draws / 300, gst.ranges / 300);
+            gst.polys = gst.verts = gst.states = gst.draws = gst.ranges = 0;
+        }
+    }
 
     int ms = !capturing && ensure_ms();
     ms_a2c = ms;
     GLuint tgt_fbo = ms ? ms_fbo : fbo;                   /* see ms_fbo */
     p_glBindFramebuffer(GL_FRAMEBUFFER, tgt_fbo);
     p_glViewport(0, 0, fb_w, fb_h);
-    p_glUseProgram(prog);
-    p_glUniform2f(U.scale, 2.f / WW, 2.f / RH);
-    p_glUniform1f(U.offx, (WW - (float)RW) * 0.5f);
-    p_glUniform1i(U.tex, 0); p_glUniform1i(U.quad, 0); p_glUniform1i(U.hud, 0);
-    p_glUniform1f(U.pt_ref, (dc_pvr_reg(0x11C) & 255) / 255.f);
+    /* the frame's uniforms: each variant takes them when it is first used (sv_use) */
+    FU.sx = 2.f / WW; FU.sy = 2.f / RH;
+    FU.offx = (WW - (float)RW) * 0.5f;
+    FU.pt_ref = (dc_pvr_reg(0x11C) & 255) / 255.f;
     { uint32_t fr = dc_pvr_reg(0x0B0), fv = dc_pvr_reg(0x0B4), den = dc_pvr_reg(0x0B8);   /* FOG_COL_RAM, FOG_COL_VERT, FOG_DENSITY */
-      p_glUniform3f(U.fog_ram, ((fr >> 16) & 255) / 255.f, ((fr >> 8) & 255) / 255.f, (fr & 255) / 255.f);
-      p_glUniform3f(U.fog_vert, ((fv >> 16) & 255) / 255.f, ((fv >> 8) & 255) / 255.f, (fv & 255) / 255.f);
-      p_glUniform1f(U.fog_den, ((den >> 8) & 255) / 128.f * ldexpf(1.f, (int8_t)(den & 255)));
-      float tab[256];
-      for (int i = 0; i < 128; i++) { uint32_t e = dc_pvr_reg(0x200 + i * 4); tab[i * 2] = (float)(e & 255); tab[i * 2 + 1] = (float)((e >> 8) & 255); }
-      p_glUniform2fv(U.fog_tab, 128, tab); }
+      FU.fog_ram[0] = ((fr >> 16) & 255) / 255.f; FU.fog_ram[1] = ((fr >> 8) & 255) / 255.f; FU.fog_ram[2] = (fr & 255) / 255.f;
+      FU.fog_vert[0] = ((fv >> 16) & 255) / 255.f; FU.fog_vert[1] = ((fv >> 8) & 255) / 255.f; FU.fog_vert[2] = (fv & 255) / 255.f;
+      FU.fog_den = ((den >> 8) & 255) / 128.f * ldexpf(1.f, (int8_t)(den & 255));
+      uint8_t tab[256];                                    /* FOG_TABLE: a texture on unit 1, sent when it changes */
+      for (int i = 0; i < 128; i++) { uint32_t e = dc_pvr_reg(0x200 + i * 4); tab[i * 2] = (uint8_t)(e & 255); tab[i * 2 + 1] = (uint8_t)((e >> 8) & 255); }
+      p_glActiveTexture(GL_TEXTURE1); p_glBindTexture(GL_TEXTURE_2D, fog_tex);
+      if (!fog_valid || memcmp(tab, fog_last, sizeof tab)) {
+          p_glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
+          p_glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 128, 1, GL_RG_INTEGER, GL_UNSIGNED_BYTE, tab);
+          memcpy(fog_last, tab, sizeof tab); fog_valid = 1;
+      }
+      p_glActiveTexture(GL_TEXTURE0); }
+    sv_stamp++; sv_cur = NULL;
 
     p_glDisable(GL_CULL_FACE);
     p_glColorMask(1, 1, 1, 1); p_glDepthMask(1); p_glStencilMask(0xFF);
@@ -2365,7 +2642,7 @@ static void render_frame(int scale) {
       sc_off = (WW - (float)RW) * 0.5f; sc_k = (float)fb_w / WW; sc_kx = (float)RW / (float)f.width; sc_scale = scale; sc_rw = f.width;
       scissor(sc_x, sc_y, sc_w, sc_h); }
     p_glClearColor(f.bg[0], f.bg[1], f.bg[2], 1.f);
-    p_glClearDepth(depth_of(f.bgz)); p_glClearStencil(0);
+    p_glClearDepth(depth_clear(f.bgz)); p_glClearStencil(0);
     p_glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
     p_glEnable(GL_DEPTH_TEST);
     p_glDisable(GL_BLEND);
@@ -2390,7 +2667,7 @@ static void render_frame(int scale) {
     /* modifier volumes */
     if (has_mods) {
         p_glColorMask(0, 0, 0, 0); p_glDepthMask(0);
-        p_glUniform1i(U.textured, 0); p_glUniform1i(U.fog, 2); p_glUniform1i(U.pt, 0); p_glUniform1i(U.set, 0);
+        sv_use(SV_PLAIN);
         int any = 0;
         /* the parity bit changes only under the volume's triangles: resolving and clearing it is limited
          * to their bounding box. Soulcalibur's shadows are hundreds of one-triangle volumes per frame, and
@@ -2520,7 +2797,7 @@ static void render_frame(int scale) {
         batch_add(p, 0, -1, 1, spans[s[k].idx].first, spans[s[k].idx].count);
     }
     batch_reset();
-    tpass = 0; p_glUniform1i(U.tpass, 0);
+    tpass = 0;
     free(s);
     p_glDisable(GL_BLEND);
     p_glDisable(GL_SCISSOR_TEST);
@@ -2807,7 +3084,7 @@ static void present_blit(int x0, int y0, int x1, int y1, int dx0, int dy0, int d
     p_glUniform1f(ds_sharp, dc_pvr_gl_sharpen > 1.f ? 1.f : dc_pvr_gl_sharpen);
     p_glBindVertexArray(ds_vao);
     p_glDrawArrays(GL_TRIANGLES, 0, 6);
-    p_glBindVertexArray(vao); p_glUseProgram(prog);
+    p_glBindVertexArray(vao); sv_cur = NULL;
     p_glBindFramebuffer(GL_READ_FRAMEBUFFER, fbo); p_glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
 }
 void dc_pvr_gl_present(int win_w, int win_h, int stretch) {
@@ -2899,7 +3176,7 @@ static void present_scanlines(int x, int y, int w, int h, int lines, int win_w, 
     p_glUniform4f(sl_rect, x * 2.f / vp[2] - 1, y * 2.f / vp[3] - 1, (x + w) * 2.f / vp[2] - 1, (y + h) * 2.f / vp[3] - 1);
     p_glUniform1f(sl_y0, (float)y); p_glUniform1f(sl_h, (float)h); p_glUniform1f(sl_lines, (float)lines); p_glUniform1f(sl_k, k[lvl]);
     p_glDrawArrays(GL_TRIANGLES, 0, 6);
-    p_glDisable(GL_BLEND); p_glUseProgram(prog); p_glBindVertexArray(vao);
+    p_glDisable(GL_BLEND); sv_cur = NULL; p_glBindVertexArray(vao);
 }
 void dc_pvr_gl_overlay(const uint8_t *rgba, int w, int h, int x, int y, int dw, int dh, int win_w, int win_h) {
     if (!ready || !rgba || w <= 0 || h <= 0 || !ov_init()) return;
@@ -2924,7 +3201,7 @@ void dc_pvr_gl_overlay(const uint8_t *rgba, int w, int h, int x, int y, int dw, 
     float x0 = x * 2.f / win_w - 1, x1 = (x + dw) * 2.f / win_w - 1, y1 = 1 - y * 2.f / win_h, y0 = 1 - (y + dh) * 2.f / win_h;
     p_glUniform4f(ov_rect, x0, y0, x1, y1);
     p_glDrawArrays(GL_TRIANGLES, 0, 6);
-    p_glDisable(GL_BLEND); p_glUseProgram(prog); p_glBindVertexArray(vao);
+    p_glDisable(GL_BLEND); sv_cur = NULL; p_glBindVertexArray(vao);
 }
 
 /* show an RGB8 image (top row first) instead of a rendered frame: screens the CPU drew directly

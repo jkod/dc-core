@@ -1029,6 +1029,10 @@ int dc_front_open(const dc_front_config *c) {
             { fprintf(stderr, "vsync not available: %s\n", SDL_GetError()); cfg.vsync = 0; }
         else fprintf(stderr, "vsync on (%s)\n", SDL_GL_GetSwapInterval() < 0 ? "adaptive" : "every refresh");
     } else SDL_GL_SetSwapInterval(0);
+    if (!dc_pvr_gl_shader_list) {                          /* the shader variants the game has used: built at start-up */
+        static char list[1024]; char *dir = SDL_GetPrefPath("dc-core", cfg.save_name ? cfg.save_name : "default");
+        if (dir) { snprintf(list, sizeof list, "%sshaders.txt", dir); dc_pvr_gl_shader_list = list; SDL_free(dir); }
+    }
     if (dc_pvr_gl_init(getproc)) return -1;
     dc_pvr_sw_install();                                   /* TA collection (shared by the backends) */
     rt_start();

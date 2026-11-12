@@ -64,6 +64,10 @@ extern float dc_pvr_gl_aspect;        /* widescreen: the window's width / height
 extern int dc_pvr_gl_mipmaps;
 extern float dc_pvr_gl_anisotropy;
 extern int dc_pvr_gl_msaa;              /* multisample anti-aliasing: samples a pixel (0/1 off; clamped to the GPU's max) */
+extern int dc_pvr_gl_fast_depth;        /* 1 (default): depth from the vertices into a float buffer where the driver can, so the
+                                           GPU skips hidden pixels; 0: the logarithm per pixel (pvr_gl.c: zv_on) */
+int dc_pvr_gl_fast_depth_ok(void);       /* the driver can (GL 4.5 / ARB_clip_control, and it passed the test) */
+extern const char *dc_pvr_gl_shader_list; /* file listing the shader variants a game has used: built at start-up next time */
 extern int dc_pvr_gl_half_step;         /* render half a step under the scale asked for (2 -> 1.5: 960x720) */
 extern float dc_pvr_gl_sharpen;          /* 0 off .. 1: contrast-adaptive sharpening when presenting */
 extern int dc_pvr_gl_gpu_bars;           /* side bars decided on the GPU, so the CPU never waits for it (default on; 0: read back) */

@@ -66,7 +66,7 @@ static const struct { char c; uint8_t r[7]; } osd_font[] = {
 };
 #define OSD_W 200
 /* the items, top to bottom */
-enum { OI_RESUME, OI_RESET, OI_SAVE, OI_LOAD, OI_RES, OI_AA, OI_SHARP, OI_ASPECT, OI_SCAN, OI_FPS, OI_RUMBLE, OI_FS, OI_GPU, OI_FRATE, OI_REFRESH,
+enum { OI_RESUME, OI_RESET, OI_SAVE, OI_LOAD, OI_RES, OI_AA, OI_SHARP, OI_FASTZ, OI_ASPECT, OI_SCAN, OI_FPS, OI_RUMBLE, OI_FS, OI_GPU, OI_FRATE, OI_REFRESH,
        OI_SPEED, OI_BAR, OI_PROF, OI_QUIT, OSD_ITEMS };
 static int osd_scan, osd_fps;
 /* Switch: CPU CLOCK. 1224 MHz by default, the smallest step over the system's 1020 */
@@ -115,6 +115,7 @@ static void osd_load(void) {
     while (f && fgets(line, sizeof line, f)) {
         if (!strncmp(line, "scanlines=", 10)) osd_scan = atoi(line + 10) & 3;
         if (!strncmp(line, "sharpen=", 8)) osd_sharp = atoi(line + 8) & 3;
+        if (!strncmp(line, "fastdepth=", 10)) dc_pvr_gl_fast_depth = atoi(line + 10) != 0;
         if (!strncmp(line, "halfstep=", 9)) dc_pvr_gl_half_step = atoi(line + 9) != 0;
 #ifdef __SWITCH__
         if (!strncmp(line, "res=", 4)) { res = atoi(line + 4); if (res < 2 || res > 6) res = 3; }
@@ -135,6 +136,7 @@ static void osd_load(void) {
     cfg.scale = (res + 1) / 2; dc_pvr_gl_half_step = res & 1;
 #endif
     dc_pvr_gl_scanlines = osd_scan;
+    { const char *e = getenv("DC_GL_FAST_DEPTH"); if (e) dc_pvr_gl_fast_depth = atoi(e) != 0; }   /* tests */
     { const char *e = getenv("DC_HALF_STEP"); if (e) dc_pvr_gl_half_step = atoi(e) != 0; }   /* tests */
     { const char *e = getenv("DC_AA"); if (e) osd_aa = atoi(e); }   /* tests: anti-aliasing for this run */
     dc_pvr_gl_msaa = osd_aa;
@@ -160,6 +162,7 @@ static void osd_save(void) {
     if (!f) return;
     fprintf(f, "scanlines=%d\nfps=%d\nbar=%d\naa=%d\nsharpen=%d\ncpu=%d\ngpu=%d\nhalfstep=%d\n", osd_scan, osd_fps, osd_bar, osd_aa, osd_sharp, cpu_mhz[osd_cpu], gpu_mhz[osd_gpu], dc_pvr_gl_half_step);
     if (dc_front_refresh_ok) fprintf(f, "refresh=%d\n", refresh_hz[osd_refresh]);
+    fprintf(f, "fastdepth=%d\n", dc_pvr_gl_fast_depth);
     fprintf(f, "res=%d\n", cfg.scale * 2 - (dc_pvr_gl_half_step && cfg.scale > 1));
     if (dc_front_fps60 >= 0) fprintf(f, "framerate=%d\n", dc_front_fps60 ? 60 : 30);
     else fprintf(f, "halfrate=%d\n", osd_half);
@@ -289,6 +292,9 @@ static const char *osd_label(int i, char *buf, size_t n) {
         if (dc_pvr_gl_half_step && cfg.scale > 1) snprintf(buf, n, "RESOLUTION    < %d.5X %dP >", cfg.scale - 1, 480 * cfg.scale - 240);
         else snprintf(buf, n, "RESOLUTION    < %dX %dP >", cfg.scale, 480 * cfg.scale);
         return buf;
+    case OI_FASTZ:                                               /* pvr_gl.c zv_on: hidden where the driver can't */
+        if (!dc_pvr_gl_fast_depth_ok()) return "";
+        return dc_pvr_gl_fast_depth ? "FAST DEPTH    < ON >" : "FAST DEPTH    < OFF >";
     case OI_SHARP: { static const char *n4[4] = { "OFF", "LOW", "MEDIUM", "HIGH" }; snprintf(buf, n, "SHARPEN       < %s >", n4[osd_sharp & 3]); return buf; }
     case OI_AA: if (osd_aa < 2) return "ANTI-ALIASING < OFF >"; snprintf(buf, n, "ANTI-ALIASING < %dX >", osd_aa); return buf;
     case OI_ASPECT: snprintf(buf, n, "ASPECT        < %s >", cfg.widescreen ? "WIDE" : "4:3"); return buf;
@@ -662,6 +668,7 @@ static void osd_run(int port) {
             if (sel == OI_ASPECT) {
                 cfg.widescreen = !cfg.widescreen; dc_pvr_gl_widescreen = cfg.widescreen;
             }
+            if (sel == OI_FASTZ) { dc_pvr_gl_fast_depth = !dc_pvr_gl_fast_depth; need_present = 1; osd_save(); }
             if (sel == OI_SHARP) { osd_sharp = (osd_sharp + 4 + step) % 4; dc_pvr_gl_sharpen = sharp_amount[osd_sharp]; need_present = 1; osd_save(); }
             if (sel == OI_AA) { static const int lv[4] = { 0, 2, 4, 8 }; int i = osd_aa >= 8 ? 3 : osd_aa >= 4 ? 2 : osd_aa >= 2 ? 1 : 0;
                                 i = (i + 4 + step) % 4; osd_aa = lv[i]; dc_pvr_gl_msaa = osd_aa; need_present = 1; osd_save(); }
