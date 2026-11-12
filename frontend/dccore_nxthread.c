@@ -29,6 +29,11 @@ static int service_running(const char *name) {
 static ClkrstSession gpu_s; static int gpu_open; static u32 gpu_want, gpu_sys;
 static void clk_hook(AppletHookType hook, void *u);
 void dc_nx_gpu_check(void) {
+    /* the CPU clock too: a change of the system's configuration (see dc_nx_set_handheld) sets it back */
+    if (clk_open && clk_set && appletGetFocusState() == AppletFocusState_InFocus) {
+        u32 cpu = 0;
+        if (R_SUCCEEDED(clkrstGetClockRate(&clk_s, &cpu)) && cpu && cpu < clk_set) clkrstSetClockRate(&clk_s, clk_set);
+    }
     if (!gpu_open || !gpu_want) return;
     if (appletGetOperationMode() != AppletOperationMode_Handheld) return;   /* docked: the system's 768 MHz */
     if (appletGetFocusState() != AppletFocusState_InFocus) return;
@@ -65,6 +70,49 @@ static void clk_hook(AppletHookType hook, void *u) {
         hook != AppletHookType_OnPerformanceMode && hook != AppletHookType_OnResume) return;
     if (clk_open && clk_set && appletGetFocusState() == AppletFocusState_InFocus) clkrstSetClockRate(&clk_s, clk_set);
     dc_nx_gpu_check();
+}
+/* HANDHELD in the menu: the system's own performance configurations for undocked play, the ones a
+ * game asks for through apm. Nothing is overclocked; the CPU stays at 1020 MHz in all three:
+ *   0  the system's default: GPU 307 MHz, memory 1331 MHz
+ *   1  memory 1600 MHz, as it is docked; GPU 307 MHz              (0x00020001)
+ *   2  memory 1600 MHz, GPU 460 MHz                               (0x92220007)
+ * Undocked the GPU's limit is memory traffic, and the memory clock is what sets that. Only an
+ * application may ask: a game started from the album runs as an applet (-4), and the frontend then
+ * sets the GPU's clock alone, as it did before. Docked the system's configuration stays as it is
+ * (GPU 768 MHz, memory 1600 MHz). Returns 0, or < 0 where it can't be set. */
+int dc_nx_set_handheld(int profile) {
+    static const u32 conf[3] = { 0, 0x00020001u, 0x92220007u };
+    static u32 orig; static int inited, changed;
+    if (profile < 0 || profile > 2) profile = 0;
+    if (!profile && !changed) return 0;
+    if (appletGetAppletType() != AppletType_Application) return -4;
+    if (service_running("hoc:clk")) return -1;              /* Horizon OC */
+    if (!inited) {
+        if (R_FAILED(apmInitialize())) return -2;
+        inited = 1;
+        if (R_FAILED(apmGetPerformanceConfiguration(ApmPerformanceMode_Normal, &orig)) || !orig) orig = 0x00020003u;
+    }
+    if (R_FAILED(apmSetPerformanceConfiguration(ApmPerformanceMode_Normal, profile ? conf[profile] : orig))) return -3;
+    changed = profile != 0;
+    /* the system sets every clock of the configuration: a CPU clock of ours goes back on top of it */
+    if (clk_open && clk_set && appletGetFocusState() == AppletFocusState_InFocus) clkrstSetClockRate(&clk_s, clk_set);
+    return 0;
+}
+/* the clocks as they are now, in MHz (0: can't be read), for Show FPS */
+void dc_nx_clocks(int *cpu, int *gpu, int *mem) {
+    static ClkrstSession s[3]; static int ok[3], tried;
+    static const PcvModuleId id[3] = { PcvModuleId_CpuBus, PcvModuleId_GPU, PcvModuleId_EMC };
+    int *out[3] = { cpu, gpu, mem };
+    if (!tried) {
+        tried = 1;
+        if (!clk_inited && hosversionAtLeast(8, 0, 0) && R_SUCCEEDED(clkrstInitialize())) clk_inited = 1;
+        if (clk_inited) for (int i = 0; i < 3; i++) ok[i] = R_SUCCEEDED(clkrstOpenSession(&s[i], id[i], 3));
+    }
+    for (int i = 0; i < 3; i++) {
+        u32 hz = 0;
+        if (ok[i]) clkrstGetClockRate(&s[i], &hz);
+        *out[i] = (int)((hz + 500000u) / 1000000u);
+    }
 }
 int dc_nx_set_cpu_mhz(int mhz) {
     if (!clk_open) {

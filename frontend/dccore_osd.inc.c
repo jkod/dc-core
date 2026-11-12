@@ -77,8 +77,7 @@ static const int refresh_hz[] = { 0, 75, 90, 100, 120, 144, 165, 240 };
 #define REFRESH_N ((int)(sizeof refresh_hz / sizeof refresh_hz[0]))
 static int osd_refresh, display_hz;
 static void refresh_apply(void) { dc_refresh_hz = dc_front_refresh_ok ? refresh_hz[osd_refresh] : 0; }
-static const int gpu_mhz[3] = { 0, 384, 460 };   /* handheld only: see dc_nx_set_gpu_mhz */
-static int osd_gpu = 0;
+static int osd_gpu = 0;                          /* HANDHELD: 0 default, 1 faster memory, 2 faster memory and GPU (set_handheld) */
 int osd_bar;                                 /* the controls bar */
 static int osd_rumble[4] = { 2, 2, 2, 2 };   /* per port: 0 off, 1 low, 2 normal, 3 strong */
 static int osd_port;                         /* the port whose controller opened the menu (keyboard: A) */
@@ -91,7 +90,7 @@ static char osd_cfg_path[1024];
 static uint8_t osd_px[OSD_W * OSD_H_MAX * 4];
 static int osd_h;
 static float fps_now, fps_worst;
-static char fps_detail[48], fps_sound[48];
+static char fps_detail[48], fps_sound[48], fps_clocks[48];   /* fps_clocks: the Switch's clocks as they are */
 
 #ifdef __SWITCH__
 static int osd_aa = 0;                  /* anti-aliasing (MSAA samples; 0 off): costly on the Switch's GPU */
@@ -146,7 +145,8 @@ static void osd_load(void) {
         if (!strncmp(line, "fps=", 4)) osd_fps = atoi(line + 4) != 0;
         if (!strncmp(line, "boost=", 6) && atoi(line + 6)) osd_cpu = 3;    /* CPU BOOST ON, before CPU CLOCK */
         if (!strncmp(line, "cpu=", 4)) { int m = atoi(line + 4); osd_cpu = 0; for (int i = 1; i < 4; i++) if (m >= cpu_mhz[i]) osd_cpu = i; }
-        if (!strncmp(line, "gpu=", 4)) { int m = atoi(line + 4); osd_gpu = m >= 460 ? 2 : m >= 384 ? 1 : 0; }
+        if (!strncmp(line, "gpu=", 4) && atoi(line + 4) >= 384) osd_gpu = 2;      /* before HANDHELD: a GPU clock of 384 or 460 MHz */
+        if (!strncmp(line, "handheld=", 9)) { int m = atoi(line + 9); osd_gpu = m < 0 || m > 2 ? 0 : m; }
         if (!strncmp(line, "refresh=", 8)) { int m = atoi(line + 8); osd_refresh = 0; for (int i = 1; i < REFRESH_N; i++) if (m == refresh_hz[i]) osd_refresh = i; }
         if (!strncmp(line, "bar=", 4)) osd_bar = atoi(line + 4) != 0;
         if (!strncmp(line, "framerate=", 10) && dc_front_fps60 >= 0) dc_front_fps60 = atoi(line + 10) >= 60;
@@ -176,14 +176,14 @@ static void osd_load(void) {
     if (getenv("DC_PLAIN_SCALING")) dc_pvr_gl_plain_scaling = 1;   /* tests: the old linear blit to the window */
 #ifdef __SWITCH__
     if (cpu_mhz[osd_cpu]) set_cpu_clock(cpu_mhz[osd_cpu]);
-    if (gpu_mhz[osd_gpu]) set_gpu_clock(gpu_mhz[osd_gpu]);
+    if (osd_gpu) set_handheld(osd_gpu);
 #endif
 }
 static void osd_save(void) {
     if (!osd_cfg_path[0]) return;
     FILE *f = fopen(osd_cfg_path, "w");
     if (!f) return;
-    fprintf(f, "scanlines=%d\nfps=%d\nbar=%d\naa=%d\nsharpen=%d\ncpu=%d\ngpu=%d\nhalfstep=%d\n", osd_scan, osd_fps, osd_bar, osd_aa, osd_sharp, cpu_mhz[osd_cpu], gpu_mhz[osd_gpu], dc_pvr_gl_half_step);
+    fprintf(f, "scanlines=%d\nfps=%d\nbar=%d\naa=%d\nsharpen=%d\ncpu=%d\nhandheld=%d\nhalfstep=%d\n", osd_scan, osd_fps, osd_bar, osd_aa, osd_sharp, cpu_mhz[osd_cpu], osd_gpu, dc_pvr_gl_half_step);
     if (dc_front_refresh_ok) fprintf(f, "refresh=%d\n", refresh_hz[osd_refresh]);
     fprintf(f, "fastdepth=%d\n", dc_pvr_gl_fast_depth);
     if (osd_aniso >= 0) fprintf(f, "aniso=%d\n", aniso_x[osd_aniso]);
@@ -334,7 +334,7 @@ static const char *osd_label(int i, char *buf, size_t n) {
         snprintf(buf, n, "RUMBLE PAD %c  < %s >", 'A' + osd_port, rum[osd_rumble[osd_port] & 3]); return buf;
 #ifdef __SWITCH__
     case OI_FS: if (!osd_cpu) return "CPU CLOCK     < STOCK >"; snprintf(buf, n, "CPU CLOCK     < %d MHZ >", cpu_mhz[osd_cpu]); return buf;
-    case OI_GPU: if (!osd_gpu) return "GPU HANDHELD  < STOCK >"; snprintf(buf, n, "GPU HANDHELD  < %d MHZ >", gpu_mhz[osd_gpu]); return buf;
+    case OI_GPU: return osd_gpu == 2 ? "HANDHELD      < FAST RAM+GPU >" : osd_gpu ? "HANDHELD      < FAST RAM >" : "HANDHELD      < STOCK >";
 #else
     case OI_GPU: return "";
     case OI_FS: snprintf(buf, n, "FULLSCREEN    < %s >", cfg.fullscreen ? "ON" : "OFF"); return buf;
@@ -480,16 +480,17 @@ static void osd_overlays(int ww, int wh) {
         dc_pvr_gl_overlay(osd_px, OSD_W, osd_h, (ww - OSD_W * k) / 2, (wh - osd_h * k) / 2, OSD_W * k, osd_h * k, ww, wh);
     }
     if (osd_fps) {                                        /* frames a second, and where the time goes */
-        enum { FW = 140, FH = 29 };
+        enum { FW = 150, FH = 38 };
         static uint8_t px[FW * FH * 4];
         char s[32]; snprintf(s, sizeof s, "%.0f FPS  MAX %.0f MS", fps_now, fps_worst);
         memset(px, 0, sizeof px);
-        int w1 = (int)strlen(s) * 6 + 3, w2 = (int)strlen(fps_detail) * 6 + 3, w3 = (int)strlen(fps_sound) * 6 + 3;
-        int w = w1 > w2 ? w1 : w2; if (w3 > w) w = w3;
-        osd_fill(px, FW, 0, 0, w < FW ? w : FW, FH, 0x000000A0u);
+        int w1 = (int)strlen(s) * 6 + 3, w2 = (int)strlen(fps_detail) * 6 + 3, w3 = (int)strlen(fps_sound) * 6 + 3, w4 = (int)strlen(fps_clocks) * 6 + 3;
+        int w = w1 > w2 ? w1 : w2; if (w3 > w) w = w3; if (w4 > w) w = w4;
+        osd_fill(px, FW, 0, 0, w < FW ? w : FW, fps_clocks[0] ? FH : FH - 9, 0x000000A0u);
         osd_text(px, FW, FH, 2, 2, s, 0x7CFF7CFFu);
         osd_text(px, FW, FH, 2, 11, fps_detail, 0xC8D2DCFFu);
         osd_text(px, FW, FH, 2, 20, fps_sound, 0xA0AAB4FFu);
+        if (fps_clocks[0]) osd_text(px, FW, FH, 2, 29, fps_clocks, 0xA0AAB4FFu);
         int k = wh / 360; if (k < 2) k = 2;
         dc_pvr_gl_overlay(px, FW, FH, 8, 8, FW * k, FH * k, ww, wh);
     }
@@ -519,6 +520,13 @@ static void osd_count_frame(void) {
     else snprintf(fps_detail, sizeof fps_detail, "G%.0f S%.0f R%.0f P%.0f I%.0f", g < 0 ? 0 : g, a, r, p, i);
     snprintf(fps_sound, sizeof fps_sound, "S%.0f ARM%.0f DSP%.0f MIX%.0f%s", a, arm, dsp, a - arm - dsp > 0 ? a - arm - dsp : 0,
              aica_thr ? " THREAD" : "");
+#ifdef __SWITCH__
+    if (osd_fps) {                                         /* what the clocks really are: a setting is only a request */
+        int cpu = 0, gpu = 0, mem = 0;
+        dc_nx_clocks(&cpu, &gpu, &mem);
+        if (cpu | gpu | mem) snprintf(fps_clocks, sizeof fps_clocks, "CPU %d GPU %d RAM %d", cpu, gpu, mem);
+    }
+#endif
     if (cfg.stats) fprintf(stderr, "dc-core: %.1f fps, ms a frame: game %.1f, wait %.1f, render %.1f, present %.1f, idle %.1f; sound %.1f (arm %.1f, dsp %.1f)%s\n",
                            fps_now, g < 0 ? 0 : g, w, r, p, i, a, arm, dsp, aica_thr ? " on its own thread" : "");
     t0 = now; r0 = renders; d0 = drawn; a0 = dc_prof_aica; r0t = prof_render; p0 = prof_present; i0 = prof_idle; w0 = prof_wait;
@@ -710,7 +718,7 @@ static void osd_run(int port) {
             }
 #ifdef __SWITCH__
             if (sel == OI_FS) { osd_cpu = (osd_cpu + 4 + step) % 4; set_cpu_clock(cpu_mhz[osd_cpu]); osd_save(); }
-            if (sel == OI_GPU) { osd_gpu = (osd_gpu + 3 + step) % 3; set_gpu_clock(gpu_mhz[osd_gpu]); osd_save(); }
+            if (sel == OI_GPU) { osd_gpu = (osd_gpu + 3 + step) % 3; set_handheld(osd_gpu); osd_save(); }
 #else
             if (sel == OI_FS) { cfg.fullscreen = !cfg.fullscreen; SDL_SetWindowFullscreen(win, cfg.fullscreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0); }
 #endif

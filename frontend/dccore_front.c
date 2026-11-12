@@ -97,12 +97,25 @@ static void set_cpu_clock(int mhz) {
     else fprintf(stderr, "CPU clock %d MHz\n", r);
 }
 int dc_nx_set_gpu_mhz(int mhz);
+int dc_nx_set_handheld(int profile);
+void dc_nx_clocks(int *cpu, int *gpu, int *mem);
 void dc_nx_gpu_check(void);
-static void set_gpu_clock(int mhz) {
-    int r = dc_nx_set_gpu_mhz(mhz);
-    if (r == -1) fprintf(stderr, "GPU clock: Horizon OC's profile decides\n");
-    else if (r < 0) fprintf(stderr, "GPU clock: can't be set here (%d)\n", r);
-    else fprintf(stderr, "GPU clock %d MHz\n", r);
+/* HANDHELD in the menu (kept in osd.cfg): 0 the system's default, 1 faster memory, 2 faster memory and
+ * GPU -- the system's own configurations (dccore_nxthread.c dc_nx_set_handheld). Started from the album
+ * the game is an applet, which may not ask for one: the GPU's clock alone is set then, as before. */
+static void set_handheld(int profile) {
+    int r = dc_nx_set_handheld(profile);
+    if (r == -4) {
+        r = dc_nx_set_gpu_mhz(profile == 2 ? 460 : 0);
+        if (profile == 1) fprintf(stderr, "handheld: faster memory needs the game started as an application (over a game's title), not from the album\n");
+        else if (r == -1) fprintf(stderr, "handheld: Horizon OC's profile decides\n");
+        else if (r < 0) fprintf(stderr, "handheld: can't be set here (%d)\n", r);
+        else if (profile) fprintf(stderr, "handheld: GPU clock %d MHz; the memory clock needs the game started as an application\n", r);
+        return;
+    }
+    if (r == -1) fprintf(stderr, "handheld: Horizon OC's profile decides\n");
+    else if (r < 0) fprintf(stderr, "handheld: can't be set here (%d)\n", r);
+    else if (profile) fprintf(stderr, "handheld: asked for %s\n", profile == 2 ? "memory 1600 MHz and GPU 460 MHz" : "memory 1600 MHz");
 }
 #else
 /* a joystick SDL has no gamepad mapping for: buttons 0-3 = A B X Y, 7 or 9 = Start, axes 0/1 = stick,
@@ -1114,7 +1127,7 @@ void dc_front_close(void) {
     if (joy) SDL_JoystickClose(joy);
     joy = NULL;
     set_cpu_clock(0);
-    set_gpu_clock(0);
+    set_handheld(0);
 #endif
     /* the on-screen menu (and the focus pause) leave the device paused; on the Switch, closing a paused
      * device crashed SDL's audio thread (Reset / Quit from the menu): empty it and let it run first */
