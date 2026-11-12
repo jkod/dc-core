@@ -285,6 +285,8 @@ void dc_events(sh4ctx *c) {
     if (dc_aica_async.advance) { dc_aica_apply_irq(); dc_aica_async.advance(now); }   /* the sound thread */
     else dc_aica_advance(now);
     if (dc_bba_enabled) dc_bba_poll();
+    uint64_t modem_next = ~0ull;
+    if (dc_modem_enabled) dc_modem_events(now, &modem_next);
     check_irqs(c);
     /* next event: the next vblank in/out edge or TMU underflow */
     uint64_t nx = (last_vbin_field == field) ? (field + 1) * f + (uint64_t)vbin * f / lines : at_in;
@@ -302,6 +304,7 @@ void dc_events(sh4ctx *c) {
         if (t < nx) nx = t;
     }
     if (dc_bba_enabled) { uint64_t t = now + 200000; if (t < nx) nx = t; }   /* received frames: every millisecond */
+    if (modem_next < nx) nx = modem_next;
     /* while an interrupt is still pending (masked), look again soon */
     if (holly_level() || ((*tmu_reg(0, 2) | *tmu_reg(1, 2) | *tmu_reg(2, 2)) & 0x100)) { uint64_t t = now + 2000; if (t < nx) nx = t; }
     dc_next_event = nx;
@@ -553,6 +556,7 @@ static uint32_t rd(uint32_t a, int size) {
     if (m < 0x00200000u && dc_bios_rom) { uint32_t v = 0; memcpy(&v, dc_bios_rom + m, size); return v; }   /* boot ROM */
     if (m >= 0x00200000u && m < 0x00220000u) { uint32_t v = 0; memcpy(&v, dc_flash + (m & 0x1FFFF), size); return v; }
     if ((m >> 24) == 0x01 && dc_bba_enabled) return dc_bba_read(m, size);   /* expansion port: Broadband Adapter */
+    if ((m >> 20) == 0x006 && dc_modem_enabled) return dc_modem_read(m, size);   /* modem */
     warn(size == 4 ? "read32" : size == 2 ? "read16" : "read8", a);
     return 0;
 }
@@ -624,6 +628,7 @@ static void wr(uint32_t a, uint32_t v, int size) {
         return;
     }
     if ((m >> 24) == 0x01 && dc_bba_enabled) { dc_bba_write(m, v, size); return; }
+    if ((m >> 20) == 0x006 && dc_modem_enabled) { dc_modem_write(m, v, size); return; }
     warn(size == 4 ? "write32" : size == 2 ? "write16" : "write8", a);
 }
 

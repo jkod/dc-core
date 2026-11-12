@@ -427,6 +427,7 @@ int dc_bios_install(sh4ctx *c, char region) {
     if (!flash_loaded) flash_init(region);
     set_region(region);
     dc_bba_reset();
+    dc_modem_reset();
     /* the boot ROM leaves its system code in RAM (0x8C000100..0x8C008000, copied from the start of
      * the ROM). Some games checksum it: Rush 2049's menu re-enters every frame when it doesn't
      * match. The syscalls themselves stay HLE (by address), this is only the data games see. */

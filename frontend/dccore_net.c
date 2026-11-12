@@ -6,10 +6,14 @@
  * way is one Ethernet frame. The server gives the console an address by DHCP and routes it, so the
  * game's own network code does the rest.
  *
- * One thread owns the socket: it connects (when the game first sends), sends what the game queued
- * and reads what arrives, and when the connection drops it connects again after 1, 2, 4 ... 30
- * seconds. The game's thread only touches the two queues, under a mutex, and never waits for the
- * network. */
+ * The modem (dc_modem_enabled) goes to DCNet's dial-up access instead (port 7654): the PPP bytes
+ * the game sends and receives, as they are, from when the line comes up (dc_net.open) until the
+ * game hangs up (dc_net.hangup), which ends the connection so the next call starts a new session.
+ *
+ * One thread owns the socket: it connects (the adapter: when the game first sends; the modem: when
+ * the line comes up), sends what the game queued and reads what arrives, and when the connection
+ * drops it connects again after 1, 2, 4 ... 30 seconds. The game's thread only touches the two
+ * queues, under a mutex, and never waits for the network. */
 #include "dccore_front.h"
 #include "dccore/net.h"
 #include <SDL.h>
@@ -54,7 +58,8 @@ static void set_nonblock(sock_t s, int on) { int f = fcntl(s, F_GETFL, 0); fcntl
 
 typedef struct { uint16_t len; uint8_t d[FRAME_MAX]; } frame_t;
 static frame_t rxq[RXQ], txq[TXQ];
-static int rx_head, rx_tail, tx_head, tx_tail;
+static int rx_head, rx_tail, tx_head, tx_tail, rx_off;
+static int ppp;                       /* the modem's byte stream (else the adapter's frames) */
 static SDL_mutex *mx;
 static SDL_cond *wake;
 static SDL_Thread *thr;
@@ -73,9 +78,12 @@ static void set_status(const char *s) {
 static void link_send(const uint8_t *f, int n) {
     if (n <= 0 || n > FRAME_MAX) return;
     SDL_LockMutex(mx);
-    if (tx_tail - tx_head < TXQ) { frame_t *q = &txq[tx_tail % TXQ]; q->len = (uint16_t)n; memcpy(q->d, f, (size_t)n); tx_tail++; }
+    frame_t *last = tx_tail != tx_head ? &txq[(tx_tail - 1) % TXQ] : NULL;
+    if (ppp && last && last->len + n <= FRAME_MAX) {   /* the modem's bytes: into the last chunk not yet taken */
+        memcpy(last->d + last->len, f, (size_t)n); last->len = (uint16_t)(last->len + n);
+    } else if (tx_tail - tx_head < TXQ) { frame_t *q = &txq[tx_tail % TXQ]; q->len = (uint16_t)n; memcpy(q->d, f, (size_t)n); tx_tail++; }
     else tx_dropped++;
-    wanted = 1;                                   /* the first frame the game sends connects */
+    if (!ppp) wanted = 1;                         /* the first frame the adapter sends connects */
     SDL_CondSignal(wake);
     SDL_UnlockMutex(mx);
 }
@@ -85,12 +93,31 @@ static int link_recv(uint8_t *buf, int max) {
     SDL_LockMutex(mx);
     if (rx_head != rx_tail) {
         frame_t *q = &rxq[rx_head % RXQ];
-        n = q->len < max ? q->len : max;
-        memcpy(buf, q->d, (size_t)n);
-        rx_head++;
+        if (ppp) {                                /* a stream: as much as asked, the rest stays */
+            n = q->len - rx_off < max ? q->len - rx_off : max;
+            memcpy(buf, q->d + rx_off, (size_t)n);
+            rx_off += n;
+            if (rx_off == q->len) { rx_off = 0; rx_head++; }
+        } else {
+            n = q->len < max ? q->len : max;
+            memcpy(buf, q->d, (size_t)n);
+            rx_head++;
+        }
     }
     SDL_UnlockMutex(mx);
     return n;
+}
+
+static void link_open(void) {
+    SDL_LockMutex(mx); wanted = 1; SDL_CondSignal(wake); SDL_UnlockMutex(mx);
+}
+static void link_hangup(void) {
+    SDL_LockMutex(mx);
+    wanted = 0;                                   /* the thread closes the connection */
+    rx_head = rx_tail = tx_head = tx_tail = rx_off = 0;
+    SDL_CondSignal(wake);
+    SDL_UnlockMutex(mx);
+    dc_net_rx_waiting = 0;
 }
 
 /* ---------------------------------------------------------------- the socket's thread */
@@ -136,10 +163,11 @@ static int flush_tx(sock_t s) {
         if (tx_head == tx_tail) { SDL_UnlockMutex(mx); return 0; }
         frame_t *q = &txq[tx_head % TXQ];
         int n = q->len;
-        buf[0] = (uint8_t)n; buf[1] = (uint8_t)(n >> 8); memcpy(buf + 2, q->d, (size_t)n);
+        if (ppp) { memcpy(buf, q->d, (size_t)n); tx_head++; }   /* taken now: the game may not add to it */
+        else { buf[0] = (uint8_t)n; buf[1] = (uint8_t)(n >> 8); memcpy(buf + 2, q->d, (size_t)n); }
         SDL_UnlockMutex(mx);
-        if (send_all(s, buf, n + 2)) return -1;
-        SDL_LockMutex(mx); tx_head++; SDL_UnlockMutex(mx);   /* sent: only now off the queue */
+        if (send_all(s, buf, ppp ? n : n + 2)) return -1;
+        if (!ppp) { SDL_LockMutex(mx); tx_head++; SDL_UnlockMutex(mx); }   /* a frame: off the queue once sent */
     }
 }
 
@@ -170,12 +198,12 @@ static int net_thread(void *arg) {
             continue;
         }
         static const uint8_t prolog[8] = {6, 0, 'D', 'C', 'N', 'E', 'T', 1};
-        if (send_all(s, prolog, 8)) { close_sock(s); backoff = 1; continue; }
+        if (!ppp && send_all(s, prolog, 8)) { close_sock(s); backoff = 1; continue; }
         connected = 1; backoff = 0;
-        snprintf(msg, sizeof msg, "connected to DCNet (%s:%d)", host, port);
+        snprintf(msg, sizeof msg, "connected to DCNet (%s:%d)%s", host, port, ppp ? " by modem" : "");
         set_status(msg);
         int have = 0;
-        while (running) {
+        while (running && wanted) {
             if (flush_tx(s)) break;
             fd_set r; struct timeval tv = {0, 2000};          /* the queue is looked at every 2 ms */
             FD_ZERO(&r); FD_SET(s, &r);
@@ -184,6 +212,14 @@ static int net_thread(void *arg) {
             if (k == 0) continue;
             int n = (int)recv(s, (char *)in + have, (int)(sizeof in - (size_t)have), 0);
             if (n <= 0) break;
+            if (ppp) {                                         /* bytes as they come */
+                SDL_LockMutex(mx);
+                if (wanted && rx_tail - rx_head < RXQ) { frame_t *q = &rxq[rx_tail % RXQ]; q->len = (uint16_t)n; memcpy(q->d, in, (size_t)n); rx_tail++; }
+                else if (wanted) rx_dropped++;
+                SDL_UnlockMutex(mx);
+                dc_net_rx_waiting = 1;
+                continue;
+            }
             have += n;
             int at = 0, bad = 0;
             while (have - at >= 2) {
@@ -202,7 +238,13 @@ static int net_thread(void *arg) {
         }
         close_sock(s);
         connected = 0;
-        if (running) { backoff = 1; set_status("connection lost; connecting again"); }
+        if (running && !wanted) set_status("hung up");
+        else if (running && ppp) {                    /* the modem loses its carrier; the game calls again */
+            SDL_LockMutex(mx); wanted = 0; SDL_UnlockMutex(mx);
+            dc_net_carrier_lost = 1;
+            set_status("connection lost (the game hangs up)");
+        }
+        else if (running) { backoff = 1; set_status("connection lost; connecting again"); }
     }
     return 0;
 }
@@ -218,10 +260,11 @@ int dc_front_net_start(const char *server, int server_port) {
     socketInitializeDefault();
 #endif
     snprintf(host, sizeof host, "%s", server && *server ? server : "dcnet.flyca.st");
-    port = server_port > 0 ? server_port : 7655;
+    ppp = dc_modem_enabled && !dc_bba_enabled;
+    port = server_port > 0 ? server_port : ppp ? 7654 : 7655;
     mx = SDL_CreateMutex(); wake = SDL_CreateCond();
-    rx_head = rx_tail = tx_head = tx_tail = 0;
-    dc_net.send = link_send; dc_net.recv = link_recv;
+    rx_head = rx_tail = tx_head = tx_tail = rx_off = 0;
+    dc_net.send = link_send; dc_net.recv = link_recv; dc_net.open = link_open; dc_net.hangup = link_hangup;
     running = 1; wanted = 0;
     snprintf(status, sizeof status, "waiting for the game to go online (%s)", host);
     thr = SDL_CreateThread(net_thread, "dcnet", NULL);
@@ -234,7 +277,7 @@ void dc_front_net_stop(void) {
     SDL_LockMutex(mx); running = 0; SDL_CondSignal(wake); SDL_UnlockMutex(mx);
     /* a connect or a select in progress ends within its timeout */
     SDL_WaitThread(thr, NULL); thr = NULL;
-    dc_net.send = NULL; dc_net.recv = NULL;
+    dc_net.send = NULL; dc_net.recv = NULL; dc_net.open = NULL; dc_net.hangup = NULL;
     if (tx_dropped || rx_dropped) fprintf(stderr, "online: %llu frames not sent, %llu not received (queues full)\n",
                                           (unsigned long long)tx_dropped, (unsigned long long)rx_dropped);
 #ifdef __SWITCH__

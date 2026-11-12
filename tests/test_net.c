@@ -23,6 +23,7 @@ static int read_n(int s, uint8_t *p, int n) { while (n > 0) { int k = (int)recv(
 
 /* the server: per connection, check the prolog, then answer each frame with its bytes + 1 */
 static int sessions, prolog_ok, frames_seen;
+static volatile int ppp_bytes, ppp_closed;
 static int server(void *arg) {
     (void)arg;
     for (int conn = 0; conn < 2; conn++) {
@@ -42,6 +43,20 @@ static int server(void *arg) {
         }
         close(s);                                     /* the first connection drops after one frame */
     }
+    /* the modem: raw bytes, no prolog; echoed + 1 until the client hangs up */
+    int s = accept(lsock, NULL, NULL);
+    if (s < 0) return 0;
+    sessions++;
+    uint8_t b[256];
+    for (;;) {
+        int n = (int)recv(s, b, sizeof b, 0);
+        if (n <= 0) break;
+        ppp_bytes += n;
+        for (int k = 0; k < n; k++) b[k]++;
+        send(s, b, (size_t)n, 0);
+    }
+    ppp_closed = 1;
+    close(s);
     return 0;
 }
 
@@ -82,6 +97,26 @@ int main(void) {
     dc_front_net_status(status, sizeof status);
     printf("status: %s\n", status);
 
+    dc_front_net_stop();
+
+    /* the modem: nothing connects until the line is up; bytes as a stream */
+    dc_modem_enabled = 1;
+    CHECK(dc_front_net_start("127.0.0.1", lport) == 0);
+    dc_net.send((const uint8_t *)"\x7E\xFF", 2);       /* before the line is up: kept, no connection */
+    SDL_Delay(100);
+    CHECK(sessions == 2);
+    dc_net.open();
+    dc_net.send((const uint8_t *)"\x03\xC0", 2);
+    uint8_t got[8]; int ngot = 0;
+    for (int t = 0; t < 300 && ngot < 4; t++) {
+        if (dc_net_rx_waiting) { int k = dc_net.recv(got + ngot, 1); if (k) ngot += k; else dc_net_rx_waiting = 0; }
+        else SDL_Delay(10);
+    }
+    CHECK(ngot == 4 && !memcmp(got, "\x7F\x00\x04\xC1", 4));
+    CHECK(sessions == 3 && ppp_bytes == 4);
+    dc_net.hangup();
+    for (int t = 0; t < 100 && !ppp_closed; t++) SDL_Delay(10);
+    CHECK(ppp_closed);
     dc_front_net_stop();
     SDL_WaitThread(st, NULL);
     close(lsock);

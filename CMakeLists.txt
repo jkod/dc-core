@@ -4,7 +4,7 @@ project(dc_core C)
 set(CMAKE_C_STANDARD 11)
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
-add_library(dccore STATIC runtime/src/dispatch.c runtime/src/disc.c runtime/src/bios_hle.c runtime/src/hw.c runtime/src/ta.c runtime/src/arm7.c runtime/src/aica.c runtime/src/coro.c runtime/src/pvr_sw.c runtime/src/maple.c runtime/src/pvr_gl.c runtime/src/texpack.c runtime/src/interp.c runtime/src/crt.c runtime/src/reset.c runtime/src/bba.c)
+add_library(dccore STATIC runtime/src/dispatch.c runtime/src/disc.c runtime/src/bios_hle.c runtime/src/hw.c runtime/src/ta.c runtime/src/arm7.c runtime/src/aica.c runtime/src/coro.c runtime/src/pvr_sw.c runtime/src/maple.c runtime/src/pvr_gl.c runtime/src/texpack.c runtime/src/interp.c runtime/src/crt.c runtime/src/reset.c runtime/src/bba.c runtime/src/modem.c)
 target_include_directories(dccore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/runtime/include)
 # Windows CE games (dccore/wince.h): the loader and native COREDLL calls
 add_library(dccore_wince STATIC runtime/src/wince/ce_kernel.c runtime/src/wince/ce_loader.c runtime/src/wince/ce_api.c
@@ -264,7 +264,7 @@ endfunction()
 option(DCCORE_TESTS "Build the dc-core tests" OFF)
 if(DCCORE_TESTS)
   enable_testing()
-  foreach(t runtime pvr_sw disc cdda bba)
+  foreach(t runtime pvr_sw disc cdda bba modem)
     add_executable(test_${t} tests/test_${t}.c)
     target_link_libraries(test_${t} PRIVATE dccore)
     add_test(NAME ${t} COMMAND test_${t})
