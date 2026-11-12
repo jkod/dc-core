@@ -41,4 +41,5 @@ void pvr_snap_lists(pvr_frame *f);
 typedef struct { int w, h; const uint32_t *px; uint64_t id; } pvr_texinfo;
 void pvr_get_texture(uint32_t tcw, uint32_t tsp, pvr_texinfo *t);
 float pvr_fog_alpha(float invw);       /* FOG_TABLE lookup for a 1/w value */
+extern unsigned long pvr_sink_vertices; /* vertices that came through the TA's sink, not straight from the fast code (sh4.h dc_fpref) */
 #endif

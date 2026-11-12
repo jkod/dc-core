@@ -4,6 +4,7 @@
 #include "ce_int.h"
 #include "dccore/aica.h"
 #include "dccore/hw.h"
+#include "dccore/ta.h"
 #include "dccore/disc.h"
 #include "dccore/bios.h"
 #include <stdarg.h>
@@ -655,7 +656,7 @@ FN(KernelIoControl) {         /* (code, in, insize, out, outsize, &ret) */
 }
 FN(SetStoreQueueBase) {      /* the store queue area 0xE0000000.. writes to this physical address on */
     TRACE("SetStoreQueueBase %08X", ARG(0));
-    dc_sq_base = 0xA0000000u | (ARG(0) & 0x1FFFFFFFu);
+    dc_sq_base = 0xA0000000u | (ARG(0) & 0x1FFFFFFFu); dc_ta_fast_off();
     /* DDHAL addresses its buffers in the drivers' reserved RAM as this value + (physical - 0x0C000000):
      * that VA range is the reserved RAM */
     dc_hw_map(0xE0000000u + (CE_DRVMEM_PHYS - 0x0C000000u), 0xAC000000u | (CE_DRVMEM_PHYS & 0x00FFFFFFu), CE_DRVMEM_LEN);

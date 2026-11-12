@@ -15,6 +15,10 @@ void dc_ta_set_sink(dc_ta_sink s);
 void dc_ta_reset(void);                       /* TA_LIST_INIT */
 void dc_ta_write32(const uint32_t blk[8]);    /* one 32-byte block */
 void dc_ta_write(const uint8_t *p, uint32_t len);
+/* sh4.h dc_fpref: no more vertices straight from the fast code until the list's code allows them again.
+ * For whatever changes where a store queue is sent or what the TA takes its next 32 bytes for. */
+void dc_ta_fast_off(void);
+uint32_t dc_sq_ta_tag(void);                  /* hw.c: a >> 23 of the queue addresses that go to the TA's FIFO, unobserved (0: none) */
 #ifdef __cplusplus
 }
 #endif

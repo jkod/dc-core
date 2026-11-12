@@ -382,6 +382,18 @@ static void sq_flush(uint32_t a) {
     for (int i = 0; i < 8; i++) dc_wr32(dst + i * 4, sq[n][i]);
 }
 void dc_hw_pref(uint32_t a) { if ((a >> 26) == 0x38) sq_flush(a); }   /* 0xE0000000..0xE3FFFFFF */
+/* sh4.h dc_fpref: the 8 MB of queue addresses (as a >> 23) for which all sq_flush does is
+ * dc_ta_write32 -- sent to the start of the TA's area, its polygon FIFO, with nothing listening in.
+ * With QACR0/1 both at area 4 that is 0xE0000000..; with a base through the MMU, wherever the
+ * FIFO lies from it (Sega Rally 2: base 0x0E000000, so 0xE2000000..). 0: there is none. */
+uint32_t dc_sq_ta_tag(void) {
+    if (dc_hw.on_sq) return 0;
+    if (dc_sq_base) {
+        uint32_t d = 0x10000000u - (dc_sq_base & 0x1FFFFFFFu);
+        return d < 0x04000000u && !(d & 0x007FFFFFu) ? 0x1C0u | (d >> 23) : 0;
+    }
+    return (QACR0 & 0x1C) == 0x10 && (QACR1 & 0x1C) == 0x10 ? 0x1C0u : 0;
+}
 /* a 32-bit store to 0xE0000000..0xE3FFFFFF from the fast code (sh4.h: dc_fwr32) */
 void dc_sq_wr32(uint32_t a, uint32_t v) {
     if (dc_sq_direct) sq[(a >> 5) & 1][(a >> 2) & 7] = v; else dc_mem_wr32(a, v);
@@ -566,6 +578,7 @@ static void wr(uint32_t a, uint32_t v, int size) {
         if (size == 4) *r = v; else if (size == 2) { int sh = (a & 2) * 8; *r = (*r & ~(0xFFFFu << sh)) | ((v & 0xFFFF) << sh); }
         else { int sh = (a & 3) * 8; *r = (*r & ~(0xFFu << sh)) | ((v & 0xFF) << sh); }
         if ((a & 0xFFFFFF00u) == 0xFFA00000u) dmac_check();
+        if ((a & 0xFFFFFFF8u) == 0xFF000038u) dc_ta_fast_off();              /* QACR0/1: where the store queues go */
         return;
     }
     uint32_t m = a & 0x1FFFFFFFu;
@@ -614,8 +627,10 @@ static void wr(uint32_t a, uint32_t v, int size) {
 static struct { uint32_t va, len, to; } maps[MAX_MAPS];
 static int nmaps, map_last;
 void dc_hw_map(uint32_t va, uint32_t to, uint32_t len) {
-    for (int i = 0; i < nmaps; i++) if (maps[i].va == va) { if (len) { maps[i].len = len; maps[i].to = to; } else maps[i] = maps[--nmaps]; map_last = 0; return; }
-    if (len && nmaps < MAX_MAPS) { maps[nmaps].va = va; maps[nmaps].len = len; maps[nmaps].to = to; nmaps++; }
+    int i = 0;
+    while (i < nmaps && maps[i].va != va) i++;
+    if (i < nmaps) { if (len) { maps[i].len = len; maps[i].to = to; } else maps[i] = maps[--nmaps]; }
+    else if (len && nmaps < MAX_MAPS) { maps[nmaps].va = va; maps[nmaps].len = len; maps[nmaps].to = to; nmaps++; }
     sq_direct_update();
     map_last = 0;
 }
@@ -641,13 +656,20 @@ uint32_t dc_sb_reg(uint32_t addr) { return SBR(addr & 0xFFFC); }
 #define MEM_RD(T, n) T dc_mem_rd##n(uint32_t a) { if (DC_IS_URAM(a)) { T v; memcpy(&v, dc_uram + DC_URAM_OFS(a), sizeof v); return v; } if (DC_IS_RAM(a)) { T v; memcpy(&v, dc_ram + DC_RAM_OFS(a), sizeof v); return v; } return dc_hw_rd##n(a); }
 /* a 32-bit store into a store queue (how games send every vertex to the tile accelerator) first: it went
  * through three more calls to end in the same line of wr() */
-static void sq_direct_update(void) { dc_sq_direct = !nmaps && !user_ops.wr32; }
-#define MEM_WR(T, n) void dc_mem_wr##n(uint32_t a, T v) { if (n == 32 && (a >> 26) == 0x38 && !nmaps && !user_ops.wr32) { sq[(a >> 5) & 1][(a >> 2) & 7] = (uint32_t)v; return; } if (DC_IS_URAM(a)) { memcpy(dc_uram + DC_URAM_OFS(a), &v, sizeof v); return; } if (DC_IS_RAM(a)) { memcpy(dc_ram + DC_RAM_OFS(a), &v, sizeof v); return; } dc_hw_wr##n(a, v); }
+/* direct: no window lies over the queues' addresses (Windows CE maps hardware into windows, a game of
+ * its every vertex then went through the windows' list eight times) and no user handler takes stores */
+static void sq_direct_update(void) {
+    int over = 0;
+    for (int i = 0; i < nmaps; i++) if (maps[i].va < 0xE4000000u && (uint64_t)maps[i].va + maps[i].len > 0xE0000000u) over = 1;
+    dc_sq_direct = !over && !user_ops.wr32;
+}
+#define MEM_WR(T, n) void dc_mem_wr##n(uint32_t a, T v) { if (n == 32 && (a >> 26) == 0x38 && dc_sq_direct) { sq[(a >> 5) & 1][(a >> 2) & 7] = (uint32_t)v; return; } if (DC_IS_URAM(a)) { memcpy(dc_uram + DC_URAM_OFS(a), &v, sizeof v); return; } if (DC_IS_RAM(a)) { memcpy(dc_ram + DC_RAM_OFS(a), &v, sizeof v); return; } dc_hw_wr##n(a, v); }
 MEM_RD(uint8_t, 8) MEM_RD(uint16_t, 16) MEM_RD(uint32_t, 32)
 MEM_WR(uint8_t, 8) MEM_WR(uint16_t, 16) MEM_WR(uint32_t, 32)
 
 /* ------------------------------------------------------------------ reset in place (reset.h) */
 void dc_hw_state(dc_state_fn f) {
+    dc_ta_fast_off();
     tmu_power_on();                        /* done once: its counters' power-on values go into the copy */
     f(pvr, sizeof pvr); f(sb, sizeof sb); f(p4, sizeof p4); f(sq, sizeof sq); f(ocram, sizeof ocram);
     f(ta_blk, sizeof ta_blk); f(&ta_nb, sizeof ta_nb);

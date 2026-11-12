@@ -231,6 +231,46 @@ t("t_addc_chain", {0: [0x0008, 0x312E, 0xE300, 0x333E, 0x0429, 0x000B, 0x0009]},
 t("store_queue_pref", {0: [0xE00C, 0x2502, 0xE111, 0x2412, 0xE122, 0x1411, 0x0483, 0x000B, 0x0009]},
   "c.r[4] = 0xE0200000u; c.r[5] = 0xFF000038u;", "dc_rd32(0x8C200000u) == 17 && dc_rd32(0x8C200004u) == 34")
 
+# Vertices to the tile accelerator: blocks of 32 bytes copied from a table into a store queue and sent off
+# with PREF -- a polygon header, a strip of three, a second header, a strip of four, the end of the list.
+# In the fast code the vertices after each strip's first are put into the list inline (sh4.h dc_fpref):
+# the list must come out the same either way, and the end of the list still raise its interrupt bit.
+#   loop: 8 x (mov.l @r5+,r0 ; mov.l r0,@(4k,r4)) ; pref @r4 ; dt r6 ; bf loop ; rts ; nop
+ta_prog = [w for k in range(8) for w in (0x6056, 0x1400 | k)] + [0x0483, 0x4610, 0x8BEC, 0x000B, 0x0009]
+def _ta_blocks():
+    f = lambda x: struct.unpack("<I", struct.pack("<f", x))[0]
+    hdr = [0x80000000, 0, 0, 0, 0, 0, 0, 0]
+    vtx = lambda k, last: [0xF0000000 if last else 0xE0000000, f(10.0 * k), f(20.0 + k), f(0.5), 0, 0, 0xFF102030 + k, 0]
+    return [hdr] + [vtx(k, k == 3) for k in (1, 2, 3)] + [hdr] + [vtx(k, k == 7) for k in (4, 5, 6, 7)] + [[0] * 8]
+_ta_set = "".join("dc_wr32(0x%08Xu, 0x%08Xu); " % (0x8C200000 + 4 * i, w) for i, w in enumerate(sum(_ta_blocks(), [])))
+t("ta_vertices_pref", {0: ta_prog},
+  "dc_pvr_sw_install(); dc_wr32(0xFF000038u, 0x10); dc_wr32(0xFF00003Cu, 0x10); dc_wr32(0xA05F8144u, 0x80000000u); "
+  + _ta_set + "c.r[4] = 0xE0000000u; c.r[5] = 0x8C200000u; c.r[6] = %d;" % len(_ta_blocks()),
+  "ta_ok()")
+# the same with the queues sent through a base (Windows CE's SetStoreQueueBase, as Sega Rally 2 sets it):
+# the FIFO is then at 0xE2000000
+t("ta_vertices_pref_base", {0: ta_prog},
+  "dc_pvr_sw_install(); dc_sq_base = 0xAE000000u; dc_wr32(0xA05F8144u, 0x80000000u); "
+  + _ta_set + "c.r[4] = 0xE2000000u; c.r[5] = 0x8C200000u; c.r[6] = %d;" % len(_ta_blocks()),
+  "ta_ok()")
+_ta_top = r"""
+#include "%s/runtime/src/pvr_int.h"
+#include "dccore/hw.h"
+void dc_pvr_sw_install(void);
+static int ta_ok(void) {
+  pvr_frame f; pvr_get_frame(&f);
+  if (f.nverts != 7 || f.npolys != 2) { printf("verts %%d polys %%d\n", f.nverts, f.npolys); return 0; }
+  if (f.polys[0].n != 3 || f.polys[1].n != 4 || f.polys[1].first != 3) return 0;
+  for (int i = 0; i < 7; i++) {
+    const pvr_vtx *v = &f.verts[i];
+    if (v->x != 10.f * (i + 1) || v->y != 21.f + i || v->z != 0.5f) { printf("vertex %%d: %%g %%g %%g\n", i, v->x, v->y, v->z); return 0; }
+    if (v->c[2] != (0x30 + i + 1) / 255.f) { printf("vertex %%d: blue %%g\n", i, v->c[2]); return 0; }
+  }
+  return (dc_rd32(0xA05F6900u) & 0x80u) != 0;       /* ISTNRM: opaque list complete */
+}
+""" % ROOT.replace("\\", "/")
+TOP = {"ta_vertices_pref": _ta_top, "ta_vertices_pref_base": _ta_top}
+
 FUNCS = {"found_funcs": ["8c010000 8c010014"]}
 
 def _found_recomp(gen):
@@ -283,6 +323,7 @@ def prepare(tmp, name, prog, setup, check):
 #include <string.h>
 #include <stdlib.h>
 extern int dc_alias_verbose;
+%s
 static int file_has(const char *path, const char *s) {
   char line[256]; int hit = 0; FILE *f = fopen(path, "r");
   if (!f) return 0;
@@ -298,7 +339,7 @@ int main(void) {
   printf("r0=%%08X r1=%%08X r2=%%08X t=%%u\\n", c.r[0], c.r[1], c.r[2], c.t);
   return 1;
 }
-""" % (os.path.join(d, "t.bin").replace("\\", "/"), setup, check)
+""" % (TOP.get(name, ""), os.path.join(d, "t.bin").replace("\\", "/"), setup, check)
     open(os.path.join(d, "main.c"), "w").write(main_c)
     return d
 

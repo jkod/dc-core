@@ -13,6 +13,7 @@
 #include "dccore/pvr.h"
 #include "dccore/hw.h"
 #include "dccore/ta.h"
+#include "dccore/sh4.h"          /* dc_ta_fast */
 #include "pvr_int.h"
 #include <math.h>
 #include <stdlib.h>
@@ -303,6 +304,19 @@ static void tex_note(ctx_t *c, uint32_t tcw, uint32_t tsp) {
     if (c->ntex == c->cap_tex) { c->cap_tex = c->cap_tex ? c->cap_tex * 2 : 256; c->tex = realloc(c->tex, (size_t)c->cap_tex * 8); }
     c->tex[c->ntex * 2] = tcw; c->tex[c->ntex * 2 + 1] = tsp; c->ntex++;
 }
+/* A vertex of 32 bytes went into the list, and all the next ones of its strip need is their place
+ * behind it: the fast code puts them there itself (sh4.h dc_fpref) until the TA is sent anything else
+ * (ta.c turns this off before it looks at a block). DC_TA_FAST=0: every vertex through here. */
+static void ta_fast_on(ctx_t *c, int list) {
+    static int off = -1;
+    if (off < 0) { const char *e = getenv("DC_TA_FAST"); off = e && *e == '0'; }
+    uint32_t tag = off ? 0 : dc_sq_ta_tag();
+    if (!tag) return;
+    dc_ta_fast.tag = tag; dc_ta_fast.raw = c->raw; dc_ta_fast.n = &c->nraw;
+    dc_ta_fast.rec = 7u | ((uint32_t)(list + 1) & 0xFF) << 8 | 8u << 16;
+    dc_ta_fast.limit = c->cap_raw - 9;
+}
+unsigned long pvr_sink_vertices;
 static void sink(int kind, int list, const uint32_t *w, int words) {
     if (kind == -1) { list_init(); return; }           /* TA_LIST_INIT */
     if (kind != 7 && kind != 4 && kind != 5 && kind != 1) return;
@@ -313,10 +327,12 @@ static void sink(int kind, int list, const uint32_t *w, int words) {
     if (words == 8) memcpy(r + 1, w, 32); else memcpy(r + 1, w, (size_t)words * 4);
     c->nraw += 1 + words;
     if (kind == 7) {                                   /* the first vertex after a header: its polygons exist */
+        pvr_sink_vertices++;
         if (!col.noted && col.pcw && list != 1 && list != 3) {
             col.noted = 1;
             if (col.tex) { tex_note(c, col.tcw, col.tsp); if (col.two) tex_note(c, col.tcw1, col.tsp1); }
         }
+        if (words == 8) ta_fast_on(c, list);
         return;
     }
     if (kind == 4) {                                   /* as parse_rec reads a header, for what col keeps */

@@ -21,9 +21,14 @@ static struct {
 } ta;
 
 static dc_ta_sink sink;
-void dc_ta_set_sink(dc_ta_sink s) { sink = s; }
+/* sh4.h dc_fpref */
+static int fast_none;
+dc_ta_fast_t dc_ta_fast = { NULL, &fast_none, -1, 0, 0xFFFFFFFFu };
+void dc_ta_fast_off(void) { dc_ta_fast.limit = -1; }
 
-void dc_ta_reset(void) { ta.list = -1; ta.pending = 0; ta.vtx64 = 0; if (sink) sink(-1, -1, NULL, 0); }   /* -1: TA_LIST_INIT */
+void dc_ta_set_sink(dc_ta_sink s) { sink = s; dc_ta_fast_off(); }
+
+void dc_ta_reset(void) { dc_ta_fast_off(); ta.list = -1; ta.pending = 0; ta.vtx64 = 0; if (sink) sink(-1, -1, NULL, 0); }   /* -1: TA_LIST_INIT */
 
 /* polygon global parameter size and vertex size from the parameter control word */
 static void poly_format(uint32_t pcw, int *hdr64, int *vtx64) {
@@ -41,6 +46,7 @@ static void poly_format(uint32_t pcw, int *hdr64, int *vtx64) {
 static void emit(int kind, const uint32_t *p, int words) { if (sink) sink(kind, ta.list, p, words); }
 
 void dc_ta_write32(const uint32_t blk[8]) {
+    dc_ta_fast_off();                       /* whatever this is: the sink says when plain vertices may follow */
     if (ta.pending) {                       /* second half of a 64-byte parameter */
         memcpy(ta.buf + 8, blk, 32);
         ta.pending = 0;
@@ -86,4 +92,4 @@ void dc_ta_write(const uint8_t *p, uint32_t len) {
 }
 
 #include "dccore/reset.h"
-void dc_ta_state(dc_state_fn f) { f(&ta, sizeof ta); }
+void dc_ta_state(dc_state_fn f) { dc_ta_fast_off(); f(&ta, sizeof ta); }

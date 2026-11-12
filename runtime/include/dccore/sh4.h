@@ -134,6 +134,14 @@ DC_FORCE_INLINE void dc_wr32(uint32_t a, uint32_t v) { if (DC_LIKELY(dc_is_ram_(
 #else
 #define DC_ALWAYS_INLINE static inline
 #endif
+/* The full version of a function in the fast code (fs_): only entered where the fast one (f_) has no
+ * label or was built for another FP mode. Cold: kept small, and all of them together away from the
+ * fast versions, which then lie twice as dense -- fewer pages and cache lines of code in use. */
+#if defined(__GNUC__) || defined(__clang__)
+#define DC_COLD __attribute__((cold))
+#else
+#define DC_COLD
+#endif
 DC_ALWAYS_INLINE uint8_t  dc_frd8 (const uint8_t *ram, uint32_t a) { if (DC_LIKELY(dc_is_ram_(a))) { DC_RWATCHED(a, 1); return ram[DC_RAM_OFS(a)]; } DC_URAM_INLINE_RD(a, uint8_t) return dc_mem_rd8(a); }
 DC_ALWAYS_INLINE uint16_t dc_frd16(const uint8_t *ram, uint32_t a) { if (DC_LIKELY(dc_is_ram_(a))) { uint16_t v; DC_RWATCHED(a, 2); memcpy(&v, ram + DC_RAM_OFS(a), 2); return v; } DC_URAM_INLINE_RD(a, uint16_t) return dc_mem_rd16(a); }
 DC_ALWAYS_INLINE uint32_t dc_frd32(const uint8_t *ram, uint32_t a) { if (DC_LIKELY(dc_is_ram_(a))) { uint32_t v; DC_RWATCHED(a, 4); memcpy(&v, ram + DC_RAM_OFS(a), 4); return v; } DC_URAM_INLINE_RD(a, uint32_t) return dc_mem_rd32(a); }
@@ -150,6 +158,29 @@ DC_ALWAYS_INLINE void dc_fwr32(uint8_t *ram, uint32_t a, uint32_t v) { if (DC_LI
 DC_ALWAYS_INLINE void dc_fwr32_sq(uint8_t *ram, uint32_t a, uint32_t v) {
     if (DC_LIKELY((a >> 26) == 0x38) && DC_LIKELY(dc_sq_direct)) { ((uint32_t *)dc_sq)[(a >> 2) & 15] = v; return; }
     dc_fwr32(ram, a, v);
+}
+/* PREF from the fast code. Nearly all a game sends the tile accelerator is vertices of 32 bytes, each
+ * sent off with a PREF: through dc_hw_pref that is a call with two more behind it, and around a call
+ * the compiler keeps the function's registers on the stack. Such a vertex is copied here to where the
+ * TA's list is collected (pvr_sw.c), with no call. limit: the most words the list may hold for that,
+ * -1 for "not now" -- which anything that changes where a store queue goes or what the TA expects
+ * next sets (dc_ta_fast_off: hw.c, ta.c), and only the list's own code takes back (pvr_sw.c). tag: the
+ * top nine bits of the queue addresses that are sent to the first 8 MB of the TA's area, its polygon
+ * FIFO (hw.c dc_sq_ta_tag: 0xE0000000.. with QACR, elsewhere with Windows CE's queue base). */
+typedef struct { uint32_t *raw; int *n; int limit; uint32_t rec, tag; } dc_ta_fast_t;
+extern dc_ta_fast_t dc_ta_fast;
+DC_ALWAYS_INLINE void dc_fpref(uint32_t a) {
+    if (DC_LIKELY((a >> 23) == dc_ta_fast.tag)) {
+        const uint32_t *q = dc_sq[(a >> 5) & 1];
+        int *pn = dc_ta_fast.n, n = *pn;
+        if (DC_LIKELY(n <= dc_ta_fast.limit) && DC_LIKELY((q[0] >> 29) == 7u)) {
+            uint32_t *w = dc_ta_fast.raw + n;
+            w[0] = dc_ta_fast.rec; memcpy(w + 1, q, 32);
+            *pn = n + 9;
+            return;
+        }
+    }
+    dc_hw_pref(a);
 }
 
 DC_FORCE_INLINE float dc_rdf(uint32_t a) { uint32_t u = dc_rd32(a); float f; memcpy(&f, &u, 4); return f; }

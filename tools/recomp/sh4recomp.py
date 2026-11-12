@@ -106,7 +106,7 @@ def localize_fp(lines):
     decl = "  float %s;" % ", ".join("f_%d = c->fr.f[%d]" % (n, n) for n in used)
     return out, flush, reload, decl
 
-_pref_re = re.compile(r"\bdc_hw_pref\(r_(\d+)\)")
+_pref_re = re.compile(r"\bdc_(?:hw_pref|fpref)\(r_(\d+)\)")
 def _sq_stores(lines):
     """Stores that go to a store queue get its test first (sh4.h: dc_fwr32_sq): a queue is sent off with
     PREF @Rn, so the 32-bit stores through Rn that lead up to one -- back to where Rn is set to something
@@ -127,7 +127,7 @@ def _sq_stores(lines):
                 if j < k and setr.search(t) and not step.search(t):
                     break
 
-def localize_regs(lines, fp=False, fast_mem=False, t_local=True, sq_stores=True):
+def localize_regs(lines, fp=False, fast_mem=False, t_local=True, sq_stores=True, fast_pref=True):
     fpl = localize_fp(lines) if fp else None
     fflush = freload = ""
     if fpl:
@@ -174,6 +174,8 @@ def localize_regs(lines, fp=False, fast_mem=False, t_local=True, sq_stores=True)
     if fast_mem:
         body, nmem = re.subn(r"\bdc_(rd|wr)(8|16|32)\(", r"dc_f\1\2(ram_, ", body)
         mem = nmem > 0
+        if fast_pref:                                   # a vertex sent to the TA without a call (sh4.h: dc_fpref)
+            body = re.sub(r"\bdc_hw_pref\(", "dc_fpref(", body)
     lines = body.split("\n")
     if fast_mem and sq_stores:
         _sq_stores(lines)
@@ -216,7 +218,10 @@ class Translator:
         self.fp_locals = True        # FP registers as locals in the fast version (localize_fp; --no-fp-locals)
         self.t_local = True          # the T flag as a local in the fast version (--no-t-local)
         self.sq_stores = True        # stores before a PREF test for a store queue first (--no-sq-stores)
+        self.fast_pref = True        # PREF with the TA's vertices inline (--no-fast-pref)
         self.fs_trace = False        # --fs-trace: dc_fs_trace() wherever the fast version hands over to the full one
+        self.giant = 24576           # --giant-insns: functions longer than this get no fast version
+        self.giants = []
         self.fast_mem = True         # the fast version's memory accesses inline, RAM's base a local (--no-fast-mem)
         self._fpmode = None
         self.extra_entries = set()   # mid-function entries seen at run time (--entries FILE)
@@ -540,7 +545,13 @@ class Translator:
             self.sparse_labels = self.local_regs = False
             self._emit_function(start, end, known, out)
             self.sparse_labels, self.local_regs = sp, lr
-            out[first] = out[first].replace("uint32_t f_", "static uint32_t fs_", 1)
+            if self.giant and (end - start) // 2 > self.giant:
+                # a giant (Sega Rally 2 has one of 32,000 instructions that sets tables up): its fast
+                # version, with fifty locals live across a thousand labels, takes the C compiler
+                # gigabytes and minutes for code that runs once. The full version is all it gets.
+                self.giants.append((start, (end - start) // 2))
+                return
+            out[first] = out[first].replace("uint32_t f_", "DC_COLD static uint32_t fs_", 1)
         first = len(out)
         self._fpmode = self.fp_modes(start, end) if self.sparse_labels and self.fp_mode else None
         self._emit_function(start, end, known, out)
@@ -548,7 +559,7 @@ class Translator:
         if self.local_regs:
             out[first:] = localize_regs(out[first:], fp=self.fp_mode and self.sparse_labels and self.fp_locals,
                                         fast_mem=self.sparse_labels and self.fast_mem,
-                                        t_local=self.t_local, sq_stores=self.sq_stores)
+                                        t_local=self.t_local, sq_stores=self.sq_stores, fast_pref=self.fast_pref)
 
     # FP mode (--fp-mode, with --sparse-labels). Every FP instruction tested FPSCR.PR (single or double)
     # or FPSCR.SZ (32- or 64-bit moves) at run time. Games keep both 0 nearly everywhere and flip SZ
@@ -1138,6 +1149,9 @@ def main():
     ap.add_argument("--no-fp-locals", action="store_true", help="FP registers stay in the context (see localize_fp)")
     ap.add_argument("--no-t-local", action="store_true", help="the T flag stays in the context (see localize_regs)")
     ap.add_argument("--no-sq-stores", action="store_true", help="no store-queue-first stores (see _sq_stores)")
+    ap.add_argument("--no-fast-pref", action="store_true", help="PREF always through dc_hw_pref (sh4.h: dc_fpref)")
+    ap.add_argument("--giant-insns", type=lambda x: int(x, 0), default=int(os.environ.get("DCCORE_GIANT_INSNS", "24576"), 0),
+                    help="with --sparse-labels: functions of more instructions than this get no fast version (0: all do)")
     ap.add_argument("--no-fp-mode", action="store_true", help="FP instructions test FPSCR.PR/SZ at run time everywhere (see fp_modes)")
     ap.add_argument("--entries", help="file of mid-function entry addresses (hex, one a line) that keep their label")
     ap.add_argument("--no-idle-loops", action="store_true", help="no DC_IDLE in poll loops (time doesn't jump ahead there)")
@@ -1157,7 +1171,9 @@ def main():
     tr.fp_locals = not args.no_fp_locals and os.environ.get("DCCORE_FP_LOCALS", "1") != "0"
     tr.t_local = not args.no_t_local and os.environ.get("DCCORE_T_LOCAL", "1") != "0"
     tr.sq_stores = not args.no_sq_stores and os.environ.get("DCCORE_SQ_STORES", "1") != "0"
+    tr.fast_pref = not args.no_fast_pref and os.environ.get("DCCORE_FAST_PREF", "1") != "0"
     tr.fs_trace = args.fs_trace or os.environ.get("DCCORE_FS_TRACE", "0") == "1"
+    tr.giant = args.giant_insns
     tr.fast_mem = not args.no_fast_mem and os.environ.get("DCCORE_FAST_MEM", "1") != "0"
     entries = args.entries or os.environ.get("DCCORE_ENTRIES")
     if entries and os.path.exists(entries):
@@ -1253,6 +1269,7 @@ def main():
     tp = os.path.join(args.out, "recomp_table.c"); text = "\n".join(tab) + "\n"
     if not (os.path.exists(tp) and open(tp).read() == text):
         open(tp, "w").write(text)
+    for s_, n_ in tr.giants: print("no fast version for %s: %d instructions (--giant-insns %d)" % (h(s_), n_, tr.giant))
     print("%d functions, %d files -> %s" % (len(ranges), len(files) + 1, args.out))
 
 
