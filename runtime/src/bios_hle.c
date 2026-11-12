@@ -8,6 +8,7 @@
 #include "dccore/runtime.h"
 #include "dccore/disc.h"
 #include "dccore/bios.h"
+#include "dccore/net.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -60,20 +61,65 @@ static uint16_t flash_crc(const uint8_t *p, int n) {
     }
     return (uint16_t)~crc;
 }
+static int flash_user_next;                              /* next free physical block */
+static void flash_user_put(uint16_t id, const uint8_t data[60]) {
+    uint8_t *u = flash + 0x1C000, *b = u + 0x40 * flash_user_next;
+    b[0] = id & 0xFF; b[1] = id >> 8;
+    memcpy(b + 2, data, 60);
+    uint16_t crc = flash_crc(b, 62);
+    b[62] = crc & 0xFF; b[63] = crc >> 8;
+    int bit = flash_user_next - 1;                        /* bitmap: a cleared bit = in use */
+    u[0x4000 - 0x40 + bit / 8] &= (uint8_t)~(0x80u >> (bit % 8));
+    flash_user_next++;
+}
+
+/* The network settings a console has once its browser (PlanetWeb, DreamKey) has set up an ISP and
+ * the Broadband Adapter, as the emulators seed them: online games read them before they look for a
+ * modem or an adapter, and stop with an "ISP" error when they are missing. Dial-up user "dccore"
+ * (DCNet accepts any), the adapter on DHCP. */
+static void flash_network_init(void) {
+    uint8_t d[60];
+    memset(d, 0, 60); memcpy(d, "PWBrowser", 10); d[10] = 0x1C; flash_user_put(0x80, d);   /* INET */
+    memset(d, 0, 60); flash_user_put(0x81, d);
+    memset(d, 0, 60); memcpy(d + 30, "AT&F", 5); flash_user_put(0x82, d);                   /* modem init */
+    memset(d, 0, 60); flash_user_put(0x83, d);
+    memset(d, 0, 60); memset(d + 25, 0xFF, 35); d[8] = 1; d[12] = 1; d[14] = 1; d[17] = 6; d[24] = 5;
+    flash_user_put(0x84, d);
+    memset(d, 0xFF, 60);
+    for (uint16_t id = 0x85; id <= 0xBF; id++) flash_user_put(id, d);
+    /* ISP 1: unknown[4] (last 1), "SEGA", user (28), password (16), phone (8) */
+    memset(d, 0, 60); d[3] = 1; memcpy(d + 4, "SEGA", 4); strcpy((char *)d + 8, "dccore1");
+    strcpy((char *)d + 36, "password"); strcpy((char *)d + 52, "1234567"); flash_user_put(0xC0, d);
+    memset(d, 0, 60); flash_user_put(0xC1, d); flash_user_put(0xC2, d);
+    memcpy(d, "dccore@dcnet", 13); flash_user_put(0xC3, d);                                  /* e-mail */
+    memset(d, 0, 60); flash_user_put(0xC4, d);
+    d[58] = 1; flash_user_put(0xC5, d);
+    /* ISP 2: "SEGA", user (28), password (16), phone (12) */
+    memset(d, 0, 60); memcpy(d, "SEGA", 4); strcpy((char *)d + 4, "dccore2");
+    strcpy((char *)d + 32, "password"); strcpy((char *)d + 48, "1234567"); flash_user_put(0xC6, d);
+    for (uint16_t id = 0xC7; id <= 0xEA; id++) {
+        if (id == 0xE0) continue;
+        memset(d, 0, 60); d[54] = id == 0xCB; flash_user_put(id, d);
+    }
+    /* Broadband Adapter: "SEGA", then address, netmask, broadcast, DNS 1/2, gateway; addresses 0 =
+     * DHCP (the netmask as the emulators store it) */
+    memset(d, 0, 60); memcpy(d, "SEGA", 4); d[13] = d[14] = d[15] = 0xFF; flash_user_put(0xE0, d);
+}
+
 static void flash_user_init(void) {
-    uint8_t *u = flash + 0x1C000, *b = u + 0x40;
+    uint8_t *u = flash + 0x1C000, d[60];
     memset(u, 0xFF, 0x4000);
     memcpy(u, "KATANA_FLASH____", 16);
     u[16] = 2; u[17] = 0;                                 /* partition 2 */
+    flash_user_next = 1;
     uint32_t t = 2240611200u;                             /* 2021-01-01 00:00, in seconds since 1950 */
-    b[0] = 0x05; b[1] = 0x00;                             /* block ID: system settings */
-    b[2] = t & 0xFF; b[3] = (t >> 8) & 0xFF; b[4] = (t >> 16) & 0xFF; b[5] = t >> 24;
-    b[7] = 1;                                             /* language: English */
-    b[8] = 0;                                             /* stereo */
-    b[9] = 1;                                             /* auto-start discs */
-    uint16_t crc = flash_crc(b, 62);
-    b[62] = crc & 0xFF; b[63] = crc >> 8;
-    u[0x4000 - 0x40] = 0x7F;                              /* bitmap: block 1 in use */
+    memset(d, 0xFF, 60);                                  /* block 5: system settings */
+    d[0] = t & 0xFF; d[1] = (t >> 8) & 0xFF; d[2] = (t >> 16) & 0xFF; d[3] = t >> 24;
+    d[5] = 1;                                             /* language: English */
+    d[6] = 0;                                             /* stereo */
+    d[7] = 1;                                             /* auto-start discs */
+    flash_user_put(0x05, d);
+    flash_network_init();
 }
 
 static void flash_init(char region) {
@@ -380,6 +426,7 @@ int dc_bios_install(sh4ctx *c, char region) {
     (void)c;
     if (!flash_loaded) flash_init(region);
     set_region(region);
+    dc_bba_reset();
     /* the boot ROM leaves its system code in RAM (0x8C000100..0x8C008000, copied from the start of
      * the ROM). Some games checksum it: Rush 2049's menu re-enters every frame when it doesn't
      * match. The syscalls themselves stay HLE (by address), this is only the data games see. */

@@ -4,6 +4,7 @@
 #include <string.h>
 #include "dccore/reset.h"
 #include "dccore/sh4.h"
+#include "dccore/net.h"
 
 static uint8_t *copy;          /* every region, back to back */
 static size_t used, cap;
@@ -23,7 +24,7 @@ static void save(void *p, size_t n) {
 }
 static void load(void *p, size_t n) { memcpy(p, copy + used, n); used += n; }
 
-static void all(dc_state_fn f) { dc_hw_state(f); dc_ta_state(f); dc_aica_state(f); dc_arm7_state(f); dc_bios_state(f); }
+static void all(dc_state_fn f) { dc_hw_state(f); dc_ta_state(f); dc_aica_state(f); dc_arm7_state(f); dc_bios_state(f); dc_bba_state(f); }
 
 int dc_reset_snapshot(sh4ctx *c) {
     used = 0;

@@ -1097,10 +1097,12 @@ int dc_front_open(const dc_front_config *c) {
     dc_hw.on_render = on_render;
     dc_hw.on_vblank = on_vblank;
     start_count = SDL_GetPerformanceCounter(); start_cycles = dc_current_ctx ? dc_current_ctx->cycles : 0;
+    if (cfg.net_online) dc_front_net_start(cfg.net_server, cfg.net_port);
     return 0;
 }
 
 void dc_front_close(void) {
+    dc_front_net_stop();
     rt_stop();
     aica_thread_stop();
     wav_close();

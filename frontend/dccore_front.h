@@ -43,6 +43,13 @@ typedef struct {
     int pause_button;           /* the gamepad's View / Back / Select (Switch: -) pauses and resumes the game
                                    instead of being a second Start: for games with no pause of their own
                                    (arcade conversions). P / Pause on the keyboard pause in every game */
+    /* online play (dc-launch's config.toml [network]): with net_online, dc_front_open connects the
+     * network adapter the port plugged in (dccore/net.h) to DCNet, Flycast's online service, the
+     * first time the game sends something */
+    int net_online;             /* 1: the game finds its network adapter and may connect; 0: off */
+    int net_adapter;            /* 0 = the port's choice, 1 = Broadband Adapter, 2 = modem */
+    char net_server[128];       /* DCNet server ("" = dcnet.flyca.st) */
+    int net_port;               /* its port (0 = DCNet's: 7655 for the Broadband Adapter, 7654 for the modem) */
 } dc_front_config;
 /* frame rate choice in the on-screen menu: a port that can run at 60 or 30 fps sets this to 1 or 0 (its
  * default) before dc_front_open and follows it every field; -1 (the default) hides the menu item. A choice
@@ -61,6 +68,13 @@ extern const unsigned char dccore_icon_rgba[32 * 32 * 4];
 #define dc_front_open(cfg) dc_front_open_icon((cfg), dccore_icon_rgba)
 #endif
 void dc_front_close(void);
+/* online play (dccore_net.c): the network adapter's frames (dccore/net.h, dc_net) to and from a DCNet
+ * server (NULL / 0 = dcnet.flyca.st:7655), on a thread of its own. dc_front_open calls it when the
+ * config says net_online; a port can call it itself before. Status: what the connection is doing, for
+ * the menu; returns 1 while connected. */
+int  dc_front_net_start(const char *server, int port);
+void dc_front_net_stop(void);
+int  dc_front_net_status(char *buf, int n);
 /* Start the game's code at entry (after dc_front_open) and never return. The on-screen menu's Reset then
  * starts the game again in place: the emulated machine goes back to how it was right here (RAM, video and
  * sound memory, registers, timers, the GD-ROM drive; reset.h), while the window, fullscreen, resolution,
