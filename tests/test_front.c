@@ -225,7 +225,24 @@ int main(void) {
             CHECK(progs[1] <= 4, "%s: one program for every state changed program %lu times", mode, progs[1]);
         }
         dc_pvr_gl_variants = -1; dc_pvr_gl_hud_z = 0; dc_pvr_gl_topaque = 0; dc_pvr_gl_fast_depth = 1; dc_pvr_gl_msaa = aa;
+
+        /* The anti-aliasing buffers keep the size of the largest picture while pictures of that size still
+         * come (pvr_gl.c ensure_ms), and are made again for what is drawn once 300 frames went without one. */
+        char d[256];
+        pvr(0x128, 0); pvr(0x144, 0x80000000u); state_scene(); pvr(0x014, 1);
+        dc_pvr_gl_describe(d, sizeof d);
+        CHECK(strstr(d, "512x256, ") == d && strstr(d, "anti-aliasing in 512x256"), "after a 256x128 scene: \"%s\"", d);
         pvr(0x068, 63u << 16); pvr(0x06C, 63u << 16);
+        for (int i = 0; i < 302; i++) {
+            pvr(0x128, 0); pvr(0x144, 0x80000000u);
+            ta(hdr); ta(v0); ta(v1); ta(v2); ta(eol);
+            pvr(0x014, 1);
+            if (i == 298 || i == 301) {
+                dc_pvr_gl_describe(d, sizeof d);
+                CHECK(strstr(d, "128x128, ") == d && strstr(d, i == 298 ? "anti-aliasing in 512x256" : "anti-aliasing in 128x128"),
+                      "%d frames of 64x64 after it: \"%s\"", i + 1, d);
+            }
+        }
     }
     dc_front_close();
     printf(fails ? "%d frontend checks failed\n" : "frontend tests passed\n", fails);

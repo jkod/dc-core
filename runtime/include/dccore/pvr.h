@@ -76,6 +76,7 @@ extern int dc_pvr_gl_variants;          /* 1: a program per render state (fewer 
                                            thousands of state changes a frame); -1 (default): 1 on the Switch, 0 elsewhere.
                                            Followed from the next frame drawn; DC_GL_VARIANTS=1 / 0 overrides */
 void dc_pvr_gl_counts(unsigned long c[5]); /* so far: frames drawn, polygons, state changes, program changes, draw calls */
+void dc_pvr_gl_describe(char *buf, int n);  /* what is drawn into: size, anti-aliasing, depth format, buffer and video memory */
 extern int dc_pvr_gl_half_step;         /* render half a step under the scale asked for (2 -> 1.5: 960x720) */
 extern float dc_pvr_gl_sharpen;          /* 0 off .. 1: contrast-adaptive sharpening when presenting */
 extern int dc_pvr_gl_gpu_bars;           /* side bars decided on the GPU, so the CPU never waits for it (default on; 0: read back) */

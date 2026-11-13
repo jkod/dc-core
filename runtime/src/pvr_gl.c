@@ -577,6 +577,7 @@ static uint32_t sv_state;               /* and the state it is in use for (sv_us
 int dc_pvr_gl_variants = -1;
 static int sv_uber;
 static struct { unsigned long frames, polys, states, progs, draws; } gcn;   /* dc_pvr_gl_counts */
+static GLint vram_total_kb, vram_free_kb; static int vram_ok;   /* GL_NVX_gpu_memory_info (dc_pvr_gl_describe) */
 static unsigned sv_stamp = 1;           /* FU's generation: a variant takes the values when it is first used with them */
 static struct { float sx, sy, offx, pt_ref, fog_ram[3], fog_vert[3], fog_den; } FU;   /* the frame's uniforms */
 static GLuint fog_tex; static uint8_t fog_last[256]; static int fog_valid;
@@ -733,10 +734,19 @@ int dc_pvr_gl_init(void *(*getproc)(const char *)) {
     sv_listed = 1;
     if (!sv_get(sv_uber ? SV_UBER : SV_TEX | SV_SHADE(3) | SV_USE_ALPHA | SV_GOURAUD | SV_FOG(2))) return -1;   /* the shaders build here at all */
     sv_listed = 0;
-    {   /* which GPU and driver this is, for whoever reads the log */
+    {   /* which GPU and driver this is, and (NVIDIA: GL_NVX_gpu_memory_info) its video memory, for whoever reads the log */
         const GLubyte *(*getstr)(GLenum) = (const GLubyte *(*)(GLenum))getproc("glGetString");
+        const unsigned char *(*gsi)(GLenum, GLuint) = (const unsigned char *(*)(GLenum, GLuint))getproc("glGetStringi");
         const GLubyte *r = getstr ? getstr(0x1F01 /* RENDERER */) : NULL, *ver = getstr ? getstr(0x1F02 /* VERSION */) : NULL;
-        fprintf(stderr, "pvr_gl: %s, OpenGL %s\n", r ? (const char *)r : "?", ver ? (const char *)ver : "?");
+        GLint n = 0; char mem[48] = "";
+        p_glGetIntegerv(0x821D /* NUM_EXTENSIONS */, &n);
+        for (int i = 0; gsi && !vram_ok && i < n; i++) { const char *e = (const char *)gsi(0x1F03 /* EXTENSIONS */, (GLuint)i); if (e && !strcmp(e, "GL_NVX_gpu_memory_info")) vram_ok = 1; }
+        if (vram_ok) {
+            p_glGetIntegerv(0x9047 /* GPU_MEMORY_INFO_DEDICATED_VIDMEM_NVX */, &vram_total_kb); p_glGetIntegerv(0x9049 /* ..._CURRENT_AVAILABLE_VIDMEM_NVX */, &vram_free_kb);
+            /* 64 MB to 256 GB: a software renderer answers with numbers of its own (llvmpipe: 1.5 million MB) */
+            if (vram_total_kb >= (64 << 10) && vram_total_kb <= (256 << 20)) snprintf(mem, sizeof mem, ", %d MB of video memory", (int)(vram_total_kb / 1024)); else vram_ok = 0;
+        }
+        fprintf(stderr, "pvr_gl: %s, OpenGL %s%s\n", r ? (const char *)r : "?", ver ? (const char *)ver : "?", mem);
         while (p_glGetError()) {}
     }
     {   /* zv_on's needs: glClipControl (GL 4.5 or ARB_clip_control) */
@@ -784,11 +794,24 @@ static int ms_want(void) {
 }
 static int ensure_ms(void) {                     /* 1: draw into ms_fbo this frame */
     int n = ms_want();
-    /* kept at the largest picture seen: games that switch sizes (Soulcalibur) remade it again and again */
+    /* kept at the largest picture seen: games that switch sizes (Soulcalibur) remade it again and again.
+     * Let go once no picture has needed that size for 300 frames (a lower RESOLUTION in the menu: at 8X
+     * with anti-aliasing these are gigabytes, and they stayed taken until the game was started again):
+     * made again for the largest picture of those frames. */
+    static int idle, peak_w, peak_h;
     GLenum df = depth_format();
-    if (n && ms_fbo && ms_n == n && ms_w >= fb_w && ms_h >= fb_h && ms_dfmt == df) return 1;
+    int shrink = 0;
+    if (n && ms_fbo && ms_n == n && ms_w >= fb_w && ms_h >= fb_h && ms_dfmt == df) {
+        if (fb_w > peak_w) peak_w = fb_w;
+        if (fb_h > peak_h) peak_h = fb_h;
+        if (peak_w == ms_w && peak_h == ms_h) { idle = peak_w = peak_h = 0; return 1; }
+        if (++idle < 300) return 1;
+        shrink = 1;
+    }
     int want_w = fb_w > ms_w ? fb_w : ms_w, want_h = fb_h > ms_h ? fb_h : ms_h;
+    if (shrink) { want_w = peak_w; want_h = peak_h; }
     if (!n || ms_n != n) { want_w = fb_w; want_h = fb_h; }
+    idle = peak_w = peak_h = 0;
     if (ms_fbo) { p_glDeleteFramebuffers(1, &ms_fbo); p_glDeleteRenderbuffers(1, &ms_col); p_glDeleteRenderbuffers(1, &ms_depth); ms_fbo = 0; }
     ms_n = 0;
     if (!n) return 0;
@@ -2182,6 +2205,20 @@ static int zv_selftest(void) {
     return ok;
 }
 int dc_pvr_gl_fast_depth_ok(void) { return zv_ok; }
+/* What is drawn into, for a log: the picture's size, anti-aliasing and the size of its buffers (kept
+ * larger than the picture for a while, see ensure_ms), the depth format, what those buffers take, and
+ * the video memory still free where the driver tells (NVIDIA). */
+void dc_pvr_gl_describe(char *buf, int n) {
+    int main_w = fb_w, main_h = fb_h; GLenum mf = fbo_dfmt;
+    double bytes = (double)main_w * main_h * (4 + (mf == GL_DEPTH32F_STENCIL8 ? 8 : 4));
+    if (ms_fbo) bytes += (double)ms_w * ms_h * ms_n * (4 + (ms_dfmt == GL_DEPTH32F_STENCIL8 ? 8 : 4));
+    GLenum df = ms_fbo ? ms_dfmt : mf;
+    char aa[64] = "", vm[64] = "";
+    if (ms_fbo) snprintf(aa, sizeof aa, ", %dx anti-aliasing in %dx%d", ms_n, ms_w, ms_h);
+    if (vram_ok) snprintf(vm, sizeof vm, ", %d of %d MB of video memory free", (int)(vram_free_kb / 1024), (int)(vram_total_kb / 1024));
+    snprintf(buf, (size_t)n, "%dx%d%s, depth %s, %.0f MB of buffers%s", main_w, main_h, aa,
+             df == GL_DEPTH32F_STENCIL8 ? "float + stencil" : df == GL_DEPTH_COMPONENT32F ? "float" : "24-bit + stencil", bytes / 1048576.0, vm);
+}
 /* what drawing has asked of the driver so far: frames, polygons, changes of state, changes of program,
  * draw calls (a frontend reports them a frame when a game runs slow) */
 void dc_pvr_gl_counts(unsigned long c[5]) { c[0] = gcn.frames; c[1] = gcn.polys; c[2] = gcn.states; c[3] = gcn.progs; c[4] = gcn.draws; }
@@ -2754,6 +2791,7 @@ static void render_frame(int scale) {
     p_glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)nverts * (GLsizeiptr)sizeof(gv), verts, GL_STREAM_DRAW);
     if (gst.on < 0) { const char *e = getenv("DC_GL_STATS"); gst.on = e && *e == '1'; }
     gcn.frames++; gcn.polys += (unsigned long)f.npolys;
+    if (vram_ok && !(gcn.frames & 255)) { p_glGetIntegerv(0x9049 /* GPU_MEMORY_INFO_CURRENT_AVAILABLE_VIDMEM_NVX */, &vram_free_kb); }
     if (gst.on > 0) {
         gst.polys += (unsigned long)f.npolys; gst.verts += (unsigned long)nverts; gst.mods += (unsigned long)f.nmods; gst.tav += (unsigned long)f.nverts;
         if (++gst.frames % 300 == 0) {

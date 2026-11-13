@@ -540,10 +540,11 @@ static void osd_count_frame(void) {
         if (slow_n >= 4 && (!said || (double)(now - said) / f > 10.0)) {
             unsigned long n = gc[0] - gc0[0]; if (!n) n = 1;
             said = now;
+            char into[256]; dc_pvr_gl_describe(into, sizeof into);
             fprintf(stderr, "dc-core: running at %.0f%% of full speed: %.1f ms a frame (game %.1f, %s %.1f, drawing %.1f, presenting %.1f); "
-                            "drawn a frame: %lu polygons, %lu state changes, %lu program changes, %lu draw calls\n",
+                            "drawn a frame: %lu polygons, %lu state changes, %lu program changes, %lu draw calls; into %s\n",
                     speed * 100.0, tot, g < 0 ? 0 : g, aica_thr ? "waiting for sound" : "sound", aica_thr ? w : a, r, p,
-                    (gc[1] - gc0[1]) / n, (gc[2] - gc0[2]) / n, (gc[3] - gc0[3]) / n, (gc[4] - gc0[4]) / n);
+                    (gc[1] - gc0[1]) / n, (gc[2] - gc0[2]) / n, (gc[3] - gc0[3]) / n, (gc[4] - gc0[4]) / n, into);
         }
         c0 = cyc; memcpy(gc0, gc, sizeof gc0);
     }
