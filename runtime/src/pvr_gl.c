@@ -1538,6 +1538,87 @@ static int two_pass_class(const pvr_poly *p) {
     if (!ta && a0 >= 0.99605f) return 2;                                   /* 254 / 255 and up */
     return 1;
 }
+/* See-through sheets before what lies on them (dc_pvr_gl_tsheets, auto-sort only). Whole polygons are sorted
+ * by their farthest point, which says little about a sheet reaching from the horizon to under the camera: a
+ * sea in pieces, its nearest piece sorted after the ship's wake lying on it, so the sea covered the wake there
+ * (Tennis 2K2's cruise ship from the air: the wake ended at a straight line). What lies wholly on the near side
+ * of a sheet's plane is before it at every pixel the two share, so a sheet moves up the order past the polygons
+ * before it that do, as far as the first one it overlaps on screen that does not (one behind it, across it or
+ * in its plane: layers on one surface keep the order they have). A sheet: blended by alpha, see-through as a
+ * whole (vertex alpha below 1, no texture alpha in it), deep (as dc_pvr_gl_tsort2 has it) and planar. */
+int dc_pvr_gl_tsheets;
+typedef struct { int idx; float key; } sort_e;
+/* the plane of a polygon in screen space, 1/w = pl[0] x + pl[1] y + pl[2]: fitted to all its vertices by their
+ * relative error (the nearest ones of a clipped sheet lie millions of pixels off screen), 0 when they are not
+ * on one plane */
+static int sheet_plane(const pvr_vtx *v, int n, double pl[3]) {
+    double m[3][4] = {{0}};
+    for (int k = 0; k < n; k++) {
+        double z = v[k].z, r[3] = { v[k].x / z, v[k].y / z, 1. / z };
+        for (int a = 0; a < 3; a++) { for (int b = 0; b < 3; b++) m[a][b] += r[a] * r[b]; m[a][3] += r[a]; }
+    }
+    for (int c = 0; c < 3; c++) {                                          /* Gauss-Jordan, pivoting */
+        int piv = c;
+        for (int r = c + 1; r < 3; r++) if (fabs(m[r][c]) > fabs(m[piv][c])) piv = r;
+        if (fabs(m[piv][c]) < 1e-30) return 0;
+        for (int k = 0; k < 4; k++) { double t = m[c][k]; m[c][k] = m[piv][k]; m[piv][k] = t; }
+        for (int r = 0; r < 3; r++) if (r != c) { double fct = m[r][c] / m[c][c]; for (int k = c; k < 4; k++) m[r][k] -= fct * m[c][k]; }
+    }
+    for (int c = 0; c < 3; c++) pl[c] = m[c][3] / m[c][c];
+    for (int k = 0; k < n; k++) {
+        double e = (pl[0] * v[k].x + pl[1] * v[k].y + pl[2]) / v[k].z - 1.;
+        if (!(e > -2e-3 && e < 2e-3)) return 0;
+    }
+    return 1;
+}
+/* which side of the plane a polygon is on: 1 the near side (nearer than the plane wherever it has a vertex, or
+ * past the plane's horizon), -1 the far side, 0 across it or in it */
+static int sheet_side(const pvr_vtx *v, int n, const double pl[3]) {
+    int near_ = 0, far_ = 0;
+    for (int k = 0; k < n; k++) {
+        double zp = pl[0] * v[k].x + pl[1] * v[k].y + pl[2];
+        if (zp <= 0 || v[k].z > zp * 1.004) near_++; else if (v[k].z < zp * 0.996) far_++;
+    }
+    return near_ && !far_ ? 1 : far_ && !near_ ? -1 : 0;
+}
+static void sheets_first(const pvr_frame *fr, sort_e *s, int nt) {
+    float (*box)[4] = NULL;                                                /* screen boxes, once there is a sheet */
+    for (int j = 1; j < nt; j++) {
+        const pvr_poly *p = &fr->polys[s[j].idx]; const pvr_vtx *v = fr->verts + p->first;
+        if (p->n < 3 || ((p->tsp >> 29) & 7) != 4 || ((p->tsp >> 26) & 7) != 5) continue;
+        float z0 = v[0].z, z1 = v[0].z, a0, a1;
+        for (int k = 1; k < p->n; k++) { if (v[k].z < z0) z0 = v[k].z; if (v[k].z > z1) z1 = v[k].z; }
+        if (z1 < z0 * 1.5f || !(z0 > 0)) continue;
+        if (poly_alpha(fr, p, &a0, &a1) || a1 >= 0.99f) continue;
+        double pl[3];
+        if (!sheet_plane(v, p->n, pl)) continue;
+        if (!box) {
+            box = malloc(sizeof *box * (size_t)nt);
+            for (int i = 0; i < nt; i++) {
+                const pvr_poly *q = &fr->polys[s[i].idx]; const pvr_vtx *w = fr->verts + q->first;
+                box[i][0] = box[i][1] = 1e30f; box[i][2] = box[i][3] = -1e30f;
+                for (int k = 0; k < q->n; k++) {
+                    if (w[k].x < box[i][0]) box[i][0] = w[k].x; if (w[k].y < box[i][1]) box[i][1] = w[k].y;
+                    if (w[k].x > box[i][2]) box[i][2] = w[k].x; if (w[k].y > box[i][3]) box[i][3] = w[k].y;
+                }
+            }
+        }
+        int to = -1;
+        for (int i = j - 1; i >= 0; i--) {
+            if (box[i][0] >= box[j][2] || box[i][2] <= box[j][0] || box[i][1] >= box[j][3] || box[i][3] <= box[j][1]) continue;
+            const pvr_poly *q = &fr->polys[s[i].idx];
+            if (sheet_side(fr->verts + q->first, q->n, pl) <= 0) break;   /* behind it, across it, or in its plane (layers
+                                                                            * on one surface keep the order they have) */
+            to = i;
+        }
+        if (to < 0) continue;
+        sort_e e = s[j]; float b[4]; memcpy(b, box[j], sizeof b);
+        memmove(&s[to + 1], &s[to], (size_t)(j - to) * sizeof *s); memmove(&box[to + 1], &box[to], (size_t)(j - to) * sizeof *box);
+        s[to] = e; memcpy(box[to], b, sizeof b);
+        s[to].key = nextafterf(s[to + 1].key, -1e30f);                     /* and by its key, where the order is made from the keys again */
+    }
+    free(box);
+}
 static void set_poly_state(const pvr_poly *p, int set, int hud) {
     uint32_t tsp = set ? p->tsp1 : p->tsp, tcw = set ? p->tcw1 : p->tcw;
     int tex = (p->isp >> 25) & 1;
@@ -1587,7 +1668,6 @@ static void draw_quad(float r, float g, float b, float a) {
     sv_use(back & ~SV_ZV);                                  /* what was in use: the caller goes on drawing with it */
 }
 
-typedef struct { int idx; float key; } sort_e;
 int dc_pvr_gl_tsort2 = 1;
 typedef struct { int first, count, poly; float key; } tri_e;
 static int cmp_tri(const void *a, const void *b) {     /* by key, then submission (vertex) order */
@@ -3023,6 +3103,7 @@ static void render_frame(int scale) {
         s[nt].idx = i; s[nt].key = presort ? (float)nt : zmin; nt++;
     }
     if (!presort) qsort(s, nt, sizeof *s, cmp_sort);
+    if (!presort && dc_pvr_gl_tsheets) sheets_first(&f, s, nt);
     p_glEnable(GL_BLEND);
     if (!presort && dc_pvr_gl_topaque) {
         for (int k = 0; k < nt; k++) poly_tp[s[k].idx] = (unsigned char)two_pass_class(&f.polys[s[k].idx]);

@@ -250,6 +250,32 @@ int main(void) {
             CHECK(c1[2] - c0[2] == want, "%s, opaque first %d: %lu state changes, want %lu", dm, mode, c1[2] - c0[2], want);
         }
         dc_pvr_gl_topaque = 0; dc_pvr_gl_fast_depth = 1;
+
+        /* See-through sheets (dc_pvr_gl_tsheets). A half see-through green sheet over the right half, deep, and a
+         * solid red quad a fifth nearer than its plane that also reaches further left, where that plane is
+         * further off: sorted by their farthest points the red one is drawn first and the sheet covers it. With
+         * the option the sheet goes first. In the second row a solid blue quad in the sheet's own plane was
+         * submitted between them: the sheet does not move past it (layers on one surface keep their order). */
+        for (int on = 0; on < 2; on++) {
+            dc_pvr_gl_tsheets = on;
+            pvr(0x128, 0); pvr(0x144, 0x80000000u);
+            ta(eol);
+            tquad(0, 4, 56, 28, 1.2f * 0.5f, 1.2f * 4.f, 0, 0xFFFF0000u);              /* red, before the plane 1/w = 0.5 + x / 16 */
+            tquad(30, 4, 56, 28, 0.5f + 30.f / 16.f, 4.f, 0, 0x8000FF00u);             /* the sheet */
+            tquad(0, 36, 56, 60, 1.2f * 0.5f, 1.2f * 4.f, 0, 0xFFFF0000u);
+            tquad(20, 36, 56, 60, 0.5f + 20.f / 16.f, 4.f, 0, 0xFF0000FFu);            /* blue, in the plane */
+            tquad(30, 36, 56, 60, 0.5f + 30.f / 16.f, 4.f, 0, 0x8000FF00u);
+            ta(eol);
+            pvr(0x014, 1);
+            dc_pvr_gl_read(rgb, &w, &h);
+            const uint8_t *free_ = rgb + (32 * w + 88) * 3, *held = rgb + (96 * w + 88) * 3, *left = rgb + (32 * w + 30) * 3;
+            CHECK(IS_RED(left), "sheets %d: beside the sheet %02X%02X%02X, want red", on, left[0], left[1], left[2]);
+            CHECK(on ? IS_RED(free_) : IS_MIX(free_), "sheets %d: red before a see-through sheet %02X%02X%02X, want %s", on, free_[0], free_[1], free_[2],
+                  on ? "red (the sheet first)" : "green over red (sorted by farthest point)");
+            CHECK(held[0] == 0 && held[1] >= 120 && held[1] <= 135 && held[2] >= 120 && held[2] <= 135,
+                  "sheets %d: a sheet after a layer in its plane %02X%02X%02X, want green over blue", on, held[0], held[1], held[2]);
+        }
+        dc_pvr_gl_tsheets = 0;
     }
 
     /* One program for every render state against a program per state (pvr_gl.c sv_uber, dc_pvr_gl_variants):

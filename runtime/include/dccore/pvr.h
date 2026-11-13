@@ -139,6 +139,10 @@ extern int dc_pvr_gl_tsort2;
  * fades (smoke, a wake, tinted glass) stays whole in the sorted pass. For a game that draws solid scenery
  * in the translucent list (Tennis 2K2's cruise ship) */
 extern int dc_pvr_gl_topaque;
+/* translucent polygons (auto-sorted): a see-through sheet that reaches from far off to near the camera (a
+ * sea, a shade on the ground) is drawn before what lies wholly on the near side of its plane, whatever the
+ * order by farthest point says (default 0). Tennis 2K2's sea in pieces covered the wake lying on it */
+extern int dc_pvr_gl_tsheets;
 extern int dc_pvr_gl_split_panel_x;   /* widescreen: split-screen views clipped to [0, x) beside a side panel become full width (0 = off) */
 extern int dc_pvr_gl_hud_sprites;       /* widescreen: only sprite polygons are HUD (Daytona USA 2001: its HUD is all sprites, while
                                          * the "ROLLING START!!" banner's strips at the HUD's depth, now and then exactly flat, are not) */
