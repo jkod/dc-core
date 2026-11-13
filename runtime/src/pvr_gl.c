@@ -400,6 +400,120 @@ static const char *fs_body =
 "#endif\n"
 "#endif\n"
 "}\n";
+/* The same in one program for every state (sv_uber): the names above are fields of a uniform, u_st (a
+ * variant's key as it is), tested where a variant has them built in. Variants trade a change of
+ * program at a change of state for fewer instructions a pixel. That is the Switch's trade: its GPU is
+ * short of pixels and its games change state a few hundred times a frame. A PC's GPU has the pixels to
+ * spare, changing a uniform costs its driver far less than changing the program, and a port can change
+ * state thousands of times a frame (Tennis 2K2's 3D crowd): one program there, as it was before the
+ * variants (dc_pvr_gl_variants picks; a frame's changes of each kind are in DC_GL_STATS=1 and in the
+ * log of a game that runs slow). Only ZV stays built in (two programs): a program that may write its
+ * own depth is one the GPU can't test depth first for.
+ * Whatever changes above changes here too: test_front compares the two, state by state. */
+static const char *uvs_body =
+"layout(location=0) in vec3 a_pos;\n"
+"layout(location=1) in vec4 a_uv;\n"
+"layout(location=2) in vec4 a_c;  layout(location=3) in vec4 a_o;\n"
+"layout(location=4) in vec4 a_c1; layout(location=5) in vec4 a_o1;\n"
+"uniform vec2 u_scale; uniform float u_offx;\n"
+"noperspective out vec2 v_uvz; noperspective out vec4 v_cz; noperspective out vec4 v_oz; noperspective out float v_invw;\n"
+"flat out vec4 f_c; flat out vec4 f_o;\n"
+"invariant gl_Position;\n"
+"void main() {\n"
+"  if (QUAD != 0) { gl_Position = vec4(a_pos.xy, 0.0, 1.0); v_invw = 1.0; v_uvz = vec2(0.0); v_cz = vec4(0.0); v_oz = vec4(0.0); f_c = vec4(0.0); f_o = vec4(0.0); return; }\n"
+"  float z = max(a_pos.z, 1e-30);\n"
+"  vec2 ndc = vec2((a_pos.x + u_offx) * u_scale.x - 1.0, 1.0 - a_pos.y * u_scale.y);\n"
+"#if ZV\n"
+"  gl_Position = vec4(ndc, min(z * 5.421010862427522e-20, 1.0), 1.0);\n"
+"#else\n"
+"  gl_Position = vec4(ndc, 0.0, 1.0);\n"
+"#endif\n"
+"  vec2 uv; vec4 c, o;\n"
+"  if (SET != 0) { uv = a_uv.zw; c = a_c1; o = a_o1; } else { uv = a_uv.xy; c = a_c; o = a_o; }\n"
+"  v_uvz = uv * z; v_cz = c * z; v_oz = o * z; v_invw = z; f_c = c; f_o = o;\n"
+"}\n";
+static const char *ufs_body =
+"noperspective in vec2 v_uvz; noperspective in vec4 v_cz; noperspective in vec4 v_oz; noperspective in float v_invw;\n"
+"flat in vec4 f_c; flat in vec4 f_o;\n"
+"uniform sampler2D u_tex; uniform usampler2D u_fogtab;\n"
+"uniform vec4 u_quad_col;\n"
+"uniform float u_pt_ref; uniform vec3 u_fog_ram, u_fog_vert; uniform float u_fog_den;\n"
+"uniform vec4 u_uvbox;\n"
+"out vec4 o_col;\n"
+"vec4 tex_cr(vec2 uv, bool edge) {\n"
+"  vec2 ts = vec2(textureSize(u_tex, 0)), p = uv * ts - 0.5, i = floor(p), f = p - i;\n"
+"  vec2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f)), w1 = 1.0 + f * f * (-2.5 + 1.5 * f);\n"
+"  vec2 w2 = f * (0.5 + f * (2.0 - 1.5 * f)), w3 = f * f * (-0.5 + 0.5 * f);\n"
+"  vec2 w12 = w1 + w2, o12 = w2 / w12;\n"
+"  vec2 t0 = (i - 0.5) / ts, t3 = (i + 2.5) / ts, t12 = (i + 0.5 + o12) / ts;\n"
+"  if (edge) { vec2 lo = u_uvbox.xy + 0.5 / ts, hi = max(u_uvbox.zw - 0.5 / ts, lo); t0 = clamp(t0, lo, hi); t3 = clamp(t3, lo, hi); t12 = clamp(t12, lo, hi); }\n"
+"  vec4 r = vec4(0.0);\n"
+"  r += textureLod(u_tex, vec2(t0.x, t0.y), 0.0) * w0.x * w0.y;\n"
+"  r += textureLod(u_tex, vec2(t12.x, t0.y), 0.0) * w12.x * w0.y;\n"
+"  r += textureLod(u_tex, vec2(t3.x, t0.y), 0.0) * w3.x * w0.y;\n"
+"  r += textureLod(u_tex, vec2(t0.x, t12.y), 0.0) * w0.x * w12.y;\n"
+"  r += textureLod(u_tex, vec2(t12.x, t12.y), 0.0) * w12.x * w12.y;\n"
+"  r += textureLod(u_tex, vec2(t3.x, t12.y), 0.0) * w3.x * w12.y;\n"
+"  r += textureLod(u_tex, vec2(t0.x, t3.y), 0.0) * w0.x * w3.y;\n"
+"  r += textureLod(u_tex, vec2(t12.x, t3.y), 0.0) * w12.x * w3.y;\n"
+"  r += textureLod(u_tex, vec2(t3.x, t3.y), 0.0) * w3.x * w3.y;\n"
+"  r = clamp(r, 0.0, 1.0);\n"
+"  vec4 blur = textureLod(u_tex, uv, 1.0);\n"
+"  return clamp(r + 1.0 * (r - blur), 0.0, 1.0);\n"
+"}\n"
+"float fog_alpha(float invw) {\n"
+"  float fw = clamp(u_fog_den * invw, 1.0, 255.999985);\n"
+"  uint b = floatBitsToUint(fw); uint e = (b >> 23) & 255u; uint m = b & 0x7FFFFFu;\n"
+"  int idx = int((((e + 1u) & 7u) << 4) | ((m >> 19) & 15u));\n"
+"  float bl = float((m >> 11) & 255u);\n"
+"  vec2 ent = vec2(texelFetch(u_fogtab, ivec2(idx, 0), 0).rg);\n"
+"  return floor((ent.x * bl + ent.y * (255.0 - bl)) / 256.0) / 255.0;\n"
+"}\n"
+"void main() {\n"
+"  if (QUAD != 0) {\n"
+"    o_col = u_quad_col;\n"
+"#if !ZV\n"
+"    gl_FragDepth = 0.0;\n"
+"#endif\n"
+"    return;\n"
+"  }\n"
+"  float iw = max(v_invw, 1e-30);\n"
+"  vec2 uv = v_uvz / iw;\n"
+"  vec4 col, off;\n"
+"  if (GOURAUD != 0) { col = v_cz / iw; off = v_oz / iw; } else { col = f_c; off = f_o; }\n"
+"  if (USE_ALPHA == 0) col.a = 1.0;\n"
+"  vec4 px;\n"
+"  if (TEX != 0) {\n"
+"    bool edge = (HUD & 2) != 0;\n"
+"    if (edge) { vec2 h = 0.5 / vec2(textureSize(u_tex, 0)), lo = u_uvbox.xy + h, hi = max(u_uvbox.zw - h, lo); uv = clamp(uv, lo, hi); }\n"
+"    vec4 t;\n"
+"    if ((HUD & 1) != 0) t = tex_cr(uv, edge); else t = texture(u_tex, uv);\n"
+"    if (IGN_TA != 0) t.a = 1.0;\n"
+"    int sh = SHADE;\n"
+"    if (sh == 0) px = t;\n"
+"    else if (sh == 1) px = vec4(t.rgb * col.rgb, t.a);\n"
+"    else if (sh == 2) px = vec4(t.rgb * t.a + col.rgb * (1.0 - t.a), col.a);\n"
+"    else px = t * col;\n"
+"  } else px = col;\n"
+"  if (OFFSET != 0) px.rgb = min(px.rgb + off.rgb, vec3(1.0));\n"
+"  int fog = FOG;\n"
+"  if (fog == 0) px.rgb = mix(px.rgb, u_fog_ram, fog_alpha(iw));\n"
+"  else if (fog == 1) px.rgb = mix(px.rgb, u_fog_vert, off.a);\n"
+"  else if (fog == 3) px = vec4(u_fog_ram, fog_alpha(iw));\n"
+"  int pt = PT;\n"
+"  if (pt == 2) {\n"
+"    float c = clamp((px.a * 255.0 + 0.5 - u_pt_ref * 255.0) / max(fwidth(px.a) * 255.0, 1.0) + 0.5, 0.0, 1.0);\n"
+"    if (c <= 0.0) discard;\n"
+"    px.a = c;\n"
+"  } else if (pt == 1) { if (px.a * 255.0 + 0.5 < u_pt_ref * 255.0) discard; }\n"
+"  int tp = TPASS;\n"
+"  if (tp == 1) { if (px.a < 0.996) discard; }\n"
+"  else if (tp == 2) { if (px.a >= 0.996) discard; }\n"
+"  o_col = px;\n"
+"#if !ZV\n"
+"  gl_FragDepth = clamp((log2(iw) + 64.0) / 128.0, 0.0, 1.0);\n"
+"#endif\n"
+"}\n";
 static float depth_of(float invw) { float d = (log2f(fmaxf(invw, 1e-30f)) + 64.f) / 128.f; return d < 0 ? 0 : d > 1 ? 1 : d; }
 /* Depth. The PVR compares 1/w, a float of any magnitude (a HUD at 2e6 over a scene below 1000). In a
  * 24-bit depth buffer that takes a logarithm, and since 1/w, not its logarithm, is what runs linearly
@@ -450,10 +564,19 @@ static int fb_w, fb_h, ready;
 #define SV_QUAD (1u << 16)              /* a quad of one colour in clip space: draw_quad */
 #define SV_ZV (1u << 17)                /* depth from the vertices: zv_on */
 #define SV_PLAIN (SV_FOG(2))            /* untextured, no fog: modifier volumes (their colour is masked) */
-typedef struct { uint32_t key; GLuint prog; GLint scale, offx, quad_col, pt_ref, fog_ram, fog_vert, fog_den, uvbox; unsigned stamp; } svar;
-#define NSV 256
+#define SV_UBER (1u << 18)              /* the program for every state (sv_uber): its key is this and SV_ZV */
+#define SV_STATE 0x1FFFFu               /* what the uber program takes from a key at run time (u_st) */
+typedef struct { uint32_t key; GLuint prog; GLint scale, offx, quad_col, pt_ref, fog_ram, fog_vert, fog_den, uvbox; unsigned stamp;
+                 GLint st; uint32_t st_key; int st_set; } svar;   /* uber: u_st and the state it has now */
+#define NSV 1024
 static svar sv_tab[NSV]; static int sv_n;
 static svar *sv_cur;                    /* the variant in use (NULL: another program may be bound) */
+static uint32_t sv_state;               /* and the state it is in use for (sv_use's key) */
+/* 1: a program per state (variants), 0: one program for every state (see uvs_body). -1 leaves it to
+ * the platform: variants on the Switch, one program elsewhere; DC_GL_VARIANTS=1 / 0 overrides both. */
+int dc_pvr_gl_variants = -1;
+static int sv_uber;
+static struct { unsigned long frames, polys, states, progs, draws; } gcn;   /* dc_pvr_gl_counts */
 static unsigned sv_stamp = 1;           /* FU's generation: a variant takes the values when it is first used with them */
 static struct { float sx, sy, offx, pt_ref, fog_ram[3], fog_vert[3], fog_den; } FU;   /* the frame's uniforms */
 static GLuint fog_tex; static uint8_t fog_last[256]; static int fog_valid;
@@ -489,14 +612,21 @@ static svar *sv_get(uint32_t key) {
         for (int i = 0; i < sv_n; i++) p_glDeleteProgram(sv_tab[i].prog);
         sv_n = 0; sv_cur = NULL;
     }
-    char def[512];
+    char def[1024];
+    int uber = (key & SV_UBER) != 0;
+    if (uber)                           /* the fields of u_st, where a variant has numbers: a key's bits */
+        snprintf(def, sizeof def, "#version 330 core\n#define ZV %d\nuniform int u_st;\n#define TEX (u_st & 1)\n#define SHADE ((u_st >> 1) & 3)\n"
+                 "#define USE_ALPHA ((u_st >> 3) & 1)\n#define IGN_TA ((u_st >> 4) & 1)\n#define OFFSET ((u_st >> 5) & 1)\n#define GOURAUD ((u_st >> 6) & 1)\n"
+                 "#define FOG ((u_st >> 7) & 3)\n#define PT ((u_st >> 9) & 3)\n#define TPASS ((u_st >> 11) & 3)\n#define HUD ((u_st >> 13) & 3)\n"
+                 "#define SET ((u_st >> 15) & 1)\n#define QUAD ((u_st >> 16) & 1)\n", (int)(key >> 17 & 1));
+    else
     snprintf(def, sizeof def, "#version 330 core\n#define TEX %d\n#define SHADE %d\n#define USE_ALPHA %d\n#define IGN_TA %d\n#define OFFSET %d\n"
              "#define GOURAUD %d\n#define FOG %d\n#define PT %d\n#define TPASS %d\n#define HUD %d\n#define SET %d\n#define QUAD %d\n#define ZV %d\n",
              (int)(key & 1), (int)(key >> 1 & 3), (int)(key >> 3 & 1), (int)(key >> 4 & 1), (int)(key >> 5 & 1), (int)(key >> 6 & 1),
              (int)(key >> 7 & 3), (int)(key >> 9 & 3), (int)(key >> 11 & 3), (int)(key >> 13 & 3), (int)(key >> 15 & 1), (int)(key >> 16 & 1), (int)(key >> 17 & 1));
     GLuint sh[2], pr = p_glCreateProgram();
     for (int k = 0; k < 2; k++) {
-        const char *src[2] = { def, k ? fs_body : vs_body };
+        const char *src[2] = { def, uber ? (k ? ufs_body : uvs_body) : (k ? fs_body : vs_body) };
         sh[k] = p_glCreateShader(k ? GL_FRAGMENT_SHADER : GL_VERTEX_SHADER);
         p_glShaderSource(sh[k], 2, src, NULL); p_glCompileShader(sh[k]);
         GLint ok = 0; p_glGetShaderiv(sh[k], GL_COMPILE_STATUS, &ok);
@@ -513,11 +643,12 @@ static svar *sv_get(uint32_t key) {
     v->scale = p_glGetUniformLocation(pr, "u_scale"); v->offx = p_glGetUniformLocation(pr, "u_offx"); v->quad_col = p_glGetUniformLocation(pr, "u_quad_col");
     v->pt_ref = p_glGetUniformLocation(pr, "u_pt_ref"); v->fog_ram = p_glGetUniformLocation(pr, "u_fog_ram"); v->fog_vert = p_glGetUniformLocation(pr, "u_fog_vert");
     v->fog_den = p_glGetUniformLocation(pr, "u_fog_den"); v->uvbox = p_glGetUniformLocation(pr, "u_uvbox");
+    v->st = uber ? p_glGetUniformLocation(pr, "u_st") : -1;
     p_glUseProgram(pr); sv_cur = NULL;                     /* the samplers' units, once */
     { GLint t = p_glGetUniformLocation(pr, "u_tex"), ft = p_glGetUniformLocation(pr, "u_fogtab");
       if (t >= 0) p_glUniform1i(t, 0);
       if (ft >= 0) p_glUniform1i(ft, 1); }
-    if (!sv_listed && dc_pvr_gl_shader_list) {             /* for the next start */
+    if (!sv_listed && !uber && dc_pvr_gl_shader_list) {    /* for the next start */
         FILE *f = fopen(dc_pvr_gl_shader_list, "a");
         if (f) { fprintf(f, "%05X\n", key); fclose(f); }
     }
@@ -527,9 +658,12 @@ static void sv_use(uint32_t key) {
     if (key & SV_QUAD) key = SV_QUAD;
     else if (!(key & SV_TEX)) key &= ~(SV_SHADE(3) | SV_IGN_TA | SV_HUD(3));    /* what only textured polygons have */
     if (zv_on) key |= SV_ZV;
-    svar *v = sv_cur && sv_cur->key == key ? sv_cur : sv_get(key);
+    uint32_t pk = sv_uber ? SV_UBER | (key & SV_ZV) : key;   /* the program for it */
+    svar *v = sv_cur && sv_cur->key == pk ? sv_cur : sv_get(pk);
     if (!v) return;
-    if (v != sv_cur) { p_glUseProgram(v->prog); sv_cur = v; }
+    if (v != sv_cur) { p_glUseProgram(v->prog); sv_cur = v; gcn.progs++; }
+    sv_state = key;
+    if (sv_uber && (!v->st_set || v->st_key != key)) { p_glUniform1i(v->st, (GLint)(key & SV_STATE)); v->st_key = key; v->st_set = 1; }
     if (v->stamp != sv_stamp) {
         v->stamp = sv_stamp;
         if (v->scale >= 0) p_glUniform2f(v->scale, FU.sx, FU.sy);
@@ -540,14 +674,29 @@ static void sv_use(uint32_t key) {
         if (v->fog_den >= 0) p_glUniform1f(v->fog_den, FU.fog_den);
     }
 }
+/* a program per state or one for all of them: what the port asks for (dc_pvr_gl_variants), the
+ * platform's way when it leaves it, DC_GL_VARIANTS=1 / 0 over both */
+static int sv_want_uber(void) {
+    static int env = -2;
+    if (env == -2) { const char *e = getenv("DC_GL_VARIANTS"); env = e && (*e == '0' || *e == '1') ? *e == '1' : -1; }
+#ifdef __SWITCH__
+    int variants = 1;
+#else
+    int variants = 0;
+#endif
+    if (dc_pvr_gl_variants >= 0) variants = dc_pvr_gl_variants != 0;
+    if (env >= 0) variants = env;
+    return !variants;
+}
+static int sv_list_loaded;              /* the list's variants are built (for this depth mode) */
 /* the variants a game used before, from dc_pvr_gl_shader_list: built now, not in the middle of play */
 static void sv_load_list(void) {
-    if (!dc_pvr_gl_shader_list) return;
+    if (!dc_pvr_gl_shader_list || sv_uber) return;
     FILE *f = fopen(dc_pvr_gl_shader_list, "r");
     if (!f) return;
     char line[64]; int n = 0;
     sv_listed = 1;
-    while (fgets(line, sizeof line, f) && n < NSV / 2) {
+    while (fgets(line, sizeof line, f) && n < 128) {
         uint32_t key = (uint32_t)strtoul(line, NULL, 16);
         if (!key || key >= (1u << 18) || !(key & SV_ZV) != !zv_on) continue;
         if (sv_get(key)) n++;
@@ -580,9 +729,16 @@ int dc_pvr_gl_init(void *(*getproc)(const char *)) {
     p_glVertexAttribPointer(5, 4, GL_FLOAT, GL_FALSE, sizeof(gv), (void *)offsetof(gv, o1));
     for (int i = 0; i < 6; i++) p_glEnableVertexAttribArray((GLuint)i);
     { GLfloat a = 0; p_glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY, &a); while (p_glGetError()) {} max_aniso = a; }
+    sv_uber = sv_want_uber();
     sv_listed = 1;
-    if (!sv_get(SV_TEX | SV_SHADE(3) | SV_USE_ALPHA | SV_GOURAUD | SV_FOG(2))) return -1;   /* the shaders build here at all */
+    if (!sv_get(sv_uber ? SV_UBER : SV_TEX | SV_SHADE(3) | SV_USE_ALPHA | SV_GOURAUD | SV_FOG(2))) return -1;   /* the shaders build here at all */
     sv_listed = 0;
+    {   /* which GPU and driver this is, for whoever reads the log */
+        const GLubyte *(*getstr)(GLenum) = (const GLubyte *(*)(GLenum))getproc("glGetString");
+        const GLubyte *r = getstr ? getstr(0x1F01 /* RENDERER */) : NULL, *ver = getstr ? getstr(0x1F02 /* VERSION */) : NULL;
+        fprintf(stderr, "pvr_gl: %s, OpenGL %s\n", r ? (const char *)r : "?", ver ? (const char *)ver : "?");
+        while (p_glGetError()) {}
+    }
     {   /* zv_on's needs: glClipControl (GL 4.5 or ARB_clip_control) */
         const unsigned char *(*gsi)(GLenum, GLuint) = (const unsigned char *(*)(GLenum, GLuint))getproc("glGetStringi");
         GLint n = 0, maj = 0, min = 0;
@@ -1353,7 +1509,7 @@ static GLenum blend_dst(int i) { static const GLenum t[8] = { GL_ZERO, GL_ONE, G
 
 static int quad_first;                 /* full-screen quad in the vertex buffer */
 static void draw_quad(float r, float g, float b, float a) {
-    uint32_t back = sv_cur ? sv_cur->key : SV_PLAIN;
+    uint32_t back = sv_cur ? sv_state : SV_PLAIN;
     sv_use(SV_QUAD);
     if (sv_cur && sv_cur->quad_col >= 0) p_glUniform4f(sv_cur->quad_col, r, g, b, a);
     p_glDrawArrays(GL_TRIANGLES, quad_first, 6);
@@ -1416,9 +1572,9 @@ static void scissor_for(const pvr_poly *p) {
 static struct { bkey key; int valid; GLint *first; GLsizei *count; int n, cap; } B;
 /* DC_GL_STATS=1: what a frame costs to draw, averaged and printed every 300 frames (polygons, vertices
  * sent, state changes, draw calls) */
-static struct { int on; unsigned long frames, polys, verts, states, draws, ranges, mods, tav, sunk; } gst = { -1, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+static struct { int on; unsigned long frames, polys, verts, states, draws, ranges, mods, tav, sunk, progs; } gst = { -1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 static void batch_flush(void) {
-    if (B.n && gst.on > 0) { gst.draws++; gst.ranges += (unsigned long)B.n; }
+    if (B.n) { gcn.draws++; if (gst.on > 0) { gst.draws++; gst.ranges += (unsigned long)B.n; } }
     if (B.n == 1) p_glDrawArrays(GL_TRIANGLES, B.first[0], B.count[0]);
     else if (B.n > 1) p_glMultiDrawArrays(GL_TRIANGLES, B.first, B.count, B.n);
     B.n = 0;
@@ -1434,6 +1590,7 @@ static void batch_add(const pvr_poly *p, int set, int mark, int blend, int first
     if (k.hud & 2) memcpy(k.ub, poly_uvbox[p - poly_base], sizeof k.ub);
     if (!B.valid || memcmp(&k, &B.key, sizeof k)) {
         batch_flush();
+        gcn.states++;
         if (gst.on > 0) gst.states++;
         if (mark >= 0) p_glStencilFunc(GL_ALWAYS, mark, 0xFF);
         set_poly_state(p, set, k.hud);
@@ -2025,9 +2182,17 @@ static int zv_selftest(void) {
     return ok;
 }
 int dc_pvr_gl_fast_depth_ok(void) { return zv_ok; }
+/* what drawing has asked of the driver so far: frames, polygons, changes of state, changes of program,
+ * draw calls (a frontend reports them a frame when a game runs slow) */
+void dc_pvr_gl_counts(unsigned long c[5]) { c[0] = gcn.frames; c[1] = gcn.polys; c[2] = gcn.states; c[3] = gcn.progs; c[4] = gcn.draws; }
 static void zv_apply(void) {
     int want = dc_pvr_gl_fast_depth && zv_ok;
-    static int listed, tested;
+    static int tested, said = -1;
+    {   /* the port may have set dc_pvr_gl_variants after the window opened: followed from the next frame */
+        int u = sv_want_uber();
+        if (u != sv_uber) { sv_uber = u; sv_cur = NULL; sv_list_loaded = 0; }
+        if (said != sv_uber) { said = sv_uber; fprintf(stderr, "pvr_gl: %s\n", sv_uber ? "one program for every render state" : "a program per render state"); }
+    }
     if (want && !tested) {
         tested = 1;
         zv_on = 1; p_glClipControl(GL_LOWER_LEFT, GL_ZERO_TO_ONE);
@@ -2040,9 +2205,9 @@ static void zv_apply(void) {
         p_glClipControl(GL_LOWER_LEFT, zv_on ? GL_ZERO_TO_ONE : GL_NEGATIVE_ONE_TO_ONE);
         sv_cur = NULL;                           /* the buffers follow: ensure_fbo and ensure_ms look at their depth's format */
         fprintf(stderr, "pvr_gl: depth %s\n", zv_on ? "from the vertices (float buffer, tested before shading)" : "by logarithm per pixel");
-        listed = 0;
+        sv_list_loaded = 0;
     }
-    if (!listed) { listed = 1; sv_load_list(); }
+    if (!sv_list_loaded) { sv_list_loaded = 1; sv_load_list(); }
 }
 static void render_frame(int scale) {
     if (!ready) return;
@@ -2588,15 +2753,17 @@ static void render_frame(int scale) {
     p_glBindBuffer(GL_ARRAY_BUFFER, vbo);
     p_glBufferData(GL_ARRAY_BUFFER, (GLsizeiptr)nverts * (GLsizeiptr)sizeof(gv), verts, GL_STREAM_DRAW);
     if (gst.on < 0) { const char *e = getenv("DC_GL_STATS"); gst.on = e && *e == '1'; }
+    gcn.frames++; gcn.polys += (unsigned long)f.npolys;
     if (gst.on > 0) {
         gst.polys += (unsigned long)f.npolys; gst.verts += (unsigned long)nverts; gst.mods += (unsigned long)f.nmods; gst.tav += (unsigned long)f.nverts;
         if (++gst.frames % 300 == 0) {
-            fprintf(stderr, "pvr_gl: a frame: %lu polygons, %lu vertices, %lu state changes, %lu draw calls (%lu ranges), %lu volume triangles, %d shader variants\n",
-                    gst.polys / 300, gst.verts / 300, gst.states / 300, gst.draws / 300, gst.ranges / 300, gst.mods / 300, sv_n);
+            fprintf(stderr, "pvr_gl: a frame: %lu polygons, %lu vertices, %lu state changes, %lu program changes, %lu draw calls (%lu ranges), %lu volume triangles, %d %s\n",
+                    gst.polys / 300, gst.verts / 300, gst.states / 300, (gcn.progs - gst.progs) / 300, gst.draws / 300, gst.ranges / 300, gst.mods / 300, sv_n,
+                    sv_uber ? "programs (one for every state)" : "shader variants");
             /* over the 300 frames (all the game sent, drawn or not): how many came through the sink */
             fprintf(stderr, "pvr_gl: the game's vertices in the frames drawn: %lu a frame; through the TA's sink in that time: %lu a frame\n",
                     gst.tav / 300, (pvr_sink_vertices - gst.sunk) / 300);
-            gst.polys = gst.verts = gst.states = gst.draws = gst.ranges = gst.mods = gst.tav = 0; gst.sunk = pvr_sink_vertices;
+            gst.polys = gst.verts = gst.states = gst.draws = gst.ranges = gst.mods = gst.tav = 0; gst.sunk = pvr_sink_vertices; gst.progs = gcn.progs;
         }
     }
 

@@ -18,9 +18,57 @@ static void pvr(uint32_t ofs, uint32_t v) { dc_wr32(0xA05F8000u + ofs, v); }
 static void ta(const uint32_t w[8]) { for (int i = 0; i < 8; i++) dc_wr32(0x10000000u + i * 4, w[i]); }
 static uint32_t fu(float f) { uint32_t u; memcpy(&u, &f, 4); return u; }
 
+/* A 256 x 128 scene of 16-pixel cells, one polygon each, between them in every render state the
+ * renderer builds its programs for: textured or not, the four shading instructions, vertex alpha,
+ * texture alpha ignored, offset colour, Gouraud or flat, the four fog modes; opaque, translucent
+ * (some drawn in two passes: dc_pvr_gl_topaque), punch-through, two-volume polygons half inside a
+ * volume, and flat HUD pieces (bicubic, clamped to their part of the texture). */
+#define TEX4444 0x110000u
+static void cell(int col, int row, int list, uint32_t st, float z0, float dz) {
+    int tex = st & 1, shade = (st >> 1) & 3, use_alpha = (st >> 3) & 1, ign_ta = (st >> 4) & 1, offset = (st >> 5) & 1, gouraud = (st >> 6) & 1,
+        fog = (st >> 7) & 3, vol = (st >> 9) & 1, blend = (st >> 10) & 1, point = (st >> 11) & 1, sub = (st >> 12) & 1;
+    uint32_t pcw = (4u << 29) | ((uint32_t)list << 24) | ((uint32_t)vol << 6) | ((uint32_t)tex << 3) | ((uint32_t)offset << 2) | ((uint32_t)gouraud << 1);
+    uint32_t isp = ((blend ? 4u : 6u) << 29);
+    uint32_t tsp = ((blend ? 4u : 1u) << 29) | ((blend ? 5u : 0u) << 26) | ((uint32_t)fog << 22) | ((uint32_t)use_alpha << 20) | ((uint32_t)ign_ta << 19)
+                 | ((point ? 0u : 1u) << 13) | ((uint32_t)shade << 6) | (3u << 3) | 3u;
+    uint32_t tcw = (2u << 27) | (1u << 26) | (TEX4444 >> 3);
+    uint32_t h[8] = { pcw, isp, tsp, tex ? tcw : 0, vol ? tsp ^ (1u << 20) : 0, 0, 0, 0 };
+    ta(h);
+    static const uint32_t base[4] = { 0xFFE04020u, 0x8020C0F0u, 0xC0F0F040u, 0x4080FF80u }, spec[4] = { 0x40101030u, 0x80302010u, 0xC0002040u, 0xFF403000u };
+    for (int k = 0; k < 4; k++) {
+        float x = (float)(col * 16 + (k & 1) * 15), y = (float)(row * 16 + (k >> 1) * 15), z = z0 + dz * (float)k;
+        float u = sub ? 0.25f + 0.5f * (float)(k & 1) : -0.25f + 1.5f * (float)(k & 1), v = sub ? 0.125f + 0.75f * (float)(k >> 1) : 1.25f * (float)(k >> 1);
+        uint32_t c = base[(k + col) & 3], o = spec[(k + row) & 3];
+        uint32_t w[8] = { (7u << 29) | (k == 3 ? 1u << 28 : 0), fu(x), fu(y), fu(z), tex ? fu(u) : 0, tex ? fu(v) : 0, c, o };
+        if (vol) { w[4] = c; w[5] = base[(k + col + 2) & 3] ^ 0x00FFFFFFu; w[6] = w[7] = 0; }   /* two volumes, untextured: both sets' colours */
+        ta(w);
+    }
+}
+static void state_scene(void) {
+    uint32_t eol[8] = {0};
+    for (int row = 0; row < 4; row++) for (int col = 0; col < 16; col++)                 /* opaque: 64 of the 512 states */
+        cell(col, row, 0, (uint32_t)((row * 16 + col) * 37 + 11) & 511u, 1.0f + 0.01f * (float)col, 0.25f);
+    for (int col = 0; col < 16; col++) cell(col, 4, 0, (uint32_t)(col & 1) << 6 | (uint32_t)((col >> 1) & 3) << 7 | (1u << 3) | (1u << 9), 1.0f, 0.125f);   /* two volumes */
+    for (int col = 0; col < 16; col++)                                                  /* HUD: flat, 1/w 1000 */
+        cell(col, 7, 0, 1u | (uint32_t)(col & 3) << 1 | (1u << 3) | (uint32_t)((col >> 2) & 1) << 11 | (uint32_t)((col >> 3) & 1) << 12 | (uint32_t)(col % 3 == 0) << 4, 1000.f, 0.f);
+    ta(eol);
+    {   /* an opaque volume in front of the left half of the two-volume row */
+        uint32_t mh[8] = { (4u << 29) | (1u << 24), 1u << 29, 0, 0, 0, 0, 0, 0 };
+        uint32_t tri[16] = { 7u << 29, fu(0), fu(60), fu(8), fu(250), fu(60), fu(8), fu(0), fu(84), fu(8), 0, 0, 0, 0, 0, 0 };
+        ta(mh); ta(tri); ta(tri + 8); ta(eol);
+    }
+    for (int col = 0; col < 16; col++)                                                  /* translucent: blended, half of them in two passes */
+        cell(col, 5, 2, 1u | (uint32_t)(col & 3) << 1 | (1u << 3) | (uint32_t)((col >> 2) & 1) << 5 | (1u << 6) | (uint32_t)((col >> 3) & 1) * (2u << 7) | (1u << 10), 1.0f, col & 8 ? 0.f : 0.25f);
+    ta(eol);
+    for (int col = 0; col < 16; col++)                                                  /* punch-through */
+        cell(col, 6, 4, 1u | (uint32_t)(col & 3) << 1 | (1u << 3) | (uint32_t)((col >> 2) & 1) << 6 | (uint32_t)((col >> 3) & 1) << 7 | (2u << 7) * (uint32_t)!(col & 8), 1.0f, 0.25f);
+    ta(eol);
+}
+
 int main(void) {
     sh4ctx c; dc_init(&c);
     dc_front_config cfg = { .title = "dc-core test", .scale = 2, .no_pacing = 1, .no_vmu = 1 };
+    dc_pvr_gl_shader_list = "";                             /* no list of shader variants from an earlier run, and none left behind */
     if (dc_front_open(&cfg)) { printf("FAIL: frontend did not open\n"); return 1; }
 
     pvr(0x068, 63u << 16); pvr(0x06C, 63u << 16);           /* 64x64 scene */
@@ -129,6 +177,56 @@ int main(void) {
     }
     pvr(0x074, 0);
     dc_pvr_gl_fast_depth = 1;
+
+    /* One program for every render state against a program per state (pvr_gl.c sv_uber, dc_pvr_gl_variants):
+     * the same picture to the bit, in both depth modes and without anti-aliasing (punch-through then cuts
+     * by itself, not by coverage), and no changes of program where there is one. */
+    {
+        for (int y = 0; y < 64; y++) for (int x = 0; x < 64; x++) {            /* ARGB4444, scan order: alpha runs across */
+            uint16_t px = (uint16_t)(((x >> 2) << 12) | ((y >> 2) << 8) | (((x ^ y) & 15) << 4) | (15 - (x >> 2)));
+            dc_wr8(0xA4000000u + TEX4444 + (uint32_t)(y * 64 + x) * 2, px & 255); dc_wr8(0xA4000000u + TEX4444 + (uint32_t)(y * 64 + x) * 2 + 1, px >> 8);
+        }
+        pvr(0x068, 255u << 16); pvr(0x06C, 127u << 16);                        /* 256 x 128 */
+        pvr(0x0B0, 0x00406080u); pvr(0x0B4, 0x00804020u); pvr(0x0B8, 0x8007u); /* fog colours; density 128 */
+        for (int i = 0; i < 128; i++) pvr(0x200 + (uint32_t)i * 4, (uint32_t)((255 - 2 * i) << 8 | (254 - 2 * i)));
+        pvr(0x11C, 0x60);                                                      /* punch-through alpha reference */
+        dc_pvr_gl_hud_z = 500.f; dc_pvr_gl_topaque = 1;
+        static uint8_t pic[2][512 * 256 * 3];
+        int aa = dc_pvr_gl_msaa;
+        for (int pass = 0; pass < 3; pass++) {
+            unsigned long progs[2] = { 0, 0 }, states[2] = { 0, 0 };
+            int zv = pass != 1;
+            dc_pvr_gl_fast_depth = zv; dc_pvr_gl_msaa = pass == 2 ? 0 : aa;
+            for (int m = 0; m < 2; m++) {
+                unsigned long c0[5], c1[5];
+                dc_pvr_gl_variants = !m;
+                pvr(0x128, 0); pvr(0x144, 0x80000000u);
+                state_scene();
+                dc_pvr_gl_counts(c0);
+                pvr(0x014, 1);
+                dc_pvr_gl_counts(c1);
+                progs[m] = c1[3] - c0[3]; states[m] = c1[2] - c0[2];
+                w = h = 0;
+                dc_pvr_gl_read(pic[m], &w, &h);
+                CHECK(w == 512 && h == 256, "state scene %dx%d, want 512x256", w, h);
+            }
+            const char *mode = pass == 2 ? "no anti-aliasing" : zv ? "depth from the vertices" : "depth by logarithm";
+            long diff = 0, drawn = 0, first = -1;
+            for (long i = 0; i < 512L * 256; i++) {
+                const uint8_t *a = pic[0] + i * 3, *b = pic[1] + i * 3;
+                if (a[0] != b[0] || a[1] != b[1] || a[2] != b[2]) { diff++; if (first < 0) first = i; }
+                if (!(a[0] == 0 && a[1] == 0 && a[2] == 255)) drawn++;
+            }
+            CHECK(drawn > 60000, "%s: the state scene drew %ld pixels, want most of 131072", mode, drawn);
+            CHECK(diff == 0, "%s: one program and a program per state differ in %ld pixels, first at %ld,%ld: %02X%02X%02X against %02X%02X%02X", mode, diff,
+                  first % 512, first / 512, pic[1][first * 3], pic[1][first * 3 + 1], pic[1][first * 3 + 2], pic[0][first * 3], pic[0][first * 3 + 1], pic[0][first * 3 + 2]);
+            CHECK(states[0] == states[1] && states[0] >= 100, "%s: %lu and %lu state changes, want the same and 100 or more", mode, states[0], states[1]);
+            CHECK(progs[0] >= 40, "%s: a program per state changed program %lu times, want 40 or more (the scene's states)", mode, progs[0]);
+            CHECK(progs[1] <= 4, "%s: one program for every state changed program %lu times", mode, progs[1]);
+        }
+        dc_pvr_gl_variants = -1; dc_pvr_gl_hud_z = 0; dc_pvr_gl_topaque = 0; dc_pvr_gl_fast_depth = 1; dc_pvr_gl_msaa = aa;
+        pvr(0x068, 63u << 16); pvr(0x06C, 63u << 16);
+    }
     dc_front_close();
     printf(fails ? "%d frontend checks failed\n" : "frontend tests passed\n", fails);
     return fails != 0;

@@ -529,6 +529,24 @@ static void osd_count_frame(void) {
 #endif
     if (cfg.stats) fprintf(stderr, "dc-core: %.1f fps, ms a frame: game %.1f, wait %.1f, render %.1f, present %.1f, idle %.1f; sound %.1f (arm %.1f, dsp %.1f)%s\n",
                            fps_now, g < 0 ? 0 : g, w, r, p, i, a, arm, dsp, aica_thr ? " on its own thread" : "");
+    {   /* a game that falls behind real time says where a frame's time goes, in the log: Show FPS's numbers
+         * and what drawing asked of the driver. After two seconds of it, then every ten while it lasts.
+         * Not for runs with no pacing, fast-forward, or a window that held a pause (a long window). */
+        static uint64_t c0; static unsigned long gc0[5]; static int slow_n; static Uint64 said;
+        uint64_t cyc = dc_current_ctx ? dc_current_ctx->cycles : 0;
+        unsigned long gc[5]; dc_pvr_gl_counts(gc);
+        double speed = c0 && cyc > c0 ? (double)(cyc - c0) / 200e6 / dt / (double)game_speed() : 1.0;
+        slow_n = !cfg.no_pacing && !dc_front_fast && dt < 0.75 && fr && speed < 0.95 ? slow_n + 1 : 0;
+        if (slow_n >= 4 && (!said || (double)(now - said) / f > 10.0)) {
+            unsigned long n = gc[0] - gc0[0]; if (!n) n = 1;
+            said = now;
+            fprintf(stderr, "dc-core: running at %.0f%% of full speed: %.1f ms a frame (game %.1f, %s %.1f, drawing %.1f, presenting %.1f); "
+                            "drawn a frame: %lu polygons, %lu state changes, %lu program changes, %lu draw calls\n",
+                    speed * 100.0, tot, g < 0 ? 0 : g, aica_thr ? "waiting for sound" : "sound", aica_thr ? w : a, r, p,
+                    (gc[1] - gc0[1]) / n, (gc[2] - gc0[2]) / n, (gc[3] - gc0[3]) / n, (gc[4] - gc0[4]) / n);
+        }
+        c0 = cyc; memcpy(gc0, gc, sizeof gc0);
+    }
     t0 = now; r0 = renders; d0 = drawn; a0 = dc_prof_aica; r0t = prof_render; p0 = prof_present; i0 = prof_idle; w0 = prof_wait;
     ar0 = dc_prof_aica_arm; ds0 = dc_prof_aica_dsp;
     if (osd_fps) need_present = 1;
