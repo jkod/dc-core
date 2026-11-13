@@ -225,6 +225,12 @@ function(dccore_add_recomp target)
   else()
     set(fast --no-local-regs)
   endif()
+  # the generated C must come from this dc-core's recompiler: a change to it (or to the executable or
+  # the function list) reconfigures, which generates again. Without this a plain `cmake --build` after
+  # updating dc-core kept code from the old recompiler running on the new runtime (Rush's race music
+  # went quiet and thin until a fresh setup).
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+               ${DCCORE_DIR}/tools/recomp/sh4recomp.py ${A_BIN} ${A_FUNCS})
   execute_process(
     COMMAND ${DCCORE_PYTHON} ${DCCORE_DIR}/tools/recomp/sh4recomp.py ${A_BIN}
             --base ${A_BASE} --funcs ${A_FUNCS} --out ${out} ${sj} ${fast}
