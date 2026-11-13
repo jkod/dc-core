@@ -1477,7 +1477,10 @@ static unsigned char *poly_edge;
  * fragments per pixel, the GL path per polygon. A car's decals and the coplanar layers over its paint
  * (Daytona USA 2001) come out in pieces when whole polygons, or their triangles, are ordered by depth.
  * Fragments a normal alpha blend draws fully opaque come out the same in any order, so pass 1 draws just
- * those, writing depth; pass 2 draws the rest sorted, behind what pass 1 drew hidden. */
+ * those, writing depth; pass 2 draws the rest sorted, behind what pass 1 drew hidden.
+ * 2: of the polygons whose alpha is their texture's, only those with a cut-out texture (pvr_texinfo.soft
+ * says which). Tennis 2K2 draws its cruise ship, decks, railings and the people on them in the translucent
+ * list: a railing along a deck sorted behind the people standing behind it, so they stood before it. */
 int dc_pvr_gl_topaque;
 static int tpass;                         /* 0 off, 1 the opaque fragments, 2 the rest */
 static const pvr_frame *tp_frame;         /* the frame being drawn */
@@ -1491,10 +1494,55 @@ static int two_pass_poly(const pvr_poly *p) {
     for (int j = 1; j < p->n; j++) if (v[j].z != v[0].z) return 1;
     return 0;
 }
+/* per polygon while the two passes are drawn: 0 not a two-pass polygon; 1 in both passes, the program
+ * sorting its fragments by their alpha; 2 opaque throughout, so all of it is pass 1's and none pass 2's;
+ * 3 see-through throughout, all of it pass 2's. A scene drawn largely in the translucent list (Tennis
+ * 2K2's cruise ship: 430 of its 1600 translucent polygons are solid walls and decks) is then not drawn
+ * twice, and the solid part goes without the program's test, which leaves the GPU its early depth test. */
+static unsigned char *poly_tp;
+/* a fragment's alpha as the program makes it: the texture's (decal, modulate), the vertices' (untextured,
+ * decal alpha), or their product (modulate alpha); texture alpha ignored and vertex alpha not used are 1.
+ * Returns whether the texture's alpha is in it; a0 .. a1 is the range of the vertices' part (1 .. 1 without) */
+static int poly_alpha(const pvr_frame *fr, const pvr_poly *p, float *a0, float *a1) {
+    int tex = (p->isp >> 25) & 1, sh = (p->tsp >> 6) & 3;
+    *a0 = *a1 = 1.f;
+    if (((p->tsp >> 20) & 1) && (!tex || sh >= 2)) {
+        const pvr_vtx *v = fr->verts + p->first;
+        *a0 = *a1 = v[0].c[3];
+        for (int j = 1; j < p->n; j++) { if (v[j].c[3] < *a0) *a0 = v[j].c[3]; if (v[j].c[3] > *a1) *a1 = v[j].c[3]; }
+    }
+    return tex && sh != 2 && !((p->tsp >> 19) & 1);
+}
+/* pvr_texinfo.soft of a polygon's texture, looked up once a frame for each texture */
+static int tex_soft(uint32_t tcw, uint32_t tsp) {
+    static struct { uint32_t tcw, tsz, stamp; int soft; } memo[256];
+    uint32_t tsz = tsp & 0x3F, h = (tcw * 2654435761u ^ tsz * 40503u) >> 24;
+    if (memo[h].stamp != frame_no + 1 || memo[h].tcw != tcw || memo[h].tsz != tsz) {
+        pvr_texinfo ti; tex_get(tcw, tsp, &ti);
+        memo[h].tcw = tcw; memo[h].tsz = tsz; memo[h].stamp = frame_no + 1; memo[h].soft = ti.soft;
+    }
+    return memo[h].soft;
+}
+static int two_pass_class(const pvr_poly *p) {
+    if (!two_pass_poly(p)) return 0;
+    if (((p->tsp >> 22) & 3) == 3) return 1;                               /* fog mode 3: the alpha is the fog table's */
+    float a0, a1;
+    int ta = poly_alpha(tp_frame, p, &a0, &a1);
+    if (ta && dc_pvr_gl_topaque == 2) {
+        /* cut-outs only: a gradient's opaque middle stays with the rest of it in the sorted pass (drawn first,
+         * the middle of a ship's wake stood out white where the sea, sorted after the wake, covered the rest) */
+        if (poly_cap && poly_cap[p - poly_base]) return 3;                 /* a captured frame: not the texture's texels */
+        if (tex_soft(p->tcw, p->tsp)) return 3;
+    }
+    if (a1 < 0.99f) return 3;                                              /* below the passes' 0.996 with room for the interpolation */
+    if (!ta && a0 >= 0.99605f) return 2;                                   /* 254 / 255 and up */
+    return 1;
+}
 static void set_poly_state(const pvr_poly *p, int set, int hud) {
     uint32_t tsp = set ? p->tsp1 : p->tsp, tcw = set ? p->tcw1 : p->tcw;
     int tex = (p->isp >> 25) & 1;
-    int tp = tpass && two_pass_poly(p) ? tpass : 0;
+    int cls = tpass && poly_tp && poly_base ? poly_tp[p - poly_base] : 0;
+    int tp = cls == 1 ? tpass : 0;         /* the program tells the fragments apart only where a polygon has both kinds */
     sv_use((tex ? SV_TEX : 0) | SV_SHADE((tsp >> 6) & 3) | (((tsp >> 20) & 1) ? SV_USE_ALPHA : 0) | (((tsp >> 19) & 1) ? SV_IGN_TA : 0)
            | (((p->isp >> 24) & 1) ? SV_OFFSET : 0) | (((p->isp >> 23) & 1) ? SV_GOURAUD : 0) | SV_FOG((tsp >> 22) & 3)
            | SV_PT(p->list == 4 ? (ms_a2c ? 2 : 1) : 0) | SV_TPASS(tp) | SV_HUD(hud & 3) | (set ? SV_SET : 0));
@@ -1525,7 +1573,7 @@ static void set_poly_state(const pvr_poly *p, int set, int hud) {
     if (p->list == 4 && zmode == 0) zmode = 6;
     p_glDepthFunc(depth_fn[zmode]);
     p_glDepthMask(p->list != 2 && !((p->isp >> 26) & 1));
-    if (tp == 1) p_glDepthMask(1);
+    if (cls && tpass == 1) p_glDepthMask(1);
 }
 static GLenum blend_src(int i) { static const GLenum t[8] = { GL_ZERO, GL_ONE, GL_DST_COLOR, GL_ONE_MINUS_DST_COLOR, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_DST_ALPHA, GL_ONE_MINUS_DST_ALPHA }; return t[i & 7]; }
 static GLenum blend_dst(int i) { static const GLenum t[8] = { GL_ZERO, GL_ONE, GL_SRC_COLOR, GL_ONE_MINUS_SRC_COLOR, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_DST_ALPHA, GL_ONE_MINUS_DST_ALPHA }; return t[i & 7]; }
@@ -1557,7 +1605,7 @@ static int cmp_sort(const void *a, const void *b) {
 
 /* Draw batching: consecutive polygons with the same render state go out in one call (menus can
  * have thousands of small polygons, and per-call overhead dominates). Draw order is unchanged. */
-typedef struct { uint32_t isp, tsp, tcw; int list, set, mark, blend, uclip, ux0, uy0, ux1, uy1, hud; float ub[4]; int cap, edge; } bkey;
+typedef struct { uint32_t isp, tsp, tcw; int list, set, mark, blend, uclip, ux0, uy0, ux1, uy1, hud; float ub[4]; int cap, edge, tp; } bkey;
 /* HUD polygons (flat, at or above dc_pvr_gl_hud_z) get the sharper texture filter */
 int dc_pvr_gl_hud_sharp = 1;
 int dc_pvr_gl_hud_move = 1;
@@ -1609,7 +1657,8 @@ static void batch_add(const pvr_poly *p, int set, int mark, int blend, int first
     bkey k = { p->isp, set ? p->tsp1 : p->tsp, set ? p->tcw1 : p->tcw, p->list, set, mark, blend,
                p->uclip, p->uclip ? p->ux0 : 0, p->uclip ? p->uy0 : 0, p->uclip ? p->ux1 : 0, p->uclip ? p->uy1 : 0,
                ((p->tsp >> 13) & 3) ? is_hud(p) : (is_hud(p) & 2), {0, 0, 0, 0}, poly_cap && poly_base ? poly_cap[p - poly_base] : 0,
-               poly_edge && poly_base ? (poly_edge[p - poly_base] >> set) & 1 : 0 }; /* bicubic for bilinear-filtered HUD textures only */
+               poly_edge && poly_base ? (poly_edge[p - poly_base] >> set) & 1 : 0,
+               tpass && poly_tp && poly_base ? poly_tp[p - poly_base] : 0 }; /* bicubic for bilinear-filtered HUD textures only */
     if (k.hud & 2) memcpy(k.ub, poly_uvbox[p - poly_base], sizeof k.ub);
     if (!B.valid || memcmp(&k, &B.key, sizeof k)) {
         batch_flush();
@@ -2333,7 +2382,7 @@ static void render_frame(int scale) {
         for (int k = 0; k < p->n; k++) { v[k].x = -1e4f; v[k].y = -1e4f; v[k].z = 1e-6f; }
     }
     {   static int cap_hud;
-        if (f.npolys > cap_hud) { cap_hud = f.npolys + 1024; poly_hud = realloc(poly_hud, (size_t)cap_hud); poly_uvbox = realloc(poly_uvbox, (size_t)cap_hud * sizeof *poly_uvbox); poly_cap = realloc(poly_cap, (size_t)cap_hud); poly_edge = realloc(poly_edge, (size_t)cap_hud); }
+        if (f.npolys > cap_hud) { cap_hud = f.npolys + 1024; poly_hud = realloc(poly_hud, (size_t)cap_hud); poly_uvbox = realloc(poly_uvbox, (size_t)cap_hud * sizeof *poly_uvbox); poly_cap = realloc(poly_cap, (size_t)cap_hud); poly_edge = realloc(poly_edge, (size_t)cap_hud); poly_tp = realloc(poly_tp, (size_t)cap_hud); }
         poly_base = f.polys;
         for (int i = 0; i < f.npolys; i++) {
             const pvr_poly *p = &f.polys[i]; const pvr_vtx *v = f.verts + p->first;
@@ -2976,10 +3025,11 @@ static void render_frame(int scale) {
     if (!presort) qsort(s, nt, sizeof *s, cmp_sort);
     p_glEnable(GL_BLEND);
     if (!presort && dc_pvr_gl_topaque) {
+        for (int k = 0; k < nt; k++) poly_tp[s[k].idx] = (unsigned char)two_pass_class(&f.polys[s[k].idx]);
         tpass = 1;
         for (int k = 0; k < nt; k++) {
             const pvr_poly *p = &f.polys[s[k].idx];
-            if (!two_pass_poly(p)) continue;
+            if (poly_tp[s[k].idx] != 1 && poly_tp[s[k].idx] != 2) continue;
             batch_add(p, 0, -1, 1, spans[s[k].idx].first, spans[s[k].idx].count);
         }
         batch_reset();
@@ -2996,7 +3046,7 @@ static void render_frame(int scale) {
         tri_e *t = malloc(sizeof *t * (ntri ? ntri : 1)); int m = 0;
         for (int k = 0; k < nt; k++) {
             int first = spans[s[k].idx].first, cnt = spans[s[k].idx].count / 3;
-            if (!cnt) continue;
+            if (!cnt || (tpass && poly_tp[s[k].idx] == 2)) continue;       /* nothing to draw, or all of it drawn in pass 1 */
             const pvr_poly *p = &f.polys[s[k].idx]; const pvr_vtx *v = f.verts + p->first;
             float z0 = v[0].z, z1 = v[0].z, amin = v[0].c[3];
             for (int j = 1; j < p->n; j++) { if (v[j].z < z0) z0 = v[j].z; if (v[j].z > z1) z1 = v[j].z; if (v[j].c[3] < amin) amin = v[j].c[3]; }
@@ -3021,6 +3071,7 @@ static void render_frame(int scale) {
     } else
     for (int k = 0; k < nt; k++) {
         const pvr_poly *p = &f.polys[s[k].idx];
+        if (tpass && poly_tp[s[k].idx] == 2) continue;
         batch_add(p, 0, -1, 1, spans[s[k].idx].first, spans[s[k].idx].count);
     }
     batch_reset();

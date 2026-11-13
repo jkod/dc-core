@@ -355,7 +355,7 @@ static void sink(int kind, int list, const uint32_t *w, int words) {
 }
 
 /* ------------------------------------------------------------------ textures */
-typedef struct { uint32_t tcw, tsp_size, pal_gen, pal_hash, gen, start, end; int w, h; uint32_t *px; uint64_t id; } tex_t;
+typedef struct { uint32_t tcw, tsp_size, pal_gen, pal_hash, gen, start, end; int w, h; uint32_t *px; uint64_t id; int soft; } tex_t;
 #define TEX_CACHE 512
 static tex_t tcache[TEX_CACHE];
 static int ntc;
@@ -449,6 +449,7 @@ static tex_t *get_tex(uint32_t tcw, uint32_t tsp) {
         t->gen = page_gen(t->start, t->end);
     }
     uint32_t pal_base = fmt == 5 ? ((tcw >> 21) & 63) << 4 : ((tcw >> 25) & 3) << 8;
+    uint32_t mid = 0, hi = 0;                               /* texels between clear and opaque (alpha 9 .. 253), opaque ones: pvr_texinfo.soft */
     for (int y = 0; y < h; y++)
         for (int x = 0; x < w; x++) {
             uint32_t c;
@@ -477,7 +478,9 @@ static tex_t *get_tex(uint32_t tcw, uint32_t tsp) {
                 c = conv16(fmt == 4 ? 1 : fmt == 7 ? 0 : fmt, tex16(addr + i * 2));
             }
             t->px[y * w + x] = c;
+            hi += c >= 0xFE000000u; mid += c >= 0x09000000u && c < 0xFE000000u;
         }
+    t->soft = mid > hi;
     return t;
 }
 
@@ -847,7 +850,7 @@ static void frame_params(pvr_frame *f) {
 }
 void pvr_get_texture(uint32_t tcw, uint32_t tsp, pvr_texinfo *ti) {
     tex_t *t = get_tex(tcw, tsp);
-    ti->w = t->w; ti->h = t->h; ti->px = t->px; ti->id = t->id;
+    ti->w = t->w; ti->h = t->h; ti->px = t->px; ti->id = t->id; ti->soft = t->soft;
 }
 float pvr_fog_alpha(float invw) { return fog_table(invw); }
 

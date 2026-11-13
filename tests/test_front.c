@@ -44,6 +44,17 @@ static void cell(int col, int row, int list, uint32_t st, float z0, float dz) {
         ta(w);
     }
 }
+/* a translucent quad (blended by alpha, depth test "greater", no fog, point-sampled), 1/w zl at its left
+ * edge and zr at its right; textured (decal) when tcw is not 0, else in the colour argb */
+static void tquad(float x0, float y0, float x1, float y1, float zl, float zr, uint32_t tcw, uint32_t argb) {
+    uint32_t h[8] = { (4u << 29) | (2u << 24) | (tcw ? 1u << 3 : 0), 4u << 29, (4u << 29) | (5u << 26) | (2u << 22) | (1u << 20) | (3u << 3) | 3u, tcw, 0, 0, 0, 0 };
+    ta(h);
+    for (int k = 0; k < 4; k++) {
+        uint32_t w[8] = { (7u << 29) | (k == 3 ? 1u << 28 : 0), fu(k & 1 ? x1 : x0), fu(k >> 1 ? y1 : y0), fu(k & 1 ? zr : zl),
+                          tcw ? fu((float)(k & 1)) : 0, tcw ? fu((float)(k >> 1)) : 0, argb, 0 };
+        ta(w);
+    }
+}
 static void state_scene(void) {
     uint32_t eol[8] = {0};
     for (int row = 0; row < 4; row++) for (int col = 0; col < 16; col++)                 /* opaque: 64 of the 512 states */
@@ -177,6 +188,69 @@ int main(void) {
     }
     pvr(0x074, 0);
     dc_pvr_gl_fast_depth = 1;
+
+    /* Translucent polygons the sort by depth gets wrong, and the opaque fragments first (dc_pvr_gl_topaque).
+     * Three rows, each a deep quad (1/w 1 at its left, 3 at its right: a railing along a deck) and a quad at
+     * 1/w 2 over all of it: sorted by their farthest points the deep one is drawn first, so the other covers it
+     * also on the right, where the deep one is the nearer. Row 1: a cut-out texture (opaque red in its upper
+     * half) under a half see-through green; row 2: the same with a texture that fades (opaque in a quarter,
+     * half see-through in the rest); row 3: solid red under solid green. */
+    {
+#define TEXCUT 0x120000u
+#define TEXFADE 0x124000u
+        for (int y = 0; y < 64; y++) for (int x = 0; x < 64; x++) {
+            uint16_t cut = y < 32 ? 0xFC00 : 0x7C00, fade = y < 16 ? 0xFF00 : 0x8F00;      /* ARGB1555, ARGB4444: red */
+            dc_wr8(0xA4000000u + TEXCUT + (uint32_t)(y * 64 + x) * 2, cut & 255); dc_wr8(0xA4000000u + TEXCUT + (uint32_t)(y * 64 + x) * 2 + 1, cut >> 8);
+            dc_wr8(0xA4000000u + TEXFADE + (uint32_t)(y * 64 + x) * 2, fade & 255); dc_wr8(0xA4000000u + TEXFADE + (uint32_t)(y * 64 + x) * 2 + 1, fade >> 8);
+        }
+        for (int pass = 0; pass < 6; pass++) {
+            int mode = pass % 3, zv = pass < 3;
+            unsigned long c0[5], c1[5];
+            dc_pvr_gl_topaque = mode; dc_pvr_gl_fast_depth = zv;
+            pvr(0x128, 0); pvr(0x144, 0x80000000u);
+            ta(eol);                                                           /* nothing opaque */
+            tquad(8, 4, 56, 20, 1.f, 3.f, (0u << 27) | (1u << 26) | (TEXCUT >> 3), 0xFFFFFFFFu);
+            tquad(8, 4, 56, 20, 2.f, 2.01f, 0, 0x8000FF00u);
+            tquad(8, 24, 56, 40, 1.f, 3.f, (2u << 27) | (1u << 26) | (TEXFADE >> 3), 0xFFFFFFFFu);
+            tquad(8, 24, 56, 40, 2.f, 2.01f, 0, 0x8000FF00u);
+            tquad(8, 44, 56, 60, 1.f, 3.f, 0, 0xFFFF0000u);
+            tquad(8, 44, 56, 60, 2.f, 2.01f, 0, 0xFF00FF00u);
+            ta(eol);
+            dc_pvr_gl_counts(c0);
+            pvr(0x014, 1);
+            dc_pvr_gl_counts(c1);
+            dc_pvr_gl_read(rgb, &w, &h);
+            /* at 2x: the right part (the deep quad nearer) at x 96, the left part at 32; rows at y 12 (in the
+             * cut-out's and the fading texture's opaque part: 12 and 52), 36 (the cut-out's clear part), 104 */
+            const uint8_t *cut_r = rgb + (12 * w + 96) * 3, *cut_l = rgb + (12 * w + 32) * 3, *clear_r = rgb + (36 * w + 96) * 3;
+            const uint8_t *fade_r = rgb + (52 * w + 96) * 3, *solid_r = rgb + (104 * w + 96) * 3, *solid_l = rgb + (104 * w + 32) * 3;
+            const char *dm = zv ? "depth from the vertices" : "depth by logarithm";
+#define IS_RED(p) ((p)[0] == 255 && (p)[1] == 0 && (p)[2] == 0)
+#define IS_GREEN(p) ((p)[0] == 0 && (p)[1] == 255 && (p)[2] == 0)
+#define IS_MIX(p) ((p)[0] >= 120 && (p)[0] <= 135 && (p)[1] >= 120 && (p)[1] <= 135 && (p)[2] == 0)      /* half green over red */
+            CHECK(w == 128 && h == 128, "sorting scene %dx%d, want 128x128", w, h);
+            CHECK(IS_MIX(cut_l), "%s, opaque first %d: a cut-out behind see-through green %02X%02X%02X, want green over red", dm, mode, cut_l[0], cut_l[1], cut_l[2]);
+            CHECK(clear_r[0] < 8 && clear_r[1] >= 120 && clear_r[1] <= 135, "%s, opaque first %d: the cut-out's clear half %02X%02X%02X, want green over the background", dm, mode, clear_r[0], clear_r[1], clear_r[2]);
+            CHECK(IS_GREEN(solid_l), "%s, opaque first %d: solid red behind solid green %02X%02X%02X", dm, mode, solid_l[0], solid_l[1], solid_l[2]);
+            if (mode == 0) {                                                   /* sorted only: the deep quads are covered */
+                CHECK(IS_MIX(cut_r) && IS_MIX(fade_r) && IS_GREEN(solid_r), "%s, sorted only: %02X%02X%02X %02X%02X%02X %02X%02X%02X, want the nearer deep quads covered",
+                      dm, cut_r[0], cut_r[1], cut_r[2], fade_r[0], fade_r[1], fade_r[2], solid_r[0], solid_r[1], solid_r[2]);
+            } else {
+                CHECK(IS_RED(cut_r), "%s, opaque first %d: a cut-out before see-through green %02X%02X%02X, want red", dm, mode, cut_r[0], cut_r[1], cut_r[2]);
+                CHECK(IS_RED(solid_r), "%s, opaque first %d: solid red before solid green %02X%02X%02X, want red", dm, mode, solid_r[0], solid_r[1], solid_r[2]);
+                /* a texture that fades: its opaque part first with 1, all of it sorted (covered as before) with 2 */
+                CHECK(mode == 1 ? IS_RED(fade_r) : IS_MIX(fade_r), "%s, opaque first %d: a fading texture's opaque part before see-through green %02X%02X%02X, want %s",
+                      dm, mode, fade_r[0], fade_r[1], fade_r[2], mode == 1 ? "red" : "green over red");
+            }
+            /* what is drawn: sorted, the four untextured quads follow each other in one state (3 changes of
+             * state with the two textured ones). In two passes a polygon is drawn twice only where it has both
+             * kinds of fragment (the two textured quads with 1, the cut-out alone with 2): the solid pair goes
+             * out once, in pass 1, and the see-through pair once, in pass 2 */
+            unsigned long want = mode == 0 ? 3 : mode == 1 ? 6 : 5;
+            CHECK(c1[2] - c0[2] == want, "%s, opaque first %d: %lu state changes, want %lu", dm, mode, c1[2] - c0[2], want);
+        }
+        dc_pvr_gl_topaque = 0; dc_pvr_gl_fast_depth = 1;
+    }
 
     /* One program for every render state against a program per state (pvr_gl.c sv_uber, dc_pvr_gl_variants):
      * the same picture to the bit, in both depth modes and without anti-aliasing (punch-through then cuts

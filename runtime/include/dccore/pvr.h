@@ -133,7 +133,11 @@ int  dc_pvr_gl_capture_to_vram(int scale);
 extern int dc_pvr_gl_tsort2;
 /* translucent polygons (auto-sorted): their fully opaque fragments drawn first with depth, the rest sorted
  * after (default 0). Daytona USA 2001's car decals over the coplanar layers of the paint need it. Flat polygons (2D
- * screens) keep their order */
+ * screens) keep their order.
+ * 2: the same, but a polygon whose alpha comes from its texture only takes part when that texture is a
+ * cut-out (opaque shapes with clear around them: railings, fences, figures on cards); one whose texture
+ * fades (smoke, a wake, tinted glass) stays whole in the sorted pass. For a game that draws solid scenery
+ * in the translucent list (Tennis 2K2's cruise ship) */
 extern int dc_pvr_gl_topaque;
 extern int dc_pvr_gl_split_panel_x;   /* widescreen: split-screen views clipped to [0, x) beside a side panel become full width (0 = off) */
 extern int dc_pvr_gl_hud_sprites;       /* widescreen: only sprite polygons are HUD (Daytona USA 2001: its HUD is all sprites, while

@@ -37,8 +37,10 @@ void pvr_get_frame(pvr_frame *f);
 void pvr_snap_take(pvr_frame *f, const uint32_t **tex, int *ntex);
 void pvr_snap_lists(pvr_frame *f);
 /* decoded texture (0xAARRGGBB texels), cached until its VRAM pages or the palette change;
- * id changes whenever the pixels do */
-typedef struct { int w, h; const uint32_t *px; uint64_t id; } pvr_texinfo;
+ * id changes whenever the pixels do. soft: its alpha is a gradient (of the texels that are not clear,
+ * more lie between clear and opaque than are opaque: smoke, a wake, tinted glass), not a cut-out
+ * (a railing, a figure on a card, whose only in-between texels are its edges) */
+typedef struct { int w, h; const uint32_t *px; uint64_t id; int soft; } pvr_texinfo;
 void pvr_get_texture(uint32_t tcw, uint32_t tsp, pvr_texinfo *t);
 float pvr_fog_alpha(float invw);       /* FOG_TABLE lookup for a 1/w value */
 extern unsigned long pvr_sink_vertices; /* vertices that came through the TA's sink, not straight from the fast code (sh4.h dc_fpref) */
